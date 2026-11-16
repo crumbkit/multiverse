@@ -11,7 +11,7 @@ use phase::{
 use crate::manifest::{Manifest, ManifestProblem};
 use crate::name::WorkspaceName;
 use crate::phase_plan::{
-    Built, CallerEnvironment, Inputs, MAIN, PASSED_THROUGH, TASK_APP, TaskEntry, build,
+    Built, CallerEnvironment, Inputs, MAIN, PASSED_THROUGH, ProxyUrls, TASK_APP, TaskEntry, build,
     build_with_task, roots,
 };
 use crate::record::{Checkout, Workspace};
@@ -67,6 +67,7 @@ fn plan_of(manifest: &Manifest, caller: &CallerEnvironment) -> Built {
             "phase".to_owned(),
             "provision".to_owned(),
         ]),
+        urls: ProxyUrls::default(),
     })
     .unwrap()
 }
@@ -479,6 +480,7 @@ fn a_merged_manifest_maps_onto_apps_and_ports_whose_names_do_not_clash() {
         grace: Duration::from_secs(5),
         caller: &caller,
         provisioner: None,
+        urls: crate::phase_plan::ProxyUrls::default(),
     })
     .unwrap();
     let names: BTreeSet<String> = built
@@ -542,6 +544,7 @@ fn a_process_whose_directory_is_outside_every_root_is_unrunnable() {
         grace: Duration::from_secs(5),
         caller: &caller,
         provisioner: None,
+        urls: crate::phase_plan::ProxyUrls::default(),
     }) else {
         panic!("a directory outside every root built a plan");
     };
@@ -578,6 +581,7 @@ fn placed_at(cwd: &str) -> Result<(Source, Option<PathBuf>), crate::phase_plan::
         grace: Duration::from_secs(5),
         caller: &caller,
         provisioner: None,
+        urls: crate::phase_plan::ProxyUrls::default(),
     })?;
     let plan = built.plan.app(&app("api")).unwrap();
     Ok((plan.source.clone(), plan.processes[0].cwd.clone()))
@@ -645,6 +649,7 @@ fn a_process_with_permissions_gives_its_app_its_writes_listen_ports_and_connecti
         grace: Duration::from_secs(5),
         caller: &caller,
         provisioner: None,
+        urls: crate::phase_plan::ProxyUrls::default(),
     })
     .unwrap();
     let server = built.plan.app(&app("server")).unwrap();
@@ -678,6 +683,7 @@ fn the_plan_of_an_existing_manifest_and_so_its_digest_are_unchanged() {
         grace: Duration::from_secs(5),
         caller: &caller,
         provisioner: None,
+        urls: crate::phase_plan::ProxyUrls::default(),
     })
     .unwrap();
 
@@ -712,6 +718,7 @@ fn the_requested_permissions_of_host_units_need_no_ports_and_match_the_plan() {
             grace: Duration::from_secs(5),
             caller: &caller,
             provisioner: None,
+            urls: crate::phase_plan::ProxyUrls::default(),
         },
         &units,
     )
@@ -784,6 +791,7 @@ fn a_merged_manifest_gives_each_checkouts_permissions_its_prefixed_port_and_unit
         grace: Duration::from_secs(5),
         caller: &caller,
         provisioner: None,
+        urls: crate::phase_plan::ProxyUrls::default(),
     })
     .unwrap();
     for prefix in ["api", "web"] {
@@ -842,6 +850,7 @@ fn unrunnable_write(write: &str) -> crate::phase_plan::Unrunnable {
         grace: Duration::from_secs(5),
         caller: &caller,
         provisioner: None,
+        urls: crate::phase_plan::ProxyUrls::default(),
     }) else {
         panic!("the write path {write} built a plan");
     };
@@ -908,6 +917,7 @@ fn task_plan_with(dir: &Path, own_ports: &BTreeMap<String, String>) -> Built {
             grace: Duration::from_secs(5),
             caller: &caller,
             provisioner: None,
+            urls: crate::phase_plan::ProxyUrls::default(),
         },
         &TaskEntry {
             root: Path::new("/work/triage/app"),
@@ -964,4 +974,218 @@ fn a_task_runs_in_its_dir_and_names_each_port_as_a_variable() {
     assert!(task.processes[0].env.contains("MXV_PORT_WEB_UI"));
     assert!(task.processes[0].env.contains("MXV_PORT_API"));
     assert!(task.processes[0].optional_env.contains("LANG"));
+}
+
+const ROUTED: &str = r#"
+ports = ["web-ui", "api", "db"]
+routes = ["web-ui", "api"]
+
+[processes.web]
+argv = ["pnpm", "dev"]
+ports = { PORT = "web-ui" }
+listen = "web-ui"
+
+[processes.api]
+argv = ["api"]
+ports = { PORT = "api" }
+listen = "api"
+
+[processes.worker]
+argv = ["worker"]
+
+[containers.db]
+image = "postgres:17.2"
+ports = { 5432 = "db" }
+"#;
+
+fn https(port: u16) -> std::net::SocketAddr {
+    std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))
+}
+
+/// Returns the proxy's names for the workspace `triage` of `ROUTED`, served
+/// beside the workspaces `others`.
+fn urls_of(workspace: &str, port: u16, others: &[&str]) -> ProxyUrls {
+    use crate::proxy::{Declared, derive};
+    let declare = |name: &str| {
+        Declared::new(
+            WorkspaceName::try_from(name.to_owned()).unwrap(),
+            vec!["web-ui".to_owned(), "api".to_owned()],
+            BTreeMap::from([("web-ui".to_owned(), 41_001), ("api".to_owned(), 41_000)]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        )
+    };
+    let mut declared = vec![declare(workspace)];
+    declared.extend(others.iter().map(|name| declare(name)));
+    ProxyUrls::of(
+        &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
+        &derive(declared).served,
+        https(port),
+    )
+}
+
+fn routed_plan(urls: ProxyUrls, text: &str) -> Built {
+    let manifest = manifest(text);
+    let ports = BTreeMap::from([
+        ("api".to_owned(), 41_000),
+        ("web-ui".to_owned(), 41_001),
+        ("db".to_owned(), 41_002),
+    ]);
+    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    build(&Inputs {
+        manifest: &manifest,
+        workspace: &workspace,
+        id: &id,
+        checkout: Path::new("/work/triage/app"),
+        roots: Vec::new(),
+        ports: &ports,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &CallerEnvironment::default(),
+        provisioner: None,
+        urls,
+    })
+    .unwrap()
+}
+
+fn proxied(values: &BTreeMap<String, String>) -> BTreeMap<&str, &str> {
+    values
+        .iter()
+        .filter(|(name, _)| {
+            name.starts_with("MXV_HOST") || name.starts_with("MXV_URL") || *name == "MXV_DOMAIN"
+        })
+        .map(|(name, value)| (name.as_str(), value.as_str()))
+        .collect()
+}
+
+#[test]
+fn a_process_of_a_workspace_with_routes_receives_its_domain_and_every_route_name() {
+    let built = routed_plan(urls_of("triage", 443, &[]), ROUTED);
+    let worker = resolved(&built, "worker");
+    assert_eq!(
+        proxied(&worker),
+        BTreeMap::from([
+            ("MXV_DOMAIN", "triage.mxv.localhost"),
+            ("MXV_HOST_API", "api.triage.mxv.localhost"),
+            ("MXV_URL_API", "https://api.triage.mxv.localhost"),
+            ("MXV_HOST_WEB_UI", "web-ui.triage.mxv.localhost"),
+            ("MXV_URL_WEB_UI", "https://web-ui.triage.mxv.localhost"),
+        ])
+    );
+}
+
+#[test]
+fn a_process_that_listens_on_a_served_route_also_receives_its_own_host_and_url() {
+    let built = routed_plan(urls_of("triage", 443, &[]), ROUTED);
+    let web = resolved(&built, "web");
+    assert_eq!(web["MXV_HOST"], "web-ui.triage.mxv.localhost");
+    assert_eq!(web["MXV_URL"], "https://web-ui.triage.mxv.localhost");
+    let worker = resolved(&built, "worker");
+    assert!(!worker.contains_key("MXV_HOST") && !worker.contains_key("MXV_URL"));
+}
+
+#[test]
+fn the_variables_are_in_the_plan_of_the_process_that_receives_them() {
+    let built = routed_plan(urls_of("triage", 443, &[]), ROUTED);
+    let web = built
+        .plan
+        .apps()
+        .iter()
+        .find(|app| app.name.as_str() == "web")
+        .unwrap();
+    assert!(web.processes[0].env.contains("MXV_URL"));
+    assert!(web.processes[0].env.contains("MXV_DOMAIN"));
+}
+
+#[test]
+fn a_url_carries_the_https_port_when_it_is_not_443() {
+    let built = routed_plan(urls_of("triage", 8443, &[]), ROUTED);
+    let web = resolved(&built, "web");
+    assert_eq!(web["MXV_URL"], "https://web-ui.triage.mxv.localhost:8443");
+    assert_eq!(web["MXV_HOST"], "web-ui.triage.mxv.localhost");
+}
+
+#[test]
+fn a_container_receives_no_proxy_variable() {
+    let built = routed_plan(urls_of("triage", 443, &[]), ROUTED);
+    assert!(proxied(&resolved(&built, "db")).is_empty());
+}
+
+#[test]
+fn a_workspace_without_routes_receives_no_proxy_variable() {
+    let built = routed_plan(ProxyUrls::default(), ROUTED);
+    for unit in ["web", "worker", "db"] {
+        assert!(proxied(&resolved(&built, unit)).is_empty(), "{unit}");
+    }
+}
+
+#[test]
+fn a_workspace_whose_host_label_another_keeps_receives_no_proxy_variable() {
+    assert_eq!(
+        urls_of("my_notes", 443, &["my-notes"]),
+        ProxyUrls::default()
+    );
+    assert_ne!(
+        urls_of("my-notes", 443, &["my_notes"]),
+        ProxyUrls::default()
+    );
+}
+
+#[test]
+fn a_variable_of_the_manifest_with_the_same_name_wins() {
+    let text = ROUTED.replace(
+        "[processes.worker]\nargv = [\"worker\"]\n",
+        "[processes.worker]\nargv = [\"worker\"]\nenv = { MXV_URL_API = \"https://mine.example.com\", MXV_DOMAIN = \"mine.example.com\" }\n",
+    );
+    let built = routed_plan(urls_of("triage", 443, &[]), &text);
+    let worker = resolved(&built, "worker");
+    assert_eq!(worker["MXV_URL_API"], "https://mine.example.com");
+    assert_eq!(worker["MXV_DOMAIN"], "mine.example.com");
+    assert_eq!(worker["MXV_HOST_API"], "api.triage.mxv.localhost");
+}
+
+#[test]
+fn a_task_receives_the_domain_and_each_route_but_no_host_or_url_of_its_own() {
+    let manifest = manifest(ROUTED);
+    let ports = BTreeMap::from([
+        ("api".to_owned(), 41_000),
+        ("web-ui".to_owned(), 41_001),
+        ("db".to_owned(), 41_002),
+    ]);
+    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let own = BTreeMap::new();
+    let built = build_with_task(
+        &Inputs {
+            manifest: &manifest,
+            workspace: &workspace,
+            id: &id,
+            checkout: Path::new("/work/triage/app"),
+            roots: Vec::new(),
+            ports: &ports,
+            workspace_dir: None,
+            grace: Duration::from_secs(5),
+            caller: &CallerEnvironment::default(),
+            provisioner: None,
+            urls: urls_of("triage", 443, &[]),
+        },
+        &TaskEntry {
+            root: Path::new("/work/triage/app"),
+            dir: Path::new("."),
+            argv: vec!["mise".to_owned(), "run".to_owned(), "test".to_owned()],
+            services: Vec::new(),
+            own_ports: &own,
+        },
+    )
+    .unwrap()
+    .built;
+    let task = resolved(&built, TASK_APP);
+    assert_eq!(task["MXV_DOMAIN"], "triage.mxv.localhost");
+    assert_eq!(
+        task["MXV_URL_WEB_UI"],
+        "https://web-ui.triage.mxv.localhost"
+    );
+    assert_eq!(task["MXV_HOST_API"], "api.triage.mxv.localhost");
+    assert!(!task.contains_key("MXV_HOST") && !task.contains_key("MXV_URL"));
 }

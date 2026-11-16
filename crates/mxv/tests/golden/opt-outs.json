@@ -175,6 +175,26 @@
       "budget": null
     },
     {
+      "rule": "examples/run",
+      "applies_to": "mxv proxy install",
+      "reason": "The command needs a Caddy program and asks a person at a terminal, which a test cannot answer; tests/proxy.rs checks its refusals without Caddy and without a terminal.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
+      "rule": "examples/run",
+      "applies_to": "mxv proxy check",
+      "reason": "The command exits with 1 while anything is missing, and the fixture's machine has no Caddy; tests/proxy.rs checks its rows and its exit code.",
+      "costs": [
+        "The examples are not run, so help can show an example that fails.",
+        "The command's output weight counts 0 bytes, so its path weight is too low."
+      ],
+      "budget": null
+    },
+    {
       "rule": "twins/no-twin",
       "applies_to": "mxv show reading-list",
       "reason": "The record that a newer mxv wrote causes the failure, and every word of the command line that names it reads the same record.",
@@ -274,17 +294,22 @@
     {
       "declaration": "children",
       "applies_to": "mxv proxy status",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it."
     },
     {
       "declaration": "children",
       "applies_to": "mxv proxy start",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it."
     },
     {
       "declaration": "children",
       "applies_to": "mxv proxy stop",
-      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name."
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it."
+    },
+    {
+      "declaration": "children",
+      "applies_to": "mxv proxy check",
+      "declares": "The text prints lines under each row for its notes, and help describes them as: one indented line under a row, such as the line to add to /etc/hosts for an extra host name that does not resolve to this machine."
     }
   ]
 }

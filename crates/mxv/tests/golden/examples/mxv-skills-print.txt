@@ -92,5 +92,11 @@ When the manifest lists `routes`, `mxv up` serves each at
 `https://<port>.<workspace>.mxv.localhost`, and `mxv proxy status` lists the
 URLs. Open those names instead of `localhost:<port>`. A warning from `up` that
 carries a `mxv::proxy::` code leaves the units running; report it. Never run
-`mxv proxy trust`: it raises a system password prompt that only the person
-can answer, so tell the person to run it.
+`mxv proxy trust` or `mxv proxy install`: they raise a system password prompt
+that only the person can answer, so tell the person to run `mxv proxy install`.
+`mxv proxy check` only reads, and lists what the proxy still needs. A unit that
+listens on a route can list more names in `hosts`; when one does not resolve to
+this machine, `mxv up` prints the line for the person to add to `/etc/hosts`,
+and you never edit that file. Host processes and tasks receive `MXV_DOMAIN`,
+`MXV_HOST_<PORT>` and `MXV_URL_<PORT>`, and a process that listens on a route
+receives `MXV_HOST` and `MXV_URL`; use them in place of a hard-coded name.

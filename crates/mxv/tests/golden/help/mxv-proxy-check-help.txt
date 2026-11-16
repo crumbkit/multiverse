@@ -1,0 +1,31 @@
+Say what the proxy still needs; it changes nothing
+
+Usage: mxv proxy check [OPTIONS]
+
+Options:
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv proxy check
+          Say whether Caddy, its addresses, the authority and each extra host name are set up
+
+Columns:
+  check   What the row checks.
+  state   `ok`, `missing` for something that `mxv proxy install` or the person sets up, `failed` for something that is wrong, or `unknown` when mxv cannot tell.
+  detail  What mxv found.
+
+Effects: read-only, closed-world.
+Children: one indented line under a row, such as the line to add to /etc/hosts for an extra host name that does not resolve to this machine.

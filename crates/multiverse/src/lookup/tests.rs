@@ -261,6 +261,24 @@ fn two_equal_merged_names_fail_with_a_name_clash_that_names_both_files() {
 }
 
 #[test]
+fn the_same_extra_host_in_two_checkouts_fails_with_a_name_clash_that_names_both_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    let manifest = "ports = [\"http\"]\nroutes = [\"http\"]\n\n[processes.server]\nargv = [\"serve\"]\nports = { PORT = \"http\" }\nlisten = \"http\"\nhosts = [\"local.app.example.com\"]\n";
+    write(workspace.path.join("api/mxv.toml"), manifest);
+    write(workspace.path.join("web/mxv.toml"), manifest);
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(error.path, workspace.path.join("web/mxv.toml"));
+    assert_eq!(
+        error.problem,
+        ManifestProblem::NameClash {
+            name: "local.app.example.com".to_owned(),
+            other: workspace.path.join("api/mxv.toml"),
+        }
+    );
+}
+
+#[test]
 fn a_broken_checkout_manifest_fails_the_workspace_manifest_read() {
     let dir = tempfile::tempdir().unwrap();
     let workspace = several(dir.path(), &["api", "web"]);
