@@ -27,7 +27,18 @@ fn declared(workspace: &str, routes: &[&str], ports: &[(&str, u16)]) -> Declared
             .map(|(port, number)| ((*port).to_owned(), *number))
             .collect(),
         BTreeMap::new(),
+        BTreeMap::new(),
     )
+}
+
+/// Returns `declared` with the extra host names `names` on its route
+/// `route`.
+fn hosted(mut declared: Declared, route: &str, names: &[&str]) -> Declared {
+    declared.hosts.insert(
+        route.to_owned(),
+        names.iter().map(|name| (*name).to_owned()).collect(),
+    );
+    declared
 }
 
 fn hosts(derived: &Derived) -> Vec<&str> {
@@ -332,4 +343,108 @@ fn route_urls_list_only_the_routes_of_the_asked_workspace() {
         ]
     );
     let _: Option<Route> = None;
+}
+
+#[test]
+fn a_route_carries_the_extra_hosts_of_its_unit() {
+    let derived = derive(vec![hosted(
+        declared("contacts", &["web"], &[("web", 21001)]),
+        "web",
+        &["local.app.example.com", "alt.app.example.com"],
+    )]);
+    assert_eq!(
+        derived.served[0].extra,
+        ["local.app.example.com", "alt.app.example.com"]
+    );
+    assert!(derived.shadowed_hosts.is_empty());
+}
+
+#[test]
+fn the_workspace_that_sorts_first_serves_an_extra_host_that_two_list() {
+    let derived = derive(vec![
+        hosted(
+            declared("triage", &["web"], &[("web", 21002)]),
+            "web",
+            &["local.app.example.com"],
+        ),
+        hosted(
+            declared("contacts", &["web"], &[("web", 21001)]),
+            "web",
+            &["local.app.example.com"],
+        ),
+    ]);
+    let contacts = derived
+        .served
+        .iter()
+        .find(|route| route.workspace.as_str() == "contacts")
+        .unwrap();
+    let triage = derived
+        .served
+        .iter()
+        .find(|route| route.workspace.as_str() == "triage")
+        .unwrap();
+    assert_eq!(contacts.extra, ["local.app.example.com"]);
+    assert!(triage.extra.is_empty());
+    assert_eq!(derived.shadowed_hosts.len(), 1);
+    let unserved = &derived.shadowed_hosts[0];
+    assert_eq!(unserved.host, "local.app.example.com");
+    assert_eq!(unserved.workspace.as_str(), "triage");
+    assert_eq!(unserved.route, "web");
+    assert_eq!(unserved.by.as_str(), "contacts");
+}
+
+#[test]
+fn the_extra_hosts_of_a_route_that_a_host_label_shadows_are_not_served() {
+    let derived = derive(vec![
+        hosted(
+            declared("my_notes", &["web"], &[("web", 21001)]),
+            "web",
+            &["first.example.com"],
+        ),
+        hosted(
+            declared("my-notes", &["web"], &[("web", 21003)]),
+            "web",
+            &["second.example.com"],
+        ),
+    ]);
+    assert_eq!(derived.served.len(), 1);
+    assert_eq!(derived.served[0].extra, ["second.example.com"]);
+    assert!(derived.shadowed_hosts.is_empty());
+    assert_eq!(derived.shadowed.len(), 1);
+}
+
+#[test]
+fn the_url_of_an_extra_host_carries_the_https_port_unless_it_is_443() {
+    let derived = derive(vec![hosted(
+        declared("contacts", &["web"], &[("web", 21001)]),
+        "web",
+        &["local.app.example.com"],
+    )]);
+    let route = &derived.served[0];
+    assert_eq!(
+        route.extra_urls(SocketAddr::from((Ipv4Addr::LOCALHOST, 443))),
+        ["https://local.app.example.com"]
+    );
+    assert_eq!(
+        route.extra_urls(SocketAddr::from((Ipv4Addr::LOCALHOST, 8443))),
+        ["https://local.app.example.com:8443"]
+    );
+}
+
+#[test]
+fn the_config_matches_extra_hosts_in_the_route_the_error_page_and_the_tls_subjects() {
+    let derived = derive(vec![hosted(
+        declared("contacts", &["web"], &[("web", 21001)]),
+        "web",
+        &["local.app.example.com"],
+    )]);
+    let rendered = caddy_config::render(&settings(Path::new("/x")), &derived.served);
+    let hosts = serde_json::json!(["web.contacts.mxv.localhost", "local.app.example.com"]);
+    let server = &rendered["apps"]["http"]["servers"]["mxv"];
+    assert_eq!(server["routes"][0]["match"][0]["host"], hosts);
+    assert_eq!(server["errors"]["routes"][0]["match"][0]["host"], hosts);
+    assert_eq!(
+        rendered["apps"]["tls"]["automation"]["policies"][0]["subjects"],
+        hosts
+    );
 }

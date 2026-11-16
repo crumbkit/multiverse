@@ -44,7 +44,7 @@ mod routes;
 mod tests;
 
 use routes::declared;
-pub use routes::{DOMAIN, Declared, Derived, Route, Shadowed, derive};
+pub use routes::{DOMAIN, Declared, Derived, Route, Shadowed, ShadowedHost, derive};
 
 /// The name of the proxy's one workspace in phase, and its id.
 const WORKSPACE: &str = "mxv-proxy";

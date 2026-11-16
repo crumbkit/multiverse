@@ -308,6 +308,9 @@ pub struct Container {
     /// The processes and containers that start, and are ready, before this
     /// one.
     pub depends_on: Vec<String>,
+    /// The extra host names that the proxy serves as more hosts of the
+    /// route whose port the container publishes.
+    pub hosts: Vec<String>,
 }
 
 /// A container port that mxv publishes as a named port.
@@ -361,6 +364,9 @@ pub struct Process {
     /// step. It is not part of phase's plan, so a change to it alone does
     /// not restart a running process.
     pub build: Option<Command>,
+    /// The extra host names that the proxy serves as more hosts of the
+    /// route whose port the process listens on.
+    pub hosts: Vec<String>,
 }
 
 /// A program and its arguments, as separate values that no shell reads.
@@ -821,6 +827,9 @@ struct RawProcess {
     needs: Vec<Spanned<String>>,
     /// The sandbox's permissions.
     permissions: Option<Spanned<RawPermissions>>,
+    /// The extra host names of the route.
+    #[serde(default)]
+    hosts: Vec<Spanned<String>>,
 }
 
 /// The permissions of a process as TOML holds them. A key that is not one
@@ -866,6 +875,9 @@ struct RawContainer {
     /// Permissions, which a container cannot take, so it fails with a
     /// sentence that says so.
     permissions: Option<Spanned<IgnoredAny>>,
+    /// The extra host names of the route.
+    #[serde(default)]
+    hosts: Vec<Spanned<String>>,
 }
 
 /// A readiness check as TOML holds it.
@@ -1502,6 +1514,7 @@ impl Manifest {
         }
         let mut processes = BTreeMap::new();
         let mut listeners: BTreeMap<String, String> = BTreeMap::new();
+        let mut hosted: BTreeSet<String> = BTreeSet::new();
         for (name, raw_process) in &raw.processes {
             let mut process = check_process(
                 &errors,
@@ -1536,11 +1549,37 @@ impl Manifest {
                 }
                 listeners.insert(port.clone(), name.get_ref().clone());
             }
+            process.hosts = check_hosts(
+                &errors,
+                &Hosted {
+                    kind: "process",
+                    unit: name.get_ref(),
+                    ports: process.listen.iter().map(String::as_str).collect(),
+                    routes: &routes,
+                },
+                &raw_process.hosts,
+                &mut hosted,
+            )?;
             processes.insert(name.get_ref().clone(), process);
         }
         let mut containers = BTreeMap::new();
         for (name, raw_container) in &raw.containers {
-            let container = check_container(&errors, name, raw_container, &known, &names)?;
+            let mut container = check_container(&errors, name, raw_container, &known, &names)?;
+            container.hosts = check_hosts(
+                &errors,
+                &Hosted {
+                    kind: "container",
+                    unit: name.get_ref(),
+                    ports: container
+                        .ports
+                        .iter()
+                        .map(|published| published.port.as_str())
+                        .collect(),
+                    routes: &routes,
+                },
+                &raw_container.hosts,
+                &mut hosted,
+            )?;
             for (published, key) in container.ports.iter().zip(raw_container.ports.values()) {
                 if let Some(other) = listeners.get(&published.port) {
                     return Err(errors.invalid(
@@ -1664,6 +1703,7 @@ impl Manifest {
                     }),
                     needs: process.needs.clone(),
                     build: process.build.clone(),
+                    hosts: process.hosts.clone(),
                 };
                 (rename(name), renamed)
             })
@@ -1710,6 +1750,17 @@ impl Manifest {
             .into_iter()
             .find(|(listened, _)| listened == port)
             .map(|(_, unit)| unit)
+    }
+
+    /// Returns the extra host names of the process or container `unit`, or
+    /// none when it lists none or does not exist.
+    #[must_use]
+    pub fn hosts_of(&self, unit: &str) -> &[String] {
+        match self.unit(unit) {
+            Some(Unit::Process(process)) => &process.hosts,
+            Some(Unit::Container(container)) => &container.hosts,
+            None => &[],
+        }
     }
 
     /// Returns each port that a process listens on or a container
@@ -1943,6 +1994,110 @@ fn check_routes(
     Ok(routes)
 }
 
+/// The unit whose `hosts` [`check_hosts`] checks.
+struct Hosted<'a> {
+    /// `process` or `container`, for the messages.
+    kind: &'a str,
+    /// The unit's name.
+    unit: &'a str,
+    /// The ports that the unit listens on or publishes.
+    ports: Vec<&'a str>,
+    /// The manifest's `routes`.
+    routes: &'a [String],
+}
+
+/// The domain below which mxv's own host names live, which no `hosts` entry
+/// may name.
+const OWN_DOMAIN: &str = "mxv.localhost";
+
+/// The most bytes of a host name.
+const MOST_HOST_BYTES: usize = 253;
+
+/// Checks the extra host names `raw` of `unit`: the unit must listen on or
+/// publish exactly one port that `routes` names, each name must be a
+/// lower-case DNS name that is neither an IP address nor `localhost` nor
+/// below `mxv.localhost`, and no name may repeat one that `seen` holds. It
+/// returns the names and adds them to `seen`.
+fn check_hosts(
+    errors: &Errors<'_>,
+    unit: &Hosted<'_>,
+    raw: &[Spanned<String>],
+    seen: &mut BTreeSet<String>,
+) -> Result<Vec<String>, ManifestError> {
+    let Some(first) = raw.first() else {
+        return Ok(Vec::new());
+    };
+    let Hosted {
+        kind,
+        unit: name,
+        ports,
+        routes,
+    } = unit;
+    let routed: Vec<&&str> = ports
+        .iter()
+        .filter(|port| routes.iter().any(|route| route == **port))
+        .collect();
+    if routed.is_empty() {
+        return Err(errors.invalid(
+            &first.span(),
+            format!(
+                "the {kind} `{name}` lists `hosts` but listens on no port that `routes` names, so no route can serve them"
+            ),
+        ));
+    }
+    if routed.len() > 1 {
+        return Err(errors.invalid(
+            &first.span(),
+            format!(
+                "the {kind} `{name}` lists `hosts` but publishes more than one port that `routes` names, so mxv cannot tell which route serves them"
+            ),
+        ));
+    }
+    let mut hosts = Vec::new();
+    for host in raw {
+        let text = host.get_ref();
+        if let Some(reason) = host_problem(text) {
+            return Err(errors.invalid(
+                &host.span(),
+                format!("the host `{text}` of the {kind} `{name}` {reason}"),
+            ));
+        }
+        if !seen.insert(text.clone()) {
+            return Err(errors.invalid(
+                &host.span(),
+                format!("the host `{text}` is listed twice in this manifest"),
+            ));
+        }
+        hosts.push(text.clone());
+    }
+    Ok(hosts)
+}
+
+/// Returns why `host` cannot be an extra host name, or `None` when it can.
+fn host_problem(host: &str) -> Option<String> {
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return Some("is an IP address, and `hosts` takes DNS names".to_owned());
+    }
+    if host == "localhost" || host == OWN_DOMAIN || host.ends_with(&format!(".{OWN_DOMAIN}")) {
+        return Some(format!(
+            "is `localhost` or below `{OWN_DOMAIN}`, which mxv serves itself"
+        ));
+    }
+    let label = |label: &str| {
+        !label.is_empty()
+            && label.len() <= MOST_LABEL_BYTES
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    };
+    if host.len() > MOST_HOST_BYTES || !host.split('.').all(label) {
+        return Some(format!(
+            "is not a lower-case DNS name, which holds labels of 1 to {MOST_LABEL_BYTES} letters, digits and '-' separated by '.' and at most {MOST_HOST_BYTES} bytes in all"
+        ));
+    }
+    None
+}
+
 /// The most bytes of one DNS label, which a route's port name and its
 /// workspace name each become in the route's host name.
 pub(crate) const MOST_LABEL_BYTES: usize = 63;
@@ -2174,6 +2329,7 @@ fn check_process(
         permissions,
         needs: Vec::new(),
         build,
+        hosts: Vec::new(),
     })
 }
 
@@ -2782,5 +2938,6 @@ fn check_container(
         owner,
         ready,
         depends_on,
+        hosts: Vec::new(),
     })
 }
