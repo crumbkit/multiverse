@@ -3,7 +3,7 @@
 //! keeper writes to its standard output. None holds an environment value.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Read, Write};
+use std::io::{BufRead, Read, Write};
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -227,19 +227,28 @@ pub(crate) fn check_resolved(resolved: &BTreeSet<String>) -> Result<(), String> 
     Ok(())
 }
 
-/// Reads a specification of at most [`MOST_SPEC_BYTES`] bytes from
-/// `input`.
+/// The line that the engine writes after the specification, once the run
+/// record names the keeper. The keeper starts no app before it reads it.
+pub(crate) const GO: &str = "go";
+
+/// Reads the specification, which is one line of at most
+/// [`MOST_SPEC_BYTES`] bytes, from `input`, and leaves the lines after it
+/// in `input`.
 ///
 /// # Errors
 ///
 /// Returns why the specification cannot be read, which holds no value of
 /// the environment.
-pub(crate) fn read_spec(input: impl Read) -> Result<KeeperSpec, String> {
+pub(crate) fn read_spec(input: &mut impl BufRead) -> Result<KeeperSpec, String> {
     let mut bytes = Vec::new();
     input
-        .take(MOST_SPEC_BYTES + 1)
-        .read_to_end(&mut bytes)
+        .take(MOST_SPEC_BYTES + 2)
+        .read_until(b'\n', &mut bytes)
         .map_err(|error| format!("the specification cannot be read: {error}"))?;
+    // The newline that ends the line does not count toward the limit.
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MOST_SPEC_BYTES {
         return Err(format!(
             "the specification holds more than {MOST_SPEC_BYTES} bytes"
@@ -255,6 +264,26 @@ pub(crate) fn read_spec(input: impl Read) -> Result<KeeperSpec, String> {
     Ok(spec)
 }
 
+/// The engine closed the keeper's standard input, or wrote something other
+/// than [`GO`], before the keeper was told to start the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct Withheld;
+
+/// Reads the line after the specification, and returns once it is
+/// [`GO`].
+///
+/// # Errors
+///
+/// Returns [`Withheld`] when the input ends, cannot be read, or holds
+/// another line.
+pub(crate) fn read_go(input: &mut impl BufRead) -> Result<(), Withheld> {
+    let mut line = String::new();
+    match input.take(GO.len() as u64 + 2).read_line(&mut line) {
+        Ok(_) if line.trim_end() == GO => Ok(()),
+        _ => Err(Withheld),
+    }
+}
+
 /// The text that starts the handshake line. The engine skips any line
 /// before it, because the test harness that runs keepers in phase's own
 /// tests prints a header first.
@@ -264,7 +293,13 @@ pub(crate) const HANDSHAKE_PREFIX: &str = "phase-keeper/v1 ";
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) enum Handshake {
-    /// The app started.
+    /// The app process exists. The keeper writes this line as soon as it
+    /// has started the app and read its start time, before it queues the
+    /// record of the start, so an engine that gives up on the keeper can
+    /// still name the app. A `Started`, `Unstartable` or `Refused` line
+    /// follows.
+    Spawned(HostProcess),
+    /// The app started and the keeper recorded it.
     Started(StartedApp),
     /// The keeper could not start the app, for this reason.
     Unstartable(String),

@@ -279,9 +279,12 @@ workspace's stable id, the app, the process and the state directory, and
 hold no value. The keeper's environment and the app's hold only `PATH`,
 `HOME` and the process's resolved environment. The keeper's
 standard input carries a `phase/keeper/v1` specification with the command,
-directory, log, restart policy and stop handling. The keeper writes one
-handshake line to standard output once the process has started or failed
-to start, and the engine waits for that line until its deadline. When the
+directory, log, restart policy and stop handling, as one line, and then the
+line `go`. The engine writes `go` only after it has recorded the keeper in
+the run record, and a keeper whose input ends before `go` starts no app and
+exits `Withheld`. The keeper writes a `Spawned` line to standard output as
+soon as the app exists, and one handshake line once the process has started
+or failed to start. The engine waits for the handshake until its deadline. When the
 process's first start ends, the keeper writes one more line, the end line,
 with the process's exit status or the signal that ended it. The keeper
 records each start, restart count and stop of the process in the
@@ -301,10 +304,13 @@ overwrites a process that another operation recorded meanwhile.
 
 When the keeper's handshake misses the deadline or cannot be read, the
 engine sends the keeper `TERM`, so it stops any process it started, waits
-the process's grace and kill wait, and then kills the keeper's group. When
-the keeper's start of the process takes longer than that wait, the engine
-kills the keeper before it can stop the process, which then runs with no
-keeper and no entry in the run record. A stop request during a backoff or
+the process's grace and kill wait, and then kills the keeper's group. The
+engine then stops by identity the app that the keeper's `Spawned` line
+named, including a line written while the engine waited, and records it
+first, so that `down` finds it when the stop does not finish. When the
+keeper dies between forking the app and writing the `Spawned` line, the app
+runs with no keeper and no entry in the run record; LIFECYCLE.md names that
+window. A stop request during a backoff or
 while the keeper resolves an environment ends the keeper without a
 restart.
 

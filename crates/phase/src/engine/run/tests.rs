@@ -19,7 +19,7 @@ use crate::engine::containers::{
     ContainerStopped, ContainersStarted, Rewritten, StartedContainer,
 };
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
-use crate::engine::keeper::{AppEnd, KeeperCommand, Kept, Launch};
+use crate::engine::keeper::{AppEnd, BeforeGo, Failed, KeeperCommand, Kept, Launch};
 use crate::engine::probe::LogLines;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
@@ -94,6 +94,9 @@ struct HostState {
     unstartable: BTreeSet<String>,
     /// The `app/process` whose stop finds a process phase may not read.
     not_ours: BTreeSet<String>,
+    /// The `app/process` whose keeper reports its app and then misses the
+    /// handshake deadline, so it is gone and its app runs on.
+    abandons: BTreeSet<String>,
     /// The `app/process` whose app survives `KILL`.
     unstoppable: BTreeSet<String>,
     /// The `app/process` whose stop finds a group whose leader has gone
@@ -107,6 +110,8 @@ struct HostState {
     listeners: BTreeMap<u16, Listener>,
     /// The run record as it was at each launch.
     records_at_launch: Vec<Option<RunRecord>>,
+    /// The run record as it was when the engine told each keeper to go.
+    records_at_go: Vec<Option<RunRecord>>,
     /// The state directory, whose record a launch reads.
     state_dir: Option<PathBuf>,
     /// The `app/process` whose launch cancels the up, and its cancel.
@@ -181,7 +186,7 @@ impl FakeHost {
 }
 
 impl HostRunner for FakeHost {
-    fn launch(&self, launch: &Launch<'_>) -> Result<Kept, PhaseError> {
+    fn launch(&self, launch: &Launch<'_>, before_go: BeforeGo<'_>) -> Result<Kept, Failed> {
         let mut state = self.state.borrow_mut();
         let name = format!("{}/{}", launch.args.app(), launch.args.process());
         if let Some(dir) = &state.state_dir {
@@ -203,7 +208,8 @@ impl HostRunner for FakeHost {
                 app: launch.args.app().clone(),
                 process: launch.args.process().clone(),
                 reason: "the program does not exist".to_owned(),
-            });
+            }
+            .into());
         }
         let keeper = state.last_pid.max(1000) + 1;
         let app = keeper + 1;
@@ -226,6 +232,29 @@ impl HostRunner for FakeHost {
             group: pid,
             boot_id: None,
         };
+        // The engine records the keeper before the keeper starts its app.
+        if let Err(error) = before_go(&host(keeper)) {
+            state.alive.remove(&keeper);
+            state.alive.remove(&app);
+            return Err(Failed::Recording(Box::new(error)));
+        }
+        if let Some(dir) = &state.state_dir {
+            let record = RunStore::new(dir).read(launch.args.workspace()).unwrap();
+            state.records_at_go.push(record);
+        }
+        // A keeper that reported its app and then missed the deadline is
+        // gone, and its app runs on.
+        if state.abandons.contains(&name) {
+            state.alive.remove(&keeper);
+            return Err(Failed::Keeper {
+                error: Box::new(PhaseError::KeeperUnstartable {
+                    app: launch.args.app().clone(),
+                    process: launch.args.process().clone(),
+                    reason: "the keeper gave no handshake before the deadline".to_owned(),
+                }),
+                abandoned: Some(host(app)),
+            });
+        }
         let kept = Kept::detached(host(keeper), host(app));
         Ok(match state.exits.get(&name) {
             Some(exit) => kept.ending(AppEnd::known(*exit)),
@@ -2071,7 +2100,7 @@ fn up_writes_a_stopped_entry_back_to_planned_with_no_process_before_it_launches_
 }
 
 #[test]
-fn a_record_that_cannot_be_written_after_a_launch_fails_up_and_stops_every_process_it_started() {
+fn a_record_that_cannot_name_the_keeper_fails_up_before_any_app_starts_and_stops_what_it_started() {
     let world = World::new();
     world.host.breaks_record_at_launch("api/server");
     let plan = plan(vec![
@@ -2083,8 +2112,106 @@ fn a_record_that_cannot_be_written_after_a_launch_fails_up_and_stops_every_proce
 
     set_mode(&world.state.path().join("runs"), 0o700);
     assert_eq!(error.unwrap_err().code(), "phase::state::unwritable");
-    assert_eq!(world.host.stops(), vec!["api/server", "db/server"]);
+    assert_eq!(world.host.stops(), vec!["db/server"]);
     assert_eq!(world.host.running(), 0);
+}
+
+#[test]
+fn up_records_the_keeper_as_running_before_it_tells_the_keeper_to_start_the_app() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    let at_go = world.host.state.borrow().records_at_go[0].clone().unwrap();
+    let (keeper, process) = at_go.host_pair(&name("api"), &name("server"));
+    let (keeper, process) = (keeper.unwrap(), process.unwrap());
+    assert_eq!(keeper.state, EntryState::Running);
+    assert_eq!(keeper.host.as_ref().unwrap().pid, 1001);
+    assert_eq!(process.state, EntryState::Planned);
+    assert_eq!(process.host, None);
+}
+
+#[test]
+fn up_starts_no_second_keeper_when_the_record_names_a_live_keeper_and_no_app_yet() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    // The state that an `up` that died after the keeper's entry leaves
+    // while the keeper's writer waits for the lock.
+    world.edit(|record| {
+        let entry = &mut record.processes[0];
+        entry.host = None;
+        entry.state = EntryState::Planned;
+    });
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
+    assert_eq!(world.host.launches(), vec!["api/server"]);
+}
+
+#[test]
+fn down_stops_the_keeper_and_the_app_of_a_start_that_died_after_go() {
+    let world = World::new();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    // The keeper's writer won the lock and wrote the app's entry.
+    world.edit(|record| {
+        record.processes[0].state = EntryState::Running;
+    });
+
+    world.down(&Selection::All);
+
+    assert_eq!(world.host.running(), 0);
+    assert_eq!(world.record(), None);
+}
+
+#[test]
+fn up_stops_the_app_of_a_keeper_that_reported_it_and_missed_the_deadline() {
+    let world = World::new();
+    world
+        .host
+        .state
+        .borrow_mut()
+        .abandons
+        .insert("api/server".to_owned());
+    let plan = plan(vec![host_app("api", None, &[])]);
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert!(matches!(
+        outcome(&report, "api"),
+        AppOutcome::Errored { code, .. } if code == "phase::keeper::unstartable"
+    ));
+    assert_eq!(world.host.stops(), vec!["api/server"]);
+    assert_eq!(world.host.running(), 0);
+    // Every entry is stopped, so the record is gone.
+    assert_eq!(world.record(), None);
+}
+
+#[test]
+fn up_reports_the_start_uncertain_when_it_cannot_stop_the_app_of_an_abandoned_keeper() {
+    let world = World::new();
+    {
+        let mut state = world.host.state.borrow_mut();
+        state.abandons.insert("api/server".to_owned());
+        state.unstoppable.insert("api/server".to_owned());
+    }
+    let plan = plan(vec![host_app("api", None, &[])]);
+
+    let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
+
+    assert_eq!(outcome(&report, "api"), &AppOutcome::StartUncertain);
+    assert_eq!(world.host.running(), 1);
+    let record = world.record().unwrap();
+    let (_, process) = record.host_pair(&name("api"), &name("server"));
+    let process = process.unwrap();
+    assert_eq!(process.state, EntryState::Stopping);
+    assert!(
+        process.host.is_some(),
+        "the record names the app that the engine could not stop"
+    );
 }
 
 #[test]

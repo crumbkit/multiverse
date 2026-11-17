@@ -8,7 +8,7 @@
 //! after its leader has ended gives no event, so the keeper polls it.
 
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::os::unix::process::CommandExt as _;
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
@@ -26,7 +26,7 @@ use crate::engine::keeper::logfile::{Diagnostics, diagnostic_log, open_append};
 use crate::engine::keeper::recorder::{Hurry, RECORD_LOCK_WAIT, Recorder};
 use crate::engine::keeper::sandbox::{app_command, sandbox_environment};
 use crate::engine::keeper::spec::{
-    Handshake, KeeperSpec, StartedApp, read_spec, write_end, write_handshake,
+    Handshake, KeeperSpec, StartedApp, read_go, read_spec, write_end, write_handshake,
 };
 use crate::engine::keeper::{KeeperArgs, KeeperEnvironment, KeeperExit, RESOLVE_WAIT};
 use crate::engine::restart::{
@@ -99,7 +99,8 @@ pub(crate) fn keep(
     input: impl Read,
     output: impl Write,
 ) -> KeeperExit {
-    let spec = match read_spec(input) {
+    let mut input = BufReader::new(input);
+    let spec = match read_spec(&mut input) {
         Ok(spec) => spec,
         Err(reason) => {
             write_handshake(output, &Handshake::Refused(reason));
@@ -115,6 +116,14 @@ pub(crate) fn keep(
         args.process(),
         keeper_group()
     ));
+    // The engine writes `go` once the run record names this keeper, so
+    // that no app exists that the record does not lead back to. A keeper
+    // whose engine died first sees the end of its input and starts nothing.
+    if read_go(&mut input).is_err() {
+        diagnostics.note("the engine did not say go, so the keeper starts no app");
+        return KeeperExit::Withheld;
+    }
+    drop(input);
     let exit = start_and_supervise(args, &environment, source, &spec, &diagnostics, output);
     diagnostics.note(&format!("keeper exits with {exit:?} ({})", exit.code()));
     exit
@@ -307,6 +316,9 @@ impl Supervisor<'_> {
             self.diagnostics
                 .note(&format!("the app started as process {}", app.host.pid));
             if let Some(mut output) = output.take() {
+                // The engine can name the app from this line even when it
+                // stops waiting for the handshake that follows.
+                write_handshake(&mut output, &Handshake::Spawned(app.host.clone()));
                 self.recorder.started(app.host.clone());
                 let started = StartedApp {
                     keeper_group: keeper_group(),

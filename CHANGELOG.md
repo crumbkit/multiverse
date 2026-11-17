@@ -403,6 +403,17 @@ workspace may need to act on.
 
 ### Fixed
 
+- An `mxv` command that is killed while it starts a process no longer leaves
+  a keeper and an app that the run record does not name. The engine records
+  the keeper before it tells the keeper to start the app, and a keeper that
+  never hears that the engine recorded it starts nothing. An `up` whose keeper
+  misses its handshake deadline now stops the app that the keeper had started,
+  and reports `AppOutcome::StartUncertain` when it cannot stop it, with the
+  app named in the record so that `down` finds it. While an old and a new
+  `mxv` binary run side by side during an upgrade, one start can fail,
+  because a keeper and an engine of different versions do not speak the same
+  protocol; the next `up` starts the process.
+
 - A command that waited for a workspace's lock while another command
   archived the workspace no longer writes the workspace's record back.
   `mxv up`, `down`, `restart`, `ports reset`, `pin`, `unpin`, `exec` and
