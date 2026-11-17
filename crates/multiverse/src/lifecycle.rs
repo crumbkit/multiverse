@@ -12,8 +12,7 @@ use crate::error::Error;
 use crate::health::{Rebuilt, Repaired, rebuilt};
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
-use crate::runs::{DownOutcome, DownResult, Needed, Runs, Unstoppable, Volumes};
-use crate::store::Lock;
+use crate::runs::{DownOutcome, DownResult, Needed, Runs, Unstoppable, Volumes, WorkspaceLock};
 use crate::workspaces::{Mode, Removal, RemovalOutcome, RemovalPlan, Workspaces};
 
 #[cfg(test)]
@@ -369,7 +368,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     }
 
     /// Deletes the archive that `confirmed` is, for a caller that holds the
-    /// lock of its name as `_lock`, because a second lock of one name in one
+    /// lock of its name as `lock`, because a second lock of one name in one
     /// process waits and fails with [`Error::Busy`]. It reads the archive of
     /// the name again, and deletes nothing unless that is `confirmed`'s
     /// archive, with the same id, and finished.
@@ -383,14 +382,16 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     ///
     /// # Errors
     ///
-    /// Returns the errors of the archive's record, of docker, and of
-    /// [`Workspaces::remove_archive`]. The steps before a failure stay done.
+    /// Returns [`Error::WrongLock`] when `lock` is not the lock of
+    /// `confirmed`'s name, the errors of the archive's record, of docker,
+    /// and of [`Workspaces::remove_archive`]. The steps before a failure stay done.
     pub fn delete_archive_held(
         &self,
-        _lock: &Lock,
+        lock: &WorkspaceLock,
         confirmed: &Archive,
         asked: &VolumesAsked,
     ) -> Result<ArchiveDeleted, Error> {
+        lock.check(&confirmed.name)?;
         let Some(archive) = self.archives.read(&confirmed.name)? else {
             return Ok(ArchiveDeleted::Unchanged);
         };
@@ -601,7 +602,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     }
 
     /// Finishes `archive`, whose workspace is gone, for a caller that holds
-    /// the lock of its name as `_lock`, because a second lock of one name in
+    /// the lock of its name as `lock`, because a second lock of one name in
     /// one process waits and fails with [`Error::Busy`]. It deletes the run
     /// files and, when `asked` names docker volumes, the volumes of the
     /// archive, and then marks `archive` finished. It returns `None` and
@@ -610,14 +611,17 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     ///
     /// # Errors
     ///
-    /// Returns the errors of the run files, docker and the archive's record.
-    /// The steps before a failure stay done, and the archive stays retired.
+    /// Returns [`Error::WrongLock`] when `lock` is not the lock of
+    /// `archive`'s name, and the errors of the run files, docker and the
+    /// archive's record. The steps before a failure stay done, and the
+    /// archive stays retired.
     pub(crate) fn finish_held(
         &self,
-        _lock: &Lock,
+        lock: &WorkspaceLock,
         archive: &mut Archive,
         asked: &VolumesAsked,
     ) -> Result<Option<Finish>, Error> {
+        lock.check(&archive.name)?;
         let volumes = match archive
             .workspace_id
             .as_ref()

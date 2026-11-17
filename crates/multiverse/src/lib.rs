@@ -101,7 +101,7 @@ pub use crate::runs::{
     ExecTarget, ExitReason, Footprint, Granting, Kind, LogOutput, MiseListing, MiseTaskName,
     Needed, PermissionAsk, Place, PreparedTask, ProcessNote, ProcessState, ProcessStatus,
     RenamedVolume, Runs, STOP_GRACE, StillNeeded, TaskEnd, TaskServices, TaskStart, Toucher,
-    Unstoppable, UpOutcome, Volumes, Waited,
+    Unstoppable, UpOutcome, Volumes, Waited, WorkspaceLock,
 };
 pub use crate::service::{
     ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,
@@ -109,7 +109,7 @@ pub use crate::service::{
     PROVISION_APP, Placeholder, Queue, REGION, RESERVED_PREFIX, Service, ServiceKind, ServiceValue,
     Table,
 };
-pub use crate::store::{Created, LOCK_WAIT, Lock, MOST_RECORD_BYTES, Records, Store};
+pub use crate::store::{Created, LOCK_WAIT, MOST_RECORD_BYTES, Records, Store};
 pub use crate::template::{
     Found as FoundTemplate, TEMPLATE_TABLE, Template, find as find_template,
 };

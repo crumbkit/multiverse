@@ -220,3 +220,19 @@ fn a_write_refused_for_a_mismatched_checkout_reads_as_a_defect_of_mxv_to_report(
     assert!(hint.contains("this is a defect of mxv"), "{hint}");
     assert!(hint.contains("report it"), "{hint}");
 }
+
+#[test]
+fn a_lock_of_another_workspace_reads_as_a_defect_of_mxv_to_report() {
+    let failure = MxvFailure::from(multiverse::Error::WrongLock {
+        locked: "other".parse().unwrap(),
+        acted_on: "triage".parse().unwrap(),
+    });
+
+    let code = failure.code();
+    assert_eq!(code, super::WORKSPACE_WRONG_LOCK);
+    assert_eq!((code.area(), code.reason()), ("workspace", "wrong_lock"));
+    let Recovery::Hint(hint) = failure.recovery() else {
+        panic!("{failure:?} offers no hint");
+    };
+    assert!(hint.contains("this is a defect of mxv"), "{hint}");
+}

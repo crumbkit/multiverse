@@ -61,7 +61,8 @@ use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, Unrunnable};
 use crate::record::Workspace;
 use crate::runs::Runs;
-use crate::store::{Lock, Store};
+use crate::runs::WorkspaceLock;
+use crate::store::Store;
 
 #[cfg(test)]
 mod tests;
@@ -124,7 +125,7 @@ pub trait Place {
 pub struct BuildsPassed<'lock> {
     /// The workspace's lock, which the proof borrows so that the proof
     /// cannot outlive it.
-    lock: PhantomData<&'lock Lock>,
+    lock: PhantomData<&'lock WorkspaceLock>,
 }
 
 /// How [`Runs::build`] ended.
@@ -438,19 +439,21 @@ impl Runs {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Store::update`] and [`Runs::status`],
+    /// Returns [`Error::WrongLock`] when `lock` is not the lock of
+    /// `workspace`, the errors of [`Store::update`] and [`Runs::status`],
     /// [`Error::NoFreePort`] when no port can be allocated, and
     /// [`Error::Phase`] for a failure of phase other than a build that
     /// cannot start.
     pub fn build<'lock>(
         &self,
-        _lock: &'lock Lock,
+        lock: &'lock WorkspaceLock,
         store: &Store,
         workspace: &mut Workspace,
         manifest: &Manifest,
         names: &[String],
         admission: &mut dyn Admission,
     ) -> Result<BuildEnd<'lock>, Error> {
+        lock.check(&workspace.name)?;
         let order = match manifest.start_order(names) {
             Ok(order) => order,
             Err(unknown) => return Ok(BuildEnd::UnknownProcess(unknown)),

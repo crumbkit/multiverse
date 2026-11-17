@@ -20,7 +20,8 @@ use phase::{
 
 use super::{
     DownOutcome, DownResult, ExitReason, Footprint, Kind, Needed, ProcessNote, ProcessState,
-    ProcessStatus, RenamedVolume, Runs, StillNeeded, Unstoppable, UpOutcome, Waited, received,
+    ProcessStatus, RenamedVolume, Runs, StillNeeded, Unstoppable, UpOutcome, Waited, WorkspaceLock,
+    received,
 };
 use crate::archive::MintHeld;
 use crate::error::Error;
@@ -29,7 +30,7 @@ use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, Inputs, MAIN, Unrunnable};
 use crate::record::Workspace;
 use crate::service::PROVISION_APP;
-use crate::store::{self, Lock, Store};
+use crate::store::{self, Store};
 
 /// How long `up` gives phase to build each selected checkout, and how long
 /// [`Runs::build`] lets a command's `build` steps run. mxv's apps run from
@@ -1144,17 +1145,19 @@ impl Runs {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Runs::status`], [`Error::Unwritable`] when a
-    /// run file cannot be deleted, the docker errors, and [`Error::Phase`]
+    /// Returns [`Error::WrongLock`] when `lock` is not the lock of
+    /// `workspace`, the errors of [`Runs::status`], [`Error::Unwritable`]
+    /// when a run file cannot be deleted, the docker errors, and [`Error::Phase`]
     /// for another failure of phase.
     pub fn down(
         &self,
-        _lock: &Lock,
+        lock: &WorkspaceLock,
         workspace: &Workspace,
         manifest: Option<&Manifest>,
         names: &[String],
         needed: Needed,
     ) -> Result<DownOutcome, Error> {
+        lock.check(&workspace.name)?;
         let rows = self.phase_rows(workspace, manifest)?;
         let known = Self::phase_known(manifest, &rows);
         if let Some(unknown) = names.iter().find(|name| !known.contains(name)) {

@@ -887,7 +887,7 @@ pub const LOCK_WAIT: Duration = Duration::from_secs(5);
 /// A held lock, which the operating system releases when it drops.
 #[derive(Debug)]
 #[must_use = "the lock is released when it drops"]
-pub struct Lock {
+pub(crate) struct Lock {
     /// The locked file, which holds the lock while it is open.
     _file: File,
 }

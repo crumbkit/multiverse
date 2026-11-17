@@ -55,9 +55,9 @@ use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, BuiltTask, TaskEntry, Unrunnable};
 use crate::record::Workspace;
-use crate::runs::{Admission, Asked, Runs};
+use crate::runs::{Admission, Asked, Runs, WorkspaceLock};
 use crate::service::Service;
-use crate::store::{Lock, Store};
+use crate::store::Store;
 
 /// The program that lists and runs a checkout's mise tasks.
 const MISE: &str = "mise";
@@ -412,17 +412,19 @@ impl Runs {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Store::update`] and [`Runs::status`], and
-    /// [`Error::NoFreePort`] when no port can be allocated. A plan that
+    /// Returns [`Error::WrongLock`] when `lock` is not the lock of
+    /// `workspace`, the errors of [`Store::update`] and [`Runs::status`],
+    /// and [`Error::NoFreePort`] when no port can be allocated. A plan that
     /// phase cannot run returns `Ok(Err(_))`.
     pub fn prepare_task(
         &self,
-        _lock: &Lock,
+        lock: &WorkspaceLock,
         store: &Store,
         workspace: &mut Workspace,
         manifest: &Manifest,
         task: TaskStart,
     ) -> Result<Result<PreparedTask<'_>, Unrunnable>, Error> {
+        lock.check(&workspace.name)?;
         // `prepared` also builds the plan of the units alone. That plan is
         // not used, and its failure would be the same one as below.
         let (id, _) = self.prepared(store, workspace, manifest)?;
