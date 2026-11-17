@@ -128,7 +128,7 @@ pub const EXEC_CODES: &[Code<'static>] = exec::ExecFailure::CODES;
 /// the exit code. `crumbkit::finish` prints the result or the failure in
 /// the format that the output flags choose, and returns the exit code.
 #[doc(hidden)]
-#[must_use]
+#[must_use = "the exit code is the result of the command"]
 pub fn run<I, T>(args: I, environment: &Environment) -> ExitCode
 where
     I: IntoIterator<Item = T>,
@@ -338,7 +338,7 @@ pub fn is_provisioner(args: &[OsString]) -> bool {
 /// writes the failure to standard error and returns 1 otherwise. It reads
 /// no environment variable.
 #[doc(hidden)]
-#[must_use]
+#[must_use = "the exit code is the result of the provisioning"]
 pub fn provision(args: &[OsString]) -> ExitCode {
     use std::io::Write as _;
     #[expect(
@@ -408,7 +408,7 @@ impl multiverse::phase::EnvironmentSource for NoFreshEnvironment {
 /// `--sandboxed`, it runs phase's launcher instead, which applies a
 /// sandboxed app's sandbox and replaces this process with the app.
 #[doc(hidden)]
-#[must_use]
+#[must_use = "the exit code is the result of the keeper"]
 pub fn keep(args: Vec<OsString>, vars: Vec<(OsString, OsString)>) -> ExitCode {
     use multiverse::phase::keeper::{KeeperArgs, KeeperEnvironment, KeeperExit, launch, run};
     let rest: Vec<OsString> = args.into_iter().skip(1 + KEEPER_WORDS.len()).collect();
