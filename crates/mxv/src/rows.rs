@@ -63,8 +63,8 @@ pub(crate) struct WorkspaceRow {
     /// finished, one that stopped and whose pins are gone, an older archive
     /// beside a newer workspace of the same name, which only the archive
     /// listing shows, a restore that stopped before it deleted the archive,
-    /// a workspace whose checkout directories are all gone, or a size that
-    /// mxv cannot measure. A row of a record that mxv cannot read
+    /// a workspace whose checkout directories are all gone, a workspace that
+    /// mxv new did not finish, or a size that mxv cannot measure. A row of a record that mxv cannot read
     /// names the record in `name`, a workspace record without `.json` and
     /// an archive record by its directory, and leaves the other fields
     /// empty.

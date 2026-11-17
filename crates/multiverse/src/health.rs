@@ -171,8 +171,10 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
         }
     }
     // A workspace whose archive has not finished is the archive's to
-    // repair, even when the archive already deleted every checkout.
-    let gone: Vec<Broken> = records
+    // repair, even when the archive already deleted every checkout. Each
+    // other workspace is named when `mxv new` did not finish it or every
+    // checkout is gone.
+    let own: Vec<Broken> = records
         .workspaces
         .iter()
         .filter(|workspace| {
@@ -195,7 +197,7 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
             })
         })
         .collect();
-    named.extend(gone);
+    named.extend(own);
     named.sort_by(|left, right| left.name.cmp(&right.name));
     health.workspaces.extend(named);
     health

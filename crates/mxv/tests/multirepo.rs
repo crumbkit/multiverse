@@ -793,6 +793,9 @@ fn new_of_a_name_that_mxv_new_did_not_finish_fails_with_creating_and_list_names_
     let (exit, document) = setup.json(&["new", "triage", "--repo", "api"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::workspace::creating", "{document}");
+    let (exit, document) = setup.json(&["new", "triage", "--repo", "api", "--dry-run"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::creating", "{document}");
     let (exit, listed) = setup.json(&["list"]);
     assert_eq!(exit, 1, "{listed}");
     let text = listed.to_string();
