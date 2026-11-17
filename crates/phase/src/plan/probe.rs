@@ -217,7 +217,6 @@ impl Eq for LogPattern {}
 
 /// The reason a log probe's pattern cannot be used.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum BadLogPattern {
     /// The pattern is empty, so every line would match it.
     Empty,

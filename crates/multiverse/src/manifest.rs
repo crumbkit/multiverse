@@ -82,6 +82,8 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
+use phase::BadLogPattern;
+pub use phase::LogPattern;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use toml::Spanned;
@@ -445,9 +447,6 @@ pub enum ReadyCheck {
     /// worker that reads a queue, uses it.
     Log(LogPattern),
 }
-
-use phase::BadLogPattern;
-pub use phase::LogPattern;
 
 /// The value of an `env` variable, which may name host ports as
 /// `{port.<name>}` and writes a literal brace as `{{` or `}}`. Its
@@ -2628,7 +2627,6 @@ fn check_ready(
                             BadLogPattern::Invalid(problem) => format!(
                                 "the `log` pattern of `{process}` is not a regular expression: {problem}"
                             ),
-                            other => format!("the `log` pattern of `{process}`: {other}"),
                         };
                         errors.invalid(&log.span(), message)
                     })?;
