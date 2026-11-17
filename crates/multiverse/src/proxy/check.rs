@@ -319,7 +319,7 @@ mod tests {
     }
 
     #[test]
-    fn a_caddy_with_an_unparseable_version_fails_the_caddy_row() {
+    fn a_caddy_with_an_unparseable_version_makes_the_caddy_row_missing() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::new(dir.path().join("records"));
         let caddy = fake_caddy(dir.path(), "devel");

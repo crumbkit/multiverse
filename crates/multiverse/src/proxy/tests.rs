@@ -692,14 +692,12 @@ fn each_problem_writes_the_sentence_a_person_reads() {
         }),
         "the manifest of triage is left out: bad"
     );
-    assert!(
+    assert_eq!(
         text(ProxyProblem::LabelTooLong {
             workspace: name("triage"),
             bytes: 70
-        })
-        .starts_with(
-            "the workspace triage makes a host label of 70 bytes, and a label holds at most "
-        )
+        }),
+        "the workspace triage makes a host label of 70 bytes, and a label holds at most 63"
     );
     assert_eq!(
         text(ProxyProblem::RecordLeftOut {

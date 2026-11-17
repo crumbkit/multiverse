@@ -632,13 +632,7 @@ impl Proxy {
         let mut routes = derive(found);
         routes.problems.extend(problems);
         let running = self.answering();
-        let version = self
-            .program()
-            .ok()
-            .and_then(|(path, _)| match process::version(&path) {
-                process::Version::Found(version) => Some(version.to_string()),
-                process::Version::Unusable(_) => None,
-            });
+        let version = self.program().ok().map(|(_, version)| version.to_string());
         let certificate = self.settings.root_certificate();
         let authority = certificate.exists().then(|| Authority {
             trusted: process::trusted(&certificate),

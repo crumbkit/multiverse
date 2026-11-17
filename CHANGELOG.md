@@ -30,6 +30,9 @@ workspace may need to act on.
   The check marks `caddy runs` failed when Caddy holds other routes than the
   records give, and every row and recovery that tells a person to edit the
   config file names the file mxv reads, including under `XDG_CONFIG_HOME`.
+  mxv refuses a Caddy whose version has no numeric major and minor, such as a
+  development build that prints `devel`, with `mxv::proxy::caddy_missing`,
+  and the check marks the `caddy` row `missing`.
   `mxv proxy check` reads what the proxy needs, prints a row for each and
   exits with `mxv::proxy::check_failed` when one is missing or failed. The
   library gains `Proxy::check`, `Proxy::ensure_running`, `Proxy::caddy`,
@@ -45,11 +48,6 @@ workspace may need to act on.
 
 ### Changed
 
-- A Caddy whose version has no numeric major and minor, such as a
-  development build that prints `devel`, is now refused with
-  `mxv::proxy::caddy_missing`, and `mxv proxy check` marks the `caddy` row
-  `missing`. It used to pass the 2.8 minimum. Set the `caddy` config key to a
-  release build.
 - `mxv up` and every other verb that reads the manifest refuse `ready = { log = "" }`
   with `mxv::manifest::invalid` and the line of the `log` key. Before, phase
   refused the empty pattern only when it checked the plan, with no line.
