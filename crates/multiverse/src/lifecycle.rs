@@ -400,6 +400,13 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         if archive.id != confirmed.id || archive.state != ArchiveState::Archived {
             return Ok(ArchiveDeleted::Changed);
         }
+        // A stopped restore whose directory holds the person's files is
+        // refused before the volumes go, so the refusal deletes nothing.
+        let stopped =
+            archive.restoring.is_some() && self.workspaces.store.read(&archive.name)?.is_none();
+        if stopped {
+            crate::archive::refuse_other_files(&archive)?;
+        }
         if !asked.volumes.is_empty() {
             if let Some(workspace) = self.volumes_in_use(&archive)? {
                 return Ok(ArchiveDeleted::VolumesInUse(workspace));
@@ -430,7 +437,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         // with the record, so it is undone first. A workspace that holds the
         // name means the restore finished, and the mark is stale.
         let mut archive = archive;
-        if archive.restoring.is_some() && self.workspaces.store.read(&archive.name)?.is_none() {
+        if stopped {
             self.workspaces
                 .undo_stopped_restore(self.archives, &mut archive)?;
         }

@@ -53,6 +53,7 @@ pub use record::{
     KeptWip, OLDER_ARCHIVE_VERSION, RestoreMark,
 };
 pub(crate) use record::{MintHeld, mint_held};
+pub(crate) use restore::refuse_other_files;
 pub use restore::{
     ArchivedRemoval, LostPin, MirrorLoss, PortChange, PutBack, RestoreOptions, RestoreOutcome,
     RestorePlan, RestorePlanned, RestoreRefusal, Restored,

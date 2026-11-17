@@ -1838,7 +1838,15 @@ removal that cannot delete something the mark lists fails and keeps the mark,
 so the next one tries again. When the archive holds a mark, the question and
 the dry run of `mxv restore` say that the run first deletes what the stopped
 restore left. mxv deletes a directory at the workspace's path, with
-everything in it, only when the mark says the restore made it. When the mark
+everything in it, only when the mark says the restore made it and the mark
+accounts for every entry in it. The mark accounts for each checkout folder
+that the restore started, with everything inside it, and for `AGENTS.md`,
+`mxv.toml`, `.deadband-workspace` and the archive's root files once the
+restore marked them as written. When the directory holds any other entry,
+such as a file that you put there after the restore stopped, `mxv repair`,
+`mxv restore` and `mxv remove --archived` delete nothing, keep the mark and
+fail with `mxv::restore::stopped_holds_other_files`, which names each such
+entry. Move or delete those entries and run the command again. When the mark
 was written before the restore made the directory, only an empty directory at
 the path is deleted. A directory that you made refuses the restore with
 `mxv::restore::name_taken` and stays as it is.
@@ -1854,6 +1862,7 @@ A restore refuses, and builds nothing, with these codes:
 | `mxv::restore::commit_missing` | No repository that mxv can read holds the pinned commit. |
 | `mxv::restore::unfinished` | The archive stopped partway, and `mxv archive -w NAME` finishes it. |
 | `mxv::restore::root_file_changed` | A file of the archive differs from its recorded digest. |
+| `mxv::restore::stopped_holds_other_files` | A restore of the name stopped after it made the workspace's directory, and the directory holds entries that the restore's mark does not account for. mxv deleted nothing and kept the mark. `mxv repair NAME` and `mxv remove --archived NAME` fail with the same code. Move or delete the listed entries and run the command again. |
 
 ## Disk space
 

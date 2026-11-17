@@ -6,17 +6,19 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::ignored::{self, IgnoredRefusal};
 use crate::archive::{
-    Archive, ArchiveState, ArchivedCheckout, Archives, KEPT_NAMESPACE, Kept, RestoreMark, root,
+    Archive, ArchiveState, ArchivedCheckout, Archives, KEPT_NAMESPACE, Kept, RestoreMark, RootKind,
+    root,
 };
 use crate::backend::{Backend, RefHolder, WipCommits};
 use crate::error::Error;
 use crate::health::{self, Rebuilt};
+use crate::marker::MARKER_FILE;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
 use crate::runs::Runs;
-use crate::store::Created;
+use crate::store::{self, Created};
 use crate::workspaces::{
-    CloneStart, Entry, MadeSoFar, Mode, Workspaces, default_branch, delete_directory,
+    CloneStart, Entry, MadeSoFar, Mode, Workspaces, aside, default_branch, delete_directory,
 };
 
 /// What a restore may do beyond rebuilding from local state.
@@ -317,6 +319,7 @@ impl<B: Backend> Workspaces<B> {
                 record,
             });
         }
+        refuse_other_files(&archive)?;
         if let Some(path) = root::first_changed(archives, &archive)? {
             return refused(RestoreRefusal::RootFileChanged { path });
         }
@@ -511,17 +514,21 @@ impl<B: Backend> Workspaces<B> {
     }
 
     /// Undoes what a restore of `archive` that died made, as the mark in the
-    /// record lists it, and writes the record without the mark. It deletes
-    /// the workspace's directory with everything in it only when the mark
-    /// says the restore made the directory. It deletes an empty directory
-    /// at the path when the mark was written before the directory, because
-    /// the restore may have died between making it and writing the mark
-    /// again. Each step tolerates what is already gone, so the function can
-    /// run again after it stops partway.
+    /// record lists it, and writes the record without the mark. When the
+    /// mark says the restore made the workspace's directory, it deletes the
+    /// directory with everything in it, but only after it checks that the
+    /// mark accounts for every entry there, as [`refuse_other_files`]
+    /// says. It deletes an empty directory at the path when the mark was
+    /// written before the directory, because the restore may have died
+    /// between making it and writing the mark again. Each step tolerates
+    /// what is already gone, so the function can run again after it stops
+    /// partway.
     ///
     /// # Errors
     ///
-    /// Returns the errors of writing the record.
+    /// Returns [`Error::StoppedRestoreHoldsOtherFiles`] before it deletes
+    /// anything when the directory holds an entry that the mark does not
+    /// account for, and the errors of writing the record.
     pub(crate) fn undo_stopped_restore(
         &self,
         archives: &Archives,
@@ -530,13 +537,14 @@ impl<B: Backend> Workspaces<B> {
         let Some(RestoreMark(mut made)) = archive.restoring.clone() else {
             return Ok(());
         };
+        refuse_other_files(archive)?;
         made.record_not_ours = true;
         let workspace = archive.workspace().finished();
         let mut clean = self.unmake(archive, &workspace, &made);
         if made.directory {
-            // What the run wrote that the mark does not list, such as a
-            // half-written file, goes with the directory it made, and the
-            // directory is then empty for a second pass.
+            // What the run left beside what the mark lists, such as a
+            // half-written temporary file, goes with the directory it made,
+            // and the directory is then empty for a second pass.
             delete_directory(&archive.path)?;
             if !clean {
                 clean = self.unmake(archive, &workspace, &made);
@@ -1116,6 +1124,136 @@ fn path_is_free(archive: &Archive) -> Result<bool, Error> {
         }
         _ => Ok(false),
     }
+}
+
+/// Refuses with [`Error::StoppedRestoreHoldsOtherFiles`] when the mark of
+/// `archive` says that its stopped restore made the workspace's directory
+/// and the directory holds an entry that the mark does not account for. A
+/// directory that the restore made holds only what the run wrote, so any
+/// other entry is the person's, and deleting the directory would lose it.
+///
+/// # Errors
+///
+/// Returns the refusal, and [`Error::StateUnreadable`] when a directory
+/// cannot be read.
+pub(crate) fn refuse_other_files(archive: &Archive) -> Result<(), Error> {
+    let Some(RestoreMark(made)) = &archive.restoring else {
+        return Ok(());
+    };
+    if !made.directory {
+        return Ok(());
+    }
+    let paths = other_files(archive, made)?;
+    if paths.is_empty() {
+        return Ok(());
+    }
+    Err(Error::StoppedRestoreHoldsOtherFiles {
+        name: archive.name.clone(),
+        path: archive.path.clone(),
+        paths,
+    })
+}
+
+/// What the mark of a stopped restore accounts for in the workspace's
+/// directory.
+struct Accounted {
+    /// Each checkout that the run started, and the name that an undo that
+    /// stopped partway moved it aside to. Everything inside belongs to the
+    /// run.
+    whole: Vec<PathBuf>,
+    /// Each file or link that the run wrote at the root: `AGENTS.md`, the
+    /// manifest, the marker and the archive's root files.
+    files: Vec<PathBuf>,
+    /// Each directory among the archive's root entries, whose own entries
+    /// are checked against the archive's list.
+    dirs: Vec<PathBuf>,
+}
+
+/// Returns each entry of the directory of `archive` that `made` does not
+/// account for, relative to the directory and sorted. The mark accounts
+/// for each checkout that the run started, `AGENTS.md`, the archive's root
+/// entries and the manifest once the run marked them as written, the
+/// marker once it did, and the temporary file `.<name>.<pid>.tmp` that a
+/// write of one of those files leaves when it stops.
+fn other_files(archive: &Archive, made: &MadeSoFar) -> Result<Vec<String>, Error> {
+    let workspace = archive.workspace();
+    let started = made.clones.max(made.branches.len());
+    let mut accounted = Accounted {
+        whole: Vec::new(),
+        files: Vec::new(),
+        dirs: Vec::new(),
+    };
+    for checkout in workspace.checkouts.iter().take(started) {
+        accounted.whole.push(checkout.path.clone());
+        accounted.whole.extend(aside(&checkout.path));
+    }
+    // The run marks `AGENTS.md`, the manifest and the root files as written
+    // in one step, before it writes any of them.
+    if made.agents {
+        accounted.files.push(workspace.agents_file());
+        for entry in &archive.root {
+            let path = archive.path.join(&entry.path);
+            match entry.kind {
+                RootKind::Directory { .. } => accounted.dirs.push(path),
+                RootKind::File { .. } | RootKind::Link { .. } => accounted.files.push(path),
+            }
+        }
+    }
+    if made.manifest {
+        accounted.files.push(workspace.manifest_file());
+    }
+    if made.marker {
+        accounted.files.push(archive.path.join(MARKER_FILE));
+    }
+    let mut found = Vec::new();
+    find_other_files(&archive.path, "", &accounted, &mut found)?;
+    found.sort();
+    Ok(found)
+}
+
+/// Adds each entry of `dir` that `accounted` does not account for to
+/// `found`, as `prefix` followed by its name, and looks inside each
+/// directory of the archive's root entries.
+fn find_other_files(
+    dir: &Path,
+    prefix: &str,
+    accounted: &Accounted,
+    found: &mut Vec<String>,
+) -> Result<(), Error> {
+    let unreadable = |source| Error::StateUnreadable {
+        path: dir.to_path_buf(),
+        source,
+    };
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => return Err(unreadable(source)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(unreadable)?;
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let shown = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if accounted.whole.contains(&path) || accounted.files.contains(&path) {
+            continue;
+        }
+        if accounted.dirs.contains(&path) {
+            if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                find_other_files(&path, &shown, accounted, found)?;
+            }
+            continue;
+        }
+        let half_written =
+            store::temp_of(&name).is_some_and(|target| accounted.files.contains(&dir.join(target)));
+        if !half_written {
+            found.push(shown);
+        }
+    }
+    Ok(())
 }
 
 /// Returns the checkout's folder of the archived path `path`, such as `app`

@@ -686,9 +686,19 @@ pub(crate) fn write_file_with(
     Ok(())
 }
 
+/// Returns `<name>` when `found` is the name of a temporary file
+/// `.<name>.<pid>.tmp` that a write of the file `<name>` left, or `None`.
+pub(crate) fn temp_of(found: &str) -> Option<&str> {
+    let (name, pid) = found
+        .strip_prefix('.')?
+        .strip_suffix(".tmp")?
+        .rsplit_once('.')?;
+    (!name.is_empty() && !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
+        .then_some(name)
+}
+
 /// Removes each temporary file `.<name>.<pid>.tmp` in `dir`.
 fn remove_stale_temps(dir: &Path, name: &str) -> Result<(), Error> {
-    let prefix = format!(".{name}.");
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -704,10 +714,7 @@ fn remove_stale_temps(dir: &Path, name: &str) -> Result<(), Error> {
         let Some(found) = found.to_str() else {
             continue;
         };
-        let pid = found
-            .strip_prefix(&prefix)
-            .and_then(|rest| rest.strip_suffix(".tmp"));
-        if pid.is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit())) {
+        if temp_of(found) == Some(name) {
             let path = entry.path();
             match fs::remove_file(&path) {
                 Ok(()) => {}

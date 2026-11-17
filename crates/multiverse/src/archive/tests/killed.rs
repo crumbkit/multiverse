@@ -271,20 +271,168 @@ fn an_empty_directory_left_before_the_mark_said_so_is_removed_and_the_restore_fi
 }
 
 #[test]
-fn a_directory_that_the_mark_says_the_run_made_is_deleted_with_its_files() {
+fn a_directory_that_the_mark_says_the_run_made_is_deleted_with_the_half_written_files() {
     let setup = setup(Kind::Worktree);
     setup.create();
     let mut archive = setup.archive();
     let mut mark = RestoreMark::default();
     mark.0.directory = true;
+    mark.0.agents = true;
     archive.restoring = Some(mark);
     setup.archives.write(&archive).unwrap();
     let left = setup.root.join("triage");
     fs::create_dir_all(&left).unwrap();
-    write(left.join("partial.txt"), "left\n");
+    write(left.join("AGENTS.md"), "half\n");
+    write(left.join(".AGENTS.md.99999.tmp"), "half\n");
     setup.restore();
-    assert!(!left.join("partial.txt").exists());
+    assert!(!left.join(".AGENTS.md.99999.tmp").exists());
     assert!(setup.checkout().is_dir());
+}
+
+/// Returns the paths that a refusal of an undo names, or panics with what
+/// the undo returned instead.
+fn refused_paths<T: std::fmt::Debug>(result: Result<T, Error>) -> Vec<String> {
+    match result {
+        Err(Error::StoppedRestoreHoldsOtherFiles { paths, .. }) => paths,
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Kills a restore after it wrote the root files and puts a file of the
+/// person's into the directory that the restore made.
+fn killed_beside_a_file_of_the_persons(kind: Kind) -> (Archived, Archive, PathBuf) {
+    let made = archived(kind);
+    made.kill_at("root");
+    let stopped = made.marked();
+    let theirs = made.setup.root.join("triage/mine.txt");
+    write(&theirs, "mine\n");
+    (made, stopped, theirs)
+}
+
+#[test]
+fn a_repair_refuses_a_made_directory_that_holds_a_file_the_restore_did_not_make() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let (made, stopped, theirs) = killed_beside_a_file_of_the_persons(kind);
+        for mode in [Mode::DryRun, Mode::Change] {
+            let result = made
+                .setup
+                .workspaces
+                .repair(&made.setup.archives, &name(), mode);
+            assert_eq!(refused_paths(result), ["mine.txt"], "{kind:?} {mode:?}");
+        }
+        assert_eq!(fs::read_to_string(&theirs).unwrap(), "mine\n", "{kind:?}");
+        assert_eq!(made.marked(), stopped, "{kind:?}: the mark");
+        assert!(made.setup.checkout().is_dir(), "{kind:?}: the checkout");
+        // Once the person moves the file away, the repair undoes the run.
+        fs::remove_file(&theirs).unwrap();
+        assert!(matches!(made.repair(Mode::Change), Repaired::Undone { .. }));
+        assert!(!made.setup.root.join("triage").exists(), "{kind:?}");
+        made.setup.restore();
+    }
+}
+
+#[test]
+fn a_restore_refuses_a_made_directory_that_holds_a_file_the_stopped_restore_did_not_make() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let made = archived(kind);
+        made.kill_at("root");
+        let stopped = made.marked();
+        // The plan comes first, so the restore's own second plan refuses.
+        let plan = made.setup.restore_plan();
+        let theirs = made.setup.root.join("triage/mine.txt");
+        write(&theirs, "mine\n");
+        let planned = made.setup.workspaces.plan_restore(
+            &made.setup.archives,
+            &name(),
+            RestoreOptions::default(),
+        );
+        assert_eq!(refused_paths(planned), ["mine.txt"], "{kind:?}");
+        let restored = made
+            .setup
+            .workspaces
+            .restore(&made.setup.archives, plan, &made.setup.runs);
+        assert_eq!(refused_paths(restored), ["mine.txt"], "{kind:?}");
+        assert_eq!(fs::read_to_string(&theirs).unwrap(), "mine\n", "{kind:?}");
+        assert_eq!(made.marked(), stopped, "{kind:?}: the mark");
+    }
+}
+
+#[test]
+fn removing_an_archive_refuses_a_made_directory_that_holds_a_file_the_restore_did_not_make() {
+    use crate::lifecycle::{Lifecycle, VolumesAsked};
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let (made, stopped, theirs) = killed_beside_a_file_of_the_persons(kind);
+        let result = Lifecycle::new(
+            &made.setup.workspaces,
+            &made.setup.archives,
+            &made.setup.runs,
+        )
+        .delete_archive(&stopped, &VolumesAsked::default());
+        assert_eq!(refused_paths(result), ["mine.txt"], "{kind:?}");
+        assert_eq!(fs::read_to_string(&theirs).unwrap(), "mine\n", "{kind:?}");
+        assert_eq!(made.marked(), stopped, "{kind:?}: the archive and its mark");
+    }
+}
+
+#[test]
+fn the_refusal_names_each_path_the_mark_does_not_account_for_and_the_directory() {
+    let made = archived(Kind::Worktree);
+    made.kill_at("root");
+    let dir = made.setup.root.join("triage");
+    write(dir.join("mine.txt"), "mine\n");
+    fs::create_dir_all(dir.join("notes/deep")).unwrap();
+    write(dir.join("notes/deep/a.txt"), "a\n");
+    // A file inside a checkout's folder belongs to the run.
+    write(made.setup.checkout().join("scratch.txt"), "scratch\n");
+    let error = made
+        .setup
+        .workspaces
+        .repair(&made.setup.archives, &name(), Mode::Change)
+        .unwrap_err();
+    let Error::StoppedRestoreHoldsOtherFiles {
+        name: of,
+        path,
+        paths,
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(of, &name());
+    assert_eq!(path, &dir);
+    assert_eq!(paths, &["mine.txt", "notes"]);
+    let text = error.to_string();
+    assert!(
+        text.contains("mine.txt") && text.contains("notes"),
+        "{text}"
+    );
+    assert!(text.contains(&dir.display().to_string()), "{text}");
+}
+
+#[test]
+fn a_file_the_person_puts_inside_a_made_checkout_goes_with_the_undone_restore() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let made = archived(kind);
+        made.kill_at("root");
+        write(made.setup.checkout().join("scratch.txt"), "scratch\n");
+        assert!(matches!(made.repair(Mode::Change), Repaired::Undone { .. }));
+        assert!(!made.setup.root.join("triage").exists(), "{kind:?}");
+    }
+}
+
+#[test]
+fn a_root_file_that_the_mark_has_not_reached_is_the_persons() {
+    let made = archived(Kind::Worktree);
+    // The run made the checkout but had not yet written the root files, so
+    // a notes.md there is not the run's.
+    made.kill_at("apply");
+    write(made.setup.root.join("triage/notes.md"), "mine\n");
+    write(made.setup.root.join("triage/AGENTS.md"), "mine\n");
+    let paths = refused_paths(made.setup.workspaces.repair(
+        &made.setup.archives,
+        &name(),
+        Mode::Change,
+    ));
+    assert_eq!(paths, ["AGENTS.md", "notes.md"]);
 }
 
 #[test]

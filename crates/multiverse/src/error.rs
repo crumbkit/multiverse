@@ -206,6 +206,20 @@ pub enum Error {
         /// The last dated name that the repair tried.
         last: String,
     },
+    /// A restore that stopped made the workspace's directory, and the
+    /// directory holds entries that the restore's mark does not account
+    /// for, such as files that the person put there afterwards. mxv deleted
+    /// nothing, and the archive keeps its mark.
+    StoppedRestoreHoldsOtherFiles {
+        /// The archive's name.
+        name: crate::name::WorkspaceName,
+        /// The workspace's directory.
+        path: PathBuf,
+        /// Each entry that the mark does not account for, relative to
+        /// `path`, in sorted order. A directory that the mark does not
+        /// account for is named once, without its contents.
+        paths: Vec<String>,
+    },
     /// Another mxv command holds the lock of a mirror, such as a
     /// `mxv new` that still fetches it, for longer than the wait.
     MirrorBusy {
@@ -514,6 +528,24 @@ impl Error {
 }
 
 impl Error {
+    /// Writes the text of a repair, a restore or a removal of an archive
+    /// that found something in its way and changed nothing.
+    fn fmt_repair(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DatedNamesTaken { name, last } => write!(
+                formatter,
+                "every dated name for the older archive of {name}, up to {last}, is already taken"
+            ),
+            Self::StoppedRestoreHoldsOtherFiles { name, path, paths } => write!(
+                formatter,
+                "a stopped restore of {name} made the directory {}, which now holds entries that the restore did not make, so mxv deleted nothing and kept the record of what the restore made: {}",
+                path.display(),
+                paths.join(", ")
+            ),
+            _ => Ok(()),
+        }
+    }
+
     /// Writes the text of a template or a `--manifest` file that mxv
     /// cannot use.
     fn fmt_template(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -666,10 +698,9 @@ impl fmt::Display for Error {
                 "another mxv command holds the lock {} and has not released it",
                 path.display()
             ),
-            Self::DatedNamesTaken { name, last } => write!(
-                formatter,
-                "every dated name for the older archive of {name}, up to {last}, is already taken"
-            ),
+            Self::DatedNamesTaken { .. } | Self::StoppedRestoreHoldsOtherFiles { .. } => {
+                self.fmt_repair(formatter)
+            }
             Self::MirrorBusy { .. } | Self::MirrorFetchFailed { .. } | Self::SshRefused { .. } => {
                 self.fmt_fetch(formatter)
             }
@@ -908,6 +939,7 @@ impl std::error::Error for Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::DatedNamesTaken { .. }
+            | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
             | Self::SshRefused { .. }

@@ -79,7 +79,15 @@ workspace may need to act on.
   `mxv remove --archived NAME` on an archive that holds a mark deletes what
   the stopped restore made before it deletes the record, and a repair, a
   restore or a removal keeps the mark when something it made cannot be
-  deleted. The `directory` field of the repair result and the question name
+  deleted. When the mark says the restore made the directory and the
+  directory holds an entry that the mark does not account for, such as a
+  file that the person put there afterwards, `mxv repair NAME`,
+  `mxv restore NAME` and `mxv remove --archived NAME` delete nothing, keep
+  the mark and fail with `mxv::restore::stopped_holds_other_files`, which
+  names each such entry. The mark accounts for each checkout that the
+  restore started, with everything inside it, and for `AGENTS.md`, the
+  manifest, the marker and the archive's root files once the restore marked
+  them as written. The `directory` field of the repair result and the question name
   the workspace's directory only when the repair deletes it, and the question
   and dry run of `mxv restore` say that the run first deletes what a stopped
   restore left.

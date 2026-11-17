@@ -155,6 +155,9 @@ impl<B: Backend> Workspaces<B> {
                     .is_some_and(RestoreMark::made_directory)
                     || std::fs::read_dir(&archive.path)
                         .is_ok_and(|mut entries| entries.next().is_none());
+                // A dry run refuses as the repair would, before the
+                // repair deletes anything.
+                crate::archive::refuse_other_files(&archive)?;
                 if mode == Mode::Change {
                     self.undo_stopped_restore(archives, &mut archive)?;
                 }
