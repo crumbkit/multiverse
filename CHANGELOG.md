@@ -45,6 +45,19 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv repair NAME` deletes an archive that a restore already rebuilt only
+  when it is the archive the person confirmed. When another archive of the
+  name needs that repair by the time the lock is held, the repair reports
+  `mxv::repair::changed` and deletes nothing.
+- The library's `Workspaces::finish_archive` and `Lifecycle::finish_held` are
+  private to the crate, so a caller outside it cannot mark an archive of any
+  state as archived. `Lifecycle::archive` and `Lifecycle::finish` still
+  finish archives.
+- `CheckoutRemoval` holds what only a worktree or only a clone has in
+  `kind`, a `RemovalKind`: a worktree's `stray_commits`, `unlock` and
+  `partial`, or a clone's `lost` commits and `stashes`.
+  `CheckoutRemoval::lost_commits` returns the count that `stray_commits`
+  held for both kinds.
 - `mxv restore` and `mxv repair NAME` take the workspace lock, plan again
   and act through the library, in `Lifecycle::restore` and
   `Lifecycle::repair`. A second `mxv restore` that waited for the lock

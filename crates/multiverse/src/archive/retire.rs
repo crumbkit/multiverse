@@ -19,16 +19,16 @@ use crate::error::Error;
 use crate::record::{Checkout, Workspace, WorkspaceKind, WorkspaceState};
 use crate::store;
 use crate::workspaces::{
-    BranchFate, CheckoutRemoval, Entry, Fate, Mode, Removal, RemovalOutcome, Workspaces, aside,
-    delete_directory,
+    BranchFate, CheckoutRemoval, Entry, Fate, Mode, Removal, RemovalKind, RemovalOutcome,
+    Workspaces, aside, delete_directory,
 };
 
 /// The outcome of [`Workspaces::archive`].
 #[derive(Debug)]
 pub enum ArchiveOutcome {
     /// The workspace is gone, and the record says
-    /// [`ArchiveState::Retired`] until [`Workspaces::finish_archive`] marks
-    /// it archived.
+    /// [`ArchiveState::Retired`] until [`Lifecycle::archive`](crate::Lifecycle::archive)
+    /// or `mxv archive -w` marks it archived.
     Retired {
         /// The record.
         archive: Box<Archive>,
@@ -530,12 +530,19 @@ impl<B: Backend> Workspaces<B> {
         }
     }
 
-    /// Marks `archive`, whose workspace is gone, as finished.
+    /// Marks `archive`, whose workspace is gone, as finished. Only the
+    /// library calls it, with the archive of an [`ArchivePlanned::Finish`],
+    /// of an [`ArchiveOutcome::Retired`] or of a repaired rename, because a
+    /// retiring archive must never be finished.
     ///
     /// # Errors
     ///
     /// Returns [`Error::Unwritable`] when the record cannot be written.
-    pub fn finish_archive(&self, archives: &Archives, archive: &mut Archive) -> Result<(), Error> {
+    pub(crate) fn finish_archive(
+        &self,
+        archives: &Archives,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
         archive.state = ArchiveState::Archived;
         archive.version = ARCHIVE_VERSION;
         archives.write(archive)
@@ -712,7 +719,7 @@ impl<B: Backend> Workspaces<B> {
         let held = quarantine(&checkout.path).ok_or_else(invalid)?;
         let doomed = aside(&checkout.path).ok_or_else(invalid)?;
         delete_directory(&doomed)?;
-        if planned.unlock {
+        if matches!(planned.kind, RemovalKind::Worktree { unlock: true, .. }) {
             self.backend
                 .unlock_checkout(&checkout.source, &checkout.path)?;
         }

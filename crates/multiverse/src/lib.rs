@@ -115,7 +115,7 @@ pub use crate::template::{
 };
 pub use crate::workspaces::{
     AddOutcome, Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode,
-    NewOutcome, Removal, RemovalOutcome, RemovalPlan, Repo, Workspaces, folder_name,
+    NewOutcome, Removal, RemovalKind, RemovalOutcome, RemovalPlan, Repo, Workspaces, folder_name,
 };
 pub use phase;
 #[cfg(test)]

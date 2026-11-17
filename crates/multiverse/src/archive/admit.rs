@@ -383,6 +383,47 @@ pub struct ArchivePlan {
     /// an origin that could not be fetched, and what the archive loses
     /// without refusing, such as a clone's hooks.
     pub warnings: Vec<String>,
+    /// The state that the archive's record starts in, which
+    /// [`record_start`] took from `resuming`.
+    start: RecordStart,
+}
+
+/// The state that the record of an [`ArchivePlan`] starts in. A record
+/// that resumes an earlier run never goes back, and a record that has
+/// finished is never resumed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RecordStart {
+    /// No earlier run retired every checkout.
+    Retiring,
+    /// The earlier run that this one resumes had already retired every
+    /// checkout.
+    Retired,
+}
+
+impl RecordStart {
+    /// Returns the archive state that the record is written in.
+    const fn state(self) -> ArchiveState {
+        match self {
+            Self::Retiring => ArchiveState::Retiring,
+            Self::Retired => ArchiveState::Retired,
+        }
+    }
+}
+
+/// Returns the state that the record of an archive starts in when it
+/// resumes `earlier`, the record of an earlier run. An earlier record that
+/// says [`ArchiveState::Archived`] has finished and holds the name, so it
+/// is refused as [`ArchiveRefusal::NameTaken`], as an archived record
+/// beside a workspace of its name is.
+pub(super) fn record_start(earlier: Option<&Archive>) -> Result<RecordStart, ArchiveRefusal> {
+    match earlier {
+        None => Ok(RecordStart::Retiring),
+        Some(archive) => match archive.state {
+            ArchiveState::Retiring => Ok(RecordStart::Retiring),
+            ArchiveState::Retired => Ok(RecordStart::Retired),
+            ArchiveState::Archived => Err(ArchiveRefusal::NameTaken(Box::new(archive.clone()))),
+        },
+    }
 }
 
 /// The outcome of [`Workspaces::plan_archive`].
@@ -391,7 +432,8 @@ pub enum ArchivePlanned {
     /// Nothing is in the way.
     Ready(Box<ArchivePlan>),
     /// An earlier run deleted the workspace's record and did not mark the
-    /// archive as finished. [`Workspaces::finish_archive`] finishes it.
+    /// archive as finished. [`Lifecycle::finish`](crate::Lifecycle::finish)
+    /// finishes it.
     Finish(Box<Archive>),
     /// No workspace has the name and its archive has finished, so there
     /// is nothing to do.
@@ -594,6 +636,10 @@ impl<B: Backend> Workspaces<B> {
             Subject::Found(workspace, resuming) => (*workspace, resuming.map(|kept| *kept)),
             Subject::Done(planned) => return Ok(planned),
         };
+        let start = match record_start(resuming.as_ref()) {
+            Ok(start) => start,
+            Err(refusal) => return Ok(ArchivePlanned::Refused(refusal)),
+        };
         if mode == Mode::Change {
             self.put_back(&workspace)?;
         }
@@ -642,7 +688,7 @@ impl<B: Backend> Workspaces<B> {
                 }
                 continue;
             }
-            if planned.partial {
+            if planned.partial_worktree() {
                 return Ok(unusable(
                     folder,
                     "it has no .git, because an earlier removal stopped partway",
@@ -717,6 +763,7 @@ impl<B: Backend> Workspaces<B> {
             disposable,
             root: scanned.paths(),
             warnings,
+            start,
         };
         let bytes = plan.predicted_bytes(name, scanned)?;
         if bytes > MOST_RECORD_BYTES {
@@ -1123,10 +1170,7 @@ impl ArchivePlan {
         Archive {
             version: ARCHIVE_VERSION,
             id: self.id.clone(),
-            state: match earlier.map(|archive| archive.state) {
-                Some(ArchiveState::Retired) => ArchiveState::Retired,
-                _ => ArchiveState::Retiring,
-            },
+            state: self.start.state(),
             time: earlier.map_or_else(now, |archive| archive.time),
             name: name.clone(),
             workspace_id: workspace.id.clone(),
