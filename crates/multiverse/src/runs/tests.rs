@@ -225,3 +225,166 @@ fn a_keeper_touches_the_workspace_again_until_it_is_dropped() {
     );
     drop(keeper);
 }
+
+/// Asserts that `result` refused a lock of `locked` for the workspace
+/// `acted_on`.
+fn assert_wrong_lock<T: std::fmt::Debug>(
+    result: Result<T, Error>,
+    locked: &WorkspaceName,
+    acted_on: &WorkspaceName,
+) {
+    match result {
+        Err(Error::WrongLock {
+            locked: held,
+            acted_on: asked,
+        }) => assert_eq!((&held, &asked), (locked, acted_on)),
+        other => panic!("expected a wrong lock, got {other:?}"),
+    }
+}
+
+#[test]
+fn a_lock_keeps_the_name_of_the_workspace_it_locks() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    let lock = setup.runs().lock(&workspace.name).unwrap();
+    assert_eq!(lock.name(), &workspace.name);
+}
+
+#[test]
+fn down_refuses_the_lock_of_another_workspace_and_stops_nothing() {
+    let setup = Setup::new();
+    let workspace = setup.workspace("triage");
+    let other = setup.workspace("other");
+    let runs = setup.runs();
+    let lock = runs.lock(&other.name).unwrap();
+    let outcome = runs.down(&lock, &workspace, None, &[], crate::runs::Needed::Stop);
+    assert_wrong_lock(outcome, &other.name, &workspace.name);
+}
+
+#[test]
+fn build_refuses_the_lock_of_another_workspace_and_writes_nothing() {
+    struct Never;
+    impl crate::runs::Admission for Never {
+        fn admit(&mut self, _: &crate::runs::Asked<'_>) -> Box<dyn crate::runs::Place> {
+            panic!("a refused build asks for no place");
+        }
+        fn output(&self) -> Box<dyn std::io::Write + Send> {
+            panic!("a refused build writes no output");
+        }
+    }
+    let setup = Setup::new();
+    let mut workspace = setup.workspace("triage");
+    let other = setup.workspace("other");
+    let runs = setup.runs();
+    let lock = runs.lock(&other.name).unwrap();
+    let before = fs::read(setup.store().path(&workspace.name)).unwrap();
+    let manifest = manifest("[processes.a]\nargv = [\"true\"]\n");
+    let outcome = runs.build(
+        &lock,
+        &setup.store(),
+        &mut workspace,
+        &manifest,
+        &[],
+        &mut Never,
+    );
+    assert_wrong_lock(outcome.map(|_| ()), &other.name, &workspace.name);
+    assert_eq!(
+        fs::read(setup.store().path(&workspace.name)).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn up_refuses_builds_that_passed_under_the_lock_of_another_workspace_and_writes_nothing() {
+    struct Never;
+    impl crate::runs::Admission for Never {
+        fn admit(&mut self, _: &crate::runs::Asked<'_>) -> Box<dyn crate::runs::Place> {
+            panic!("no build asks for a place");
+        }
+        fn output(&self) -> Box<dyn std::io::Write + Send> {
+            panic!("no build writes output");
+        }
+    }
+    let setup = Setup::new();
+    let mut workspace = setup.workspace("triage");
+    let mut other = setup.workspace("other");
+    let runs = setup.runs();
+    let lock = runs.lock(&other.name).unwrap();
+    let before = fs::read(setup.store().path(&workspace.name)).unwrap();
+    let manifest = manifest("[processes.a]\nargv = [\"true\"]\n");
+    let mut ended = runs.build(
+        &lock,
+        &setup.store(),
+        &mut other,
+        &manifest,
+        &[],
+        &mut Never,
+    );
+    if let Ok(crate::runs::BuildEnd::NotGranted(ask)) = &ended {
+        runs.grant(ask).unwrap();
+        ended = runs.build(
+            &lock,
+            &setup.store(),
+            &mut other,
+            &manifest,
+            &[],
+            &mut Never,
+        );
+    }
+    let Ok(crate::runs::BuildEnd::Passed(passed)) = ended else {
+        panic!("expected passed builds, got {ended:?}");
+    };
+    let outcome = runs.up(
+        passed,
+        &setup.store(),
+        &mut workspace,
+        &manifest,
+        &[],
+        &mut Vec::new(),
+    );
+    assert_wrong_lock(outcome.map(|_| ()), &other.name, &workspace.name);
+    assert_eq!(
+        fs::read(setup.store().path(&workspace.name)).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn reset_ports_refuses_the_lock_of_another_workspace_and_writes_nothing() {
+    let setup = Setup::new();
+    let mut workspace = setup.workspace("triage");
+    let other = setup.workspace("other");
+    let runs = setup.runs();
+    let lock = runs.lock(&other.name).unwrap();
+    let before = fs::read(setup.store().path(&workspace.name)).unwrap();
+    let manifest = manifest("[processes.a]\nargv = [\"true\"]\n");
+    let outcome = runs.reset_ports(&lock, &setup.store(), &mut workspace, &manifest, &[]);
+    assert_wrong_lock(outcome, &other.name, &workspace.name);
+    assert_eq!(
+        fs::read(setup.store().path(&workspace.name)).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn prepare_task_refuses_the_lock_of_another_workspace_and_writes_nothing() {
+    let setup = Setup::new();
+    let mut workspace = setup.workspace("triage");
+    let other = setup.workspace("other");
+    let runs = setup.runs();
+    let lock = runs.lock(&other.name).unwrap();
+    let before = fs::read(setup.store().path(&workspace.name)).unwrap();
+    let manifest = manifest("[processes.a]\nargv = [\"true\"]\n");
+    let task = crate::runs::TaskStart::new(
+        workspace.path.clone(),
+        PathBuf::new(),
+        vec!["true".to_owned()],
+        crate::runs::TaskServices::All,
+    );
+    let outcome = runs.prepare_task(&lock, &setup.store(), &mut workspace, &manifest, task);
+    assert_wrong_lock(outcome.map(|_| ()), &other.name, &workspace.name);
+    assert_eq!(
+        fs::read(setup.store().path(&workspace.name)).unwrap(),
+        before
+    );
+}

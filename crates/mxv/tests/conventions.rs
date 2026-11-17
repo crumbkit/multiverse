@@ -81,7 +81,7 @@ use mxv::{
     WORKSPACE_CREATING, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
     WORKSPACE_MISMATCHED_CHECKOUT, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
     WORKSPACE_STATE_CHANGED, WORKSPACE_TRANSITION_REFUSED, WORKSPACE_VOLUMES,
-    WORKSPACE_WORKTREE_KIND,
+    WORKSPACE_WORKTREE_KIND, WORKSPACE_WRONG_LOCK,
 };
 use tempfile::TempDir;
 
@@ -684,6 +684,10 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
         WORKSPACE_MISMATCHED_CHECKOUT,
         "No command builds a record whose checkout does not match its kind; the library's store tests provoke it.",
+    ),
+    Unprovoked::new(
+        WORKSPACE_WRONG_LOCK,
+        "No command passes the lock of one workspace to an operation on another; the library's runs and lifecycle tests provoke it.",
     ),
     Unprovoked::new(
         WORKSPACE_ARCHIVE_UNFINISHED,

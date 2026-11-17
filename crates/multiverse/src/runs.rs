@@ -622,7 +622,7 @@ impl Runs {
     /// [`Runs::down`] require, so two commands never start or stop one
     /// workspace's app at once. The lock is an exclusive `flock` on
     /// `<state>/locks/<name>.lock`, and it is released when the returned
-    /// [`Lock`] drops. Locking creates nothing under `<state>/runs`.
+    /// [`WorkspaceLock`] drops. Locking creates nothing under `<state>/runs`.
     ///
     /// The lock file lies outside the workspace's run directory, which
     /// [`Runs::forget`] deletes, so the lock stays held through that
@@ -635,9 +635,12 @@ impl Runs {
     /// Returns [`Error::Busy`] when another command holds the lock for
     /// longer than the lock wait, which is [`LOCK_WAIT`] by default, and
     /// [`Error::Unwritable`] when the lock file cannot be opened.
-    pub fn lock(&self, name: &WorkspaceName) -> Result<Lock, Error> {
+    pub fn lock(&self, name: &WorkspaceName) -> Result<WorkspaceLock, Error> {
         let path = self.locks.join(format!("{name}.lock"));
-        store::lock(&path, self.lock_wait)
+        Ok(WorkspaceLock {
+            name: name.clone(),
+            _lock: store::lock(&path, self.lock_wait)?,
+        })
     }
 
     /// Records that an mxv command named the workspace `name` now, as the
@@ -844,16 +847,18 @@ impl Runs {
     /// # Errors
     ///
     /// Returns `Ok(Err(name))` for the first name that `manifest` does not
-    /// declare, and the errors of [`Store::update`], [`Error::Busy`] and
-    /// [`Error::NoFreePort`].
+    /// declare, [`Error::WrongLock`] when `lock` is not the lock of
+    /// `workspace`, and the errors of [`Store::update`], [`Error::Busy`]
+    /// and [`Error::NoFreePort`].
     pub fn reset_ports(
         &self,
-        _lock: &Lock,
+        lock: &WorkspaceLock,
         store: &Store,
         workspace: &mut Workspace,
         manifest: &Manifest,
         names: &[String],
     ) -> Result<Result<(), String>, Error> {
+        lock.check(&workspace.name)?;
         let ledger = manifest.ledger_ports();
         if let Some(unknown) = names.iter().find(|name| !ledger.contains(name)) {
             return Ok(Err(unknown.clone()));
@@ -868,6 +873,43 @@ impl Runs {
         }
         self.assign_ports(store, workspace, manifest, &old, false)?;
         Ok(Ok(()))
+    }
+}
+
+/// The lock of one workspace, which [`Runs::lock`] takes. It remembers the
+/// workspace's name, so a method that acts on a workspace can refuse the
+/// lock of another with [`Error::WrongLock`]. The operating system
+/// releases the lock when this value drops.
+#[derive(Debug)]
+#[must_use = "the lock is released when it drops"]
+pub struct WorkspaceLock {
+    /// The name of the workspace that the lock holds.
+    name: WorkspaceName,
+    /// The held lock of the workspace's lock file.
+    _lock: Lock,
+}
+
+impl WorkspaceLock {
+    /// Returns the name of the workspace that the lock holds.
+    #[must_use]
+    pub const fn name(&self) -> &WorkspaceName {
+        &self.name
+    }
+
+    /// Checks that the lock is the lock of the workspace `acted_on`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongLock`] when the lock holds another workspace.
+    pub fn check(&self, acted_on: &WorkspaceName) -> Result<(), Error> {
+        if &self.name == acted_on {
+            Ok(())
+        } else {
+            Err(Error::WrongLock {
+                locked: self.name.clone(),
+                acted_on: acted_on.clone(),
+            })
+        }
     }
 }
 

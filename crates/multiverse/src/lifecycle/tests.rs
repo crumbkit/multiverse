@@ -1064,3 +1064,45 @@ fn a_repair_of_a_rename_whose_dated_name_was_taken_after_the_question_changes_no
     assert!(matches!(outcome, Ok(Repairing::Changed)), "{outcome:?}");
     assert!(setup.archive_record().is_some());
 }
+
+#[test]
+fn a_held_deletion_refuses_the_lock_of_another_name_and_deletes_nothing() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let other: WorkspaceName = "other".parse().unwrap();
+    let lock = setup.runs.lock(&other).unwrap();
+
+    let refused = setup
+        .lifecycle()
+        .delete_archive_held(&lock, &archive, &VolumesAsked::default());
+
+    assert!(
+        matches!(&refused, Err(Error::WrongLock { locked, acted_on }) if *locked == other && *acted_on == name()),
+        "{refused:?}"
+    );
+    assert_eq!(
+        setup.archive_record().as_ref().map(|a| &a.name),
+        Some(&name())
+    );
+}
+
+#[test]
+fn a_held_finish_refuses_the_lock_of_another_name_and_changes_nothing() {
+    let setup = fresh();
+    setup.create();
+    let mut archive = setup.archive();
+    let before = archive.clone();
+    let other: WorkspaceName = "other".parse().unwrap();
+    let lock = setup.runs.lock(&other).unwrap();
+
+    let refused = setup
+        .lifecycle()
+        .finish_held(&lock, &mut archive, &VolumesAsked::default());
+
+    assert!(
+        matches!(&refused, Err(Error::WrongLock { locked, acted_on }) if *locked == other && *acted_on == name()),
+        "{refused:?}"
+    );
+    assert_eq!(archive, before);
+}
