@@ -295,6 +295,61 @@ fn build_refuses_the_lock_of_another_workspace_and_writes_nothing() {
 }
 
 #[test]
+fn up_refuses_builds_that_passed_under_the_lock_of_another_workspace_and_writes_nothing() {
+    struct Never;
+    impl crate::runs::Admission for Never {
+        fn admit(&mut self, _: &crate::runs::Asked<'_>) -> Box<dyn crate::runs::Place> {
+            panic!("no build asks for a place");
+        }
+        fn output(&self) -> Box<dyn std::io::Write + Send> {
+            panic!("no build writes output");
+        }
+    }
+    let setup = Setup::new();
+    let mut workspace = setup.workspace("triage");
+    let mut other = setup.workspace("other");
+    let runs = setup.runs();
+    let lock = runs.lock(&other.name).unwrap();
+    let before = fs::read(setup.store().path(&workspace.name)).unwrap();
+    let manifest = manifest("[processes.a]\nargv = [\"true\"]\n");
+    let mut ended = runs.build(
+        &lock,
+        &setup.store(),
+        &mut other,
+        &manifest,
+        &[],
+        &mut Never,
+    );
+    if let Ok(crate::runs::BuildEnd::NotGranted(ask)) = &ended {
+        runs.grant(ask).unwrap();
+        ended = runs.build(
+            &lock,
+            &setup.store(),
+            &mut other,
+            &manifest,
+            &[],
+            &mut Never,
+        );
+    }
+    let Ok(crate::runs::BuildEnd::Passed(passed)) = ended else {
+        panic!("expected passed builds, got {ended:?}");
+    };
+    let outcome = runs.up(
+        passed,
+        &setup.store(),
+        &mut workspace,
+        &manifest,
+        &[],
+        &mut Vec::new(),
+    );
+    assert_wrong_lock(outcome.map(|_| ()), &other.name, &workspace.name);
+    assert_eq!(
+        fs::read(setup.store().path(&workspace.name)).unwrap(),
+        before
+    );
+}
+
+#[test]
 fn reset_ports_refuses_the_lock_of_another_workspace_and_writes_nothing() {
     let setup = Setup::new();
     let mut workspace = setup.workspace("triage");

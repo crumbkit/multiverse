@@ -837,8 +837,10 @@ impl Runs {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Store::list`] and [`Store::update`],
-    /// [`Error::NoFreePort`] when no port can be allocated, the errors of
+    /// Returns [`Error::WrongLock`] when the lock that `passed` borrows is
+    /// not the lock of `workspace`, the errors of [`Store::list`] and
+    /// [`Store::update`], [`Error::NoFreePort`] when no port can be
+    /// allocated, the errors of
     /// [`Runs::status`], the docker errors, [`Error::ProcessUnstartable`]
     /// for a process that cannot start, and [`Error::Phase`] for another
     /// failure of phase.
@@ -857,6 +859,7 @@ impl Runs {
     ) -> Result<UpOutcome, Error> {
         // The token says that the builds passed, and it borrows the lock
         // that `up` holds until it returns.
+        passed.lock.check(&workspace.name)?;
         drop(passed);
         let order = match manifest.start_order(names) {
             Ok(order) => order,

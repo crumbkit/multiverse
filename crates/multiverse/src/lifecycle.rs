@@ -715,8 +715,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     pub fn repair(&self, name: &WorkspaceName, confirmed: &Repaired) -> Result<Repairing, Error> {
         let mut locks = Vec::new();
         for held in lock_names(name, confirmed) {
-            let lock = self.runs.lock(&held)?;
-            locks.push((held, lock));
+            locks.push(self.runs.lock(&held)?);
         }
         let again = self.workspaces.repair(self.archives, name, Mode::DryRun)?;
         if !same_repair(confirmed, &again) {
@@ -733,7 +732,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         // repair whose rename chose another name under the locks has
         // renamed the archive and leaves it retired, which `mxv archive -w`
         // of the new name finishes.
-        let Some((_, held)) = locks.iter().find(|(held, _)| *held == archive.name) else {
+        let Some(held) = locks.iter().find(|held| *held.name() == archive.name) else {
             return Ok(Repairing::Changed);
         };
         let finish = self.finish_held(held, &mut archive, &VolumesAsked::default())?;

@@ -163,7 +163,7 @@ workspace may need to act on.
   mxv reports the error as `mxv::workspace::mismatched_checkout`, a defect
   of mxv to report. No command builds such a record.
 - `Runs::lock` returns a `WorkspaceLock`, which keeps the name of the
-  workspace it locks, in place of `Lock`. `Runs::build`, `Runs::down`,
+  workspace it locks, in place of `Lock`. `Runs::build`, `Runs::up`, `Runs::down`,
   `Runs::reset_ports`, `Runs::prepare_task`, `Lifecycle::delete_archive_held`
   and `Lifecycle::finish_held` refuse a lock of another name with the new
   error `WrongLock` and do nothing. mxv reports it as

@@ -154,7 +154,7 @@ impl Context {
     /// when it is missing, so a job that a person runs by hand in the
     /// workspace shows its name in `deadband status`. `up`, `restart`,
     /// `run` and `exec` call it while they hold the workspace's lock
-    /// (`_lock`), so a workspace made before mxv wrote markers gains one.
+    /// (`lock`), so a workspace made before mxv wrote markers gains one.
     /// A marker that cannot be written, or an entry of its name that is not
     /// a file, gives a warning and the verb carries on, because mxv's own
     /// jobs name their workspace to deadband without the marker.

@@ -41,7 +41,6 @@
 //!   would replace this.
 
 use std::io::{self, PipeReader, Read as _, Write};
-use std::marker::PhantomData;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::Path;
 use std::sync::Arc;
@@ -124,8 +123,8 @@ pub trait Place {
 #[must_use = "only a BuildsPassed lets `up` start the workspace's units"]
 pub struct BuildsPassed<'lock> {
     /// The workspace's lock, which the proof borrows so that the proof
-    /// cannot outlive it.
-    lock: PhantomData<&'lock WorkspaceLock>,
+    /// cannot outlive it and so that `up` can check its name.
+    pub(super) lock: &'lock WorkspaceLock,
 }
 
 /// How [`Runs::build`] ended.
@@ -478,7 +477,7 @@ impl Runs {
             })
             .collect();
         let Some(first) = steps.first() else {
-            return Ok(BuildEnd::Passed(BuildsPassed { lock: PhantomData }));
+            return Ok(BuildEnd::Passed(BuildsPassed { lock }));
         };
         let (id, built) = self.prepared(store, workspace, manifest)?;
         let built = match built {
@@ -537,6 +536,6 @@ impl Runs {
                 why,
             });
         }
-        Ok(BuildEnd::Passed(BuildsPassed { lock: PhantomData }))
+        Ok(BuildEnd::Passed(BuildsPassed { lock }))
     }
 }
