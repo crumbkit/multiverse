@@ -5,6 +5,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
+
 use crate::backend::{Backend, INITIALIZING, RefHolder};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
@@ -868,7 +870,8 @@ pub(crate) fn default_branch(base: &str) -> String {
 
 /// What a run of [`Workspaces::make`] created, so that
 /// [`Workspaces::undo`] deletes that and nothing else.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct MadeSoFar {
     /// Whether the run created the workspace's directory.
     pub(crate) directory: bool,
@@ -894,6 +897,7 @@ pub(crate) struct MadeSoFar {
     /// Whether the record belongs to someone else, because the run did not
     /// write it. A restore writes the record last, so [`Workspaces::undo`]
     /// leaves whatever record has the name alone.
+    #[serde(skip)]
     pub(crate) record_not_ours: bool,
 }
 

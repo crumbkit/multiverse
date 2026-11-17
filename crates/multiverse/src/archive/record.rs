@@ -19,7 +19,7 @@ use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Made, Workspace, WorkspaceKind};
 use crate::store::{self, MOST_RECORD_BYTES};
-use crate::workspaces::delete_directory;
+use crate::workspaces::{MadeSoFar, delete_directory};
 
 /// The version of the archive record that an older multiverse wrote, which
 /// had no [`ArchiveState::Retired`]. A record of this version or lower that
@@ -373,6 +373,29 @@ pub struct Archive {
     /// in the order it was written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored: Vec<IgnoredEntry>,
+    /// What a restore of this archive has made so far, written before each
+    /// step creates something, so a restore that died leaves the list of
+    /// what to delete. It is absent unless a restore is running or died,
+    /// and a finished restore deletes the archive with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restoring: Option<RestoreMark>,
+}
+
+/// What a restore wrote ahead of making it, so that
+/// [`Workspaces::undo_stopped_restore`](crate::Workspaces) deletes what a
+/// restore that died made. The mark may name something that the restore did
+/// not get to make, and deleting such a thing is a no-op.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct RestoreMark(pub(crate) MadeSoFar);
+
+impl RestoreMark {
+    /// Reports whether the restore made the workspace's directory, as
+    /// opposed to being about to.
+    #[must_use]
+    pub const fn made_directory(&self) -> bool {
+        self.0.directory
+    }
 }
 
 impl Archive {

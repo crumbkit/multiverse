@@ -50,7 +50,7 @@ pub use admit::{
 pub use ignored::{IgnoredEntry, IgnoredKind, IgnoredSource};
 pub use record::{
     Archive, ArchiveId, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Kept, KeptStash,
-    KeptWip, OLDER_ARCHIVE_VERSION,
+    KeptWip, OLDER_ARCHIVE_VERSION, RestoreMark,
 };
 pub(crate) use record::{MintHeld, mint_held};
 pub use restore::{

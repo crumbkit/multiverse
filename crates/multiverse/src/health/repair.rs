@@ -61,6 +61,10 @@ pub enum Repaired {
     /// The archive that a restore had already rebuilt is deleted, with its
     /// pins and its private tar.
     Deleted(Box<ArchivedRemoval>),
+    /// What a restore that died made is deleted, as its mark in the
+    /// archive's record lists it, and the record no longer holds the mark.
+    /// The archive stays whole.
+    Undone(Box<Archive>),
 }
 
 impl<B: Backend> Workspaces<B> {
@@ -71,7 +75,7 @@ impl<B: Backend> Workspaces<B> {
     /// or moves aside when its pins are gone or it had not retired every
     /// checkout, a rename that an earlier repair
     /// started is finished, and an archive that a restore already rebuilt
-    /// is deleted. `name` may be either name of a rename that stopped. Each
+    /// is deleted, and what a restore that died made is undone. `name` may be either name of a rename that stopped. Each
     /// repair deletes only what the workspace already holds again. In
     /// [`Mode::DryRun`] it changes nothing and returns what it would do.
     /// The caller holds the workspace's lock.
@@ -134,6 +138,15 @@ impl<B: Backend> Workspaces<B> {
             ArchiveCase::RestoreUnfinished => Ok(Repaired::Deleted(Box::new(
                 self.remove_archive(archives, archive, mode)?,
             ))),
+            // The caller holds the lock of the name, so no restore is
+            // running, and the mark is what a dead one left.
+            ArchiveCase::RestoreStopped => {
+                let mut archive = archive;
+                if mode == Mode::Change {
+                    self.undo_stopped_restore(archives, &mut archive)?;
+                }
+                Ok(Repaired::Undone(Box::new(archive)))
+            }
             ArchiveCase::Finishable | ArchiveCase::Resumable(_) | ArchiveCase::Renaming(..) => {
                 Ok(Repaired::Unchanged { repair })
             }

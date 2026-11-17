@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::ignored::{self, IgnoredRefusal};
 use crate::archive::{
-    Archive, ArchiveState, ArchivedCheckout, Archives, KEPT_NAMESPACE, Kept, root,
+    Archive, ArchiveState, ArchivedCheckout, Archives, KEPT_NAMESPACE, Kept, RestoreMark, root,
 };
 use crate::backend::{Backend, RefHolder, WipCommits};
 use crate::error::Error;
@@ -311,7 +311,7 @@ impl<B: Backend> Workspaces<B> {
             });
         }
         let record = workspace.is_some();
-        if record || Entry::at(&archive.path)? != Entry::Absent {
+        if record || !path_is_free(&archive)? {
             return refused(RestoreRefusal::NameTaken {
                 path: archive.path,
                 record,
@@ -409,7 +409,13 @@ impl<B: Backend> Workspaces<B> {
                 }));
             }
         };
-        let original = plan.archive;
+        let mut original = plan.archive;
+        // A restore that died left a mark of what it made. It is undone
+        // here, under the lock that the caller holds, before this run makes
+        // anything.
+        if original.restoring.is_some() {
+            self.undo_stopped_restore(archives, &mut original)?;
+        }
         let mut archive = original.clone();
         let mut warnings = Vec::new();
         let mut lost_pins = Vec::new();
@@ -453,13 +459,19 @@ impl<B: Backend> Workspaces<B> {
             Ok(Ok(ports)) => ports,
             Ok(Err(refusal)) => {
                 self.unmake(&archive, &workspace, &made);
+                self.clear_mark(archives, &archive.name);
                 return Ok(RestoreOutcome::Refused(refusal));
             }
             Err(error) => {
                 self.unmake(&archive, &workspace, &made);
+                self.clear_mark(archives, &archive.name);
                 return Err(error);
             }
         };
+        // The workspace's record exists now, so the mark must go before
+        // anything can remove the workspace and leave the mark to name a
+        // directory that something else may hold by then.
+        self.mark(archives, &archive.name, None)?;
         (self.checkpoint)("record")?;
         if archive.containers_ran {
             runs.remember_containers(&archive.name)?;
@@ -493,6 +505,65 @@ impl<B: Backend> Workspaces<B> {
             let _ = root::delete_entries(&archive.root, &archive.path);
         }
         self.undo(workspace, made);
+    }
+
+    /// Undoes what a restore of `archive` that died made, as the mark in the
+    /// record lists it, and writes the record without the mark. It deletes
+    /// the workspace's directory with everything in it only when the mark
+    /// says the restore made the directory. It deletes an empty directory
+    /// at the path when the mark was written before the directory, because
+    /// the restore may have died between making it and writing the mark
+    /// again. Each step tolerates what is already gone, so the function can
+    /// run again after it stops partway.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of writing the record.
+    pub(crate) fn undo_stopped_restore(
+        &self,
+        archives: &Archives,
+        archive: &mut Archive,
+    ) -> Result<(), Error> {
+        let Some(RestoreMark(mut made)) = archive.restoring.clone() else {
+            return Ok(());
+        };
+        made.record_not_ours = true;
+        let workspace = archive.workspace().finished();
+        self.unmake(archive, &workspace, &made);
+        if made.directory {
+            // What the run wrote that the mark does not list, such as a
+            // half-written file, goes with the directory it made.
+            delete_directory(&archive.path)?;
+        } else {
+            let _ = std::fs::remove_dir(&archive.path);
+        }
+        archive.restoring = None;
+        archives.write(archive)
+    }
+
+    /// Writes the record of `name` without its mark after a failed restore
+    /// deleted what the run made. The caller reports the failure that
+    /// stopped the run, so a write that fails leaves the mark, which the
+    /// next restore or a repair undoes again.
+    fn clear_mark(&self, archives: &Archives, name: &WorkspaceName) {
+        let _ = self.mark(archives, name, None);
+    }
+
+    /// Writes the record of `name` with `made` as its mark, or without a
+    /// mark, before the run makes what `made` lists. It changes only the
+    /// mark of the record that is on disk, so what a restore from an origin
+    /// trims from its own copy of the archive is never written.
+    fn mark(
+        &self,
+        archives: &Archives,
+        name: &WorkspaceName,
+        made: Option<&MadeSoFar>,
+    ) -> Result<(), Error> {
+        let Some(mut record) = archives.read(name)? else {
+            return Ok(());
+        };
+        record.restoring = made.map(|made| RestoreMark(made.clone()));
+        archives.write(&record)
     }
 
     /// Fetches the origin of the clone `checkout` into its mirror, as a
@@ -691,10 +762,23 @@ impl<B: Backend> Workspaces<B> {
         if let Some(parent) = archive.path.parent() {
             std::fs::create_dir_all(parent).map_err(unwritable(parent))?;
         }
+        self.mark(archives, &archive.name, Some(made))?;
         std::fs::create_dir(&archive.path).map_err(unwritable(&archive.path))?;
         made.directory = true;
+        self.mark(archives, &archive.name, Some(made))?;
         (self.checkpoint)("directory")?;
         for (checkout, archived) in workspace.checkouts.iter_mut().zip(&archive.checkouts) {
+            // The mark names what this checkout is about to make: its
+            // clone, or the branch that its worktree creates.
+            let mut ahead = made.clone();
+            if archive.kind == WorkspaceKind::Clone {
+                ahead.clones += 1;
+            } else {
+                ahead
+                    .branches
+                    .push(self.branch_to_create(checkout, archived)?);
+            }
+            self.mark(archives, &archive.name, Some(&ahead))?;
             if archive.kind == WorkspaceKind::Clone {
                 self.rebuild_clone(checkout, archived, made)?;
             } else {
@@ -740,7 +824,10 @@ impl<B: Backend> Workspaces<B> {
         }
         (self.checkpoint)("ignored")?;
         for (checkout, archived) in workspace.checkouts.iter().zip(&archive.checkouts) {
-            let mut kept = self.put_back_kept(archive.kind, checkout, &archived.kept, made)?;
+            let mut kept =
+                self.put_back_kept(archive.kind, checkout, &archived.kept, made, &|made| {
+                    self.mark(archives, &archive.name, Some(made))
+                })?;
             kept.ignored = written
                 .iter()
                 .filter(|path| folder_of(path) == checkout.name)
@@ -750,8 +837,10 @@ impl<B: Backend> Workspaces<B> {
         }
         (self.checkpoint)("kept")?;
         made.agents = true;
-        self.write_agents(workspace)?;
         made.manifest = archive.manifest.is_some();
+        made.marker = true;
+        self.mark(archives, &archive.name, Some(made))?;
+        self.write_agents(workspace)?;
         root::write_back(archives, archive, &archive.path, &workspace.manifest_file())?;
         (self.checkpoint)("root")?;
         // The archive leaves the marker out, so the run writes it again,
@@ -820,11 +909,7 @@ impl<B: Backend> Workspaces<B> {
             checkout.commit = Some(commit);
             return Ok(());
         }
-        let created = if self
-            .backend
-            .branch_tip(&checkout.source, &checkout.branch)?
-            .is_some()
-        {
+        let created = if self.branch_to_create(checkout, archived)?.is_none() {
             None
         } else {
             self.backend
@@ -836,6 +921,25 @@ impl<B: Backend> Workspaces<B> {
                 .add_checkout(&checkout.source, &checkout.path, &checkout.branch)?;
         checkout.commit = Some(commit);
         Ok(())
+    }
+
+    /// Returns the commit at which the restore of the worktree `checkout`
+    /// creates its branch, or `None` when it makes none, because the
+    /// worktree is detached or the repository holds the branch already.
+    fn branch_to_create(
+        &self,
+        checkout: &Checkout,
+        archived: &ArchivedCheckout,
+    ) -> Result<Option<String>, Error> {
+        if archived.detached
+            || self
+                .backend
+                .branch_tip(&checkout.source, &checkout.branch)?
+                .is_some()
+        {
+            return Ok(None);
+        }
+        Ok(Some(archived.commit.clone()))
     }
 
     /// Puts back what `kept` holds into `checkout`, a checkout of a
@@ -851,6 +955,7 @@ impl<B: Backend> Workspaces<B> {
         checkout: &Checkout,
         kept: &Kept,
         made: &mut MadeSoFar,
+        journal: &dyn Fn(&MadeSoFar) -> Result<(), Error>,
     ) -> Result<PutBack, Error> {
         let path = &checkout.path;
         let mut put_back = PutBack {
@@ -892,10 +997,20 @@ impl<B: Backend> Workspaces<B> {
         }
         for commit in &kept.orphans {
             let reference = format!("{KEPT_NAMESPACE}{commit}");
-            let created = self.backend.create_ref(path, &reference, commit)?;
-            if created && kind == WorkspaceKind::Worktree {
+            // The mark names the reference before the run creates it, so a
+            // death in between leaves nothing unlisted. A reference that the
+            // repository holds already stays, as it may belong to another
+            // source.
+            if kind == WorkspaceKind::Worktree
+                && self
+                    .backend
+                    .resolve_commit(RefHolder::Repository(&checkout.source), &reference)?
+                    .is_none()
+            {
                 made.refs.push((checkout.source.clone(), reference.clone()));
+                journal(made)?;
             }
+            self.backend.create_ref(path, &reference, commit)?;
             put_back.kept.push(reference);
         }
         put_back.submodules = self.backend.submodule_paths(path)?;
@@ -963,6 +1078,22 @@ impl<B: Backend> Workspaces<B> {
         let warnings = self.delete_pins(&archive);
         archives.delete(&archive)?;
         Ok(ArchivedRemoval { archive, warnings })
+    }
+}
+
+/// Reports whether the path of `archive` is free for a restore: nothing is
+/// there, or the archive's mark covers what is there. The mark covers a
+/// directory that it says the restore made, and an empty directory when the
+/// mark was written before the restore made one. Any other occupant is the
+/// person's, so it is never deleted.
+fn path_is_free(archive: &Archive) -> Result<bool, Error> {
+    match (Entry::at(&archive.path)?, &archive.restoring) {
+        (Entry::Absent, _) => Ok(true),
+        (Entry::Present, Some(mark)) if mark.made_directory() => Ok(true),
+        (Entry::Present, Some(_)) => {
+            Ok(std::fs::read_dir(&archive.path).is_ok_and(|mut entries| entries.next().is_none()))
+        }
+        _ => Ok(false),
     }
 }
 

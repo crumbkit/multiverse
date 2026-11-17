@@ -1814,6 +1814,19 @@ name that only a finished archive holds, and `mxv remove` of a name that no
 workspace has, or with `--archived` no archive, also exit 0 with the state
 `unchanged`.
 
+A restore writes a mark into the archive's record, in the field `restoring`,
+before each step that creates something: the workspace's directory, a clone or
+a worktree's branch, a kept reference in a worktree's repository, and the
+files of the workspace's directory. When a restore dies, the archive stays
+whole and keeps the mark, and `mxv list` names `mxv repair NAME`. The next
+`mxv restore NAME` deletes what the mark lists and restores again, and
+`mxv repair NAME` deletes it without restoring and reports the state `undone`
+with the directory. mxv deletes a directory at the workspace's path, with
+everything in it, only when the mark says the restore made it. When the mark
+was written before the restore made the directory, only an empty directory at
+the path is deleted. A directory that you made refuses the restore with
+`mxv::restore::name_taken` and stays as it is.
+
 A restore refuses, and builds nothing, with these codes:
 
 | Code | Cause |

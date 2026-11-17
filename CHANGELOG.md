@@ -45,6 +45,15 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv restore` writes a mark into the archive's record, in the optional
+  field `restoring`, before each step that creates something. When a restore
+  dies, the next `mxv restore` of the name deletes what the mark lists and
+  restores again, instead of refusing with `mxv::restore::name_taken`, and
+  `mxv repair NAME` deletes it without restoring, with the new state
+  `undone` that names the directory. `mxv list` shows the new problem "the
+  restore stopped before it finished, and left what it made". mxv deletes a
+  directory at the workspace's path only when the mark says the restore made
+  it, or when the directory is empty. The archive record stays at version 3.
 - `mxv repair NAME` deletes an archive that a restore already rebuilt only
   when it is the archive the person confirmed. When another archive of the
   name needs that repair by the time the lock is held, the repair reports

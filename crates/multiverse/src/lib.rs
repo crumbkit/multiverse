@@ -52,7 +52,7 @@ pub use crate::archive::{
     ArchivePlan, ArchivePlanned, ArchiveRecords, ArchiveRefusal, ArchiveState, ArchivedCheckout,
     ArchivedRemoval, Archives, FileStatus, IgnoredEntry, IgnoredKind, IgnoredSource,
     KEPT_NAMESPACE, Kept, KeptStash, KeptWip, LostPin, MirrorLoss, OLDER_ARCHIVE_VERSION,
-    PortChange, PutBack, RestoreOptions, RestoreOutcome, RestorePlan, RestorePlanned,
+    PortChange, PutBack, RestoreMark, RestoreOptions, RestoreOutcome, RestorePlan, RestorePlanned,
     RestoreRefusal, Restored, RootEntry, RootKind, Uncommitted, Unkeepable, Unkept, UnkeptKind,
     WIP_MESSAGE,
 };

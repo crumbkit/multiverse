@@ -1015,7 +1015,9 @@ impl<B: Backend> Workspaces<B> {
             ArchiveCase::BesideNewerWorkspace
             | ArchiveCase::RestoreUnfinished
             | ArchiveCase::ArchivedBesideWorkspace => refused(ArchiveRefusal::NameTaken(boxed())),
-            ArchiveCase::Archived => Ok(Subject::Done(ArchivePlanned::Unchanged(boxed()))),
+            ArchiveCase::Archived | ArchiveCase::RestoreStopped => {
+                Ok(Subject::Done(ArchivePlanned::Unchanged(boxed())))
+            }
         }
     }
 
@@ -1203,6 +1205,7 @@ impl ArchivePlan {
                         .collect()
                 })
                 .unwrap_or_default(),
+            restoring: None,
         }
     }
 

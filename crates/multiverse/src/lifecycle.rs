@@ -772,8 +772,8 @@ fn lock_names(name: &WorkspaceName, planned: &Repaired) -> Vec<WorkspaceName> {
 }
 
 /// Reports whether `again` is the repair that `confirmed` asked about: the
-/// same directory moved aside, the same rename, or a deletion of the same
-/// archive. A deletion names its archive by id, because another repair,
+/// same directory moved aside, the same rename, a deletion of the same
+/// archive, or the same archive's stopped restore undone. A deletion names its archive by id, because another repair,
 /// a new archive and a stopped restore can leave another archive of the
 /// name to delete while the question is open. Any other plan asks no
 /// question, so it is never confirmed.
@@ -792,6 +792,7 @@ fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
         (Repaired::Deleted(asked), Repaired::Deleted(deleted)) => {
             asked.archive.id == deleted.archive.id
         }
+        (Repaired::Undone(asked), Repaired::Undone(undone)) => asked.id == undone.id,
         _ => false,
     }
 }
