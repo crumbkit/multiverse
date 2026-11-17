@@ -5,3 +5,16 @@
 [profile.default]
 fail-fast = false
 retries = 0
+
+# The tests of crates/mxv/tests/services.rs each start LocalStack or
+# DynamoDB Local, and on a runner that has not pulled their images the
+# first start downloads them. Run together, four of the tests wait out the
+# same download side by side and each holds a test slot for 44 to 51
+# seconds. In this group one test downloads the images while the other
+# slots run other tests, and the rest start from the pulled images.
+[test-groups]
+mxv-services = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = "package(mxv) and binary(services)"
+test-group = "mxv-services"
