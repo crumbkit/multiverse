@@ -7,9 +7,8 @@ use std::path::PathBuf;
 use multiverse::health::{self, Problem};
 use multiverse::{
     AddOutcome, Allow, ArchiveState, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined,
-    Lifecycle, Manifest, ManifestProblem, Mode, NewOutcome, PathGlob, RemovalKind, RemovalPlan,
-    RemoveAsked, Removed, Repo, Store, Workspace, WorkspaceName, Workspaces, checkout_prefix,
-    prefixed,
+    Lifecycle, Manifest, ManifestProblem, Mode, NewOutcome, PathGlob, RemovalPlan, RemoveAsked,
+    Removed, Repo, Store, Workspace, WorkspaceName, Workspaces, checkout_prefix, prefixed,
 };
 
 use crate::cli::{AddArgs, CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
@@ -817,10 +816,7 @@ pub(crate) fn remove(
     let stashes: usize = removal
         .checkouts
         .iter()
-        .map(|checkout| match &checkout.kind {
-            RemovalKind::Clone { stashes, .. } => stashes.len(),
-            RemovalKind::Worktree { .. } => 0,
-        })
+        .map(|checkout| checkout.stashes().len())
         .sum();
     if stashes > 0 {
         question.push_str(&format!(

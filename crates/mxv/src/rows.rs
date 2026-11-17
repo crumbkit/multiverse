@@ -9,8 +9,7 @@ use multiverse::health::{Broken, Problem, Repair};
 use multiverse::{
     Allow, Archive, Backend, BranchFate, Checkout, CheckoutRemoval, Cloned, DiskUsage,
     DisposableSource, Fate, IgnoredEntry, Kind, MANIFEST_FILE, Manifest, ManifestSource,
-    ProcessNote, ProcessState, ProcessStatus, Removal, RemovalKind, Workspace, WorkspaceKind,
-    WorkspaceName,
+    ProcessNote, ProcessState, ProcessStatus, Removal, Workspace, WorkspaceKind, WorkspaceName,
 };
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -876,12 +875,7 @@ impl From<&CheckoutRemoval> for CheckoutRemovalRow {
             branch_fate,
             unmerged_commits,
             stray_commits: removal.lost_commits(),
-            stashes: match &removal.kind {
-                RemovalKind::Clone { stashes, .. } => {
-                    u32::try_from(stashes.len()).unwrap_or(u32::MAX)
-                }
-                RemovalKind::Worktree { .. } => 0,
-            },
+            stashes: u32::try_from(removal.stashes().len()).unwrap_or(u32::MAX),
         }
     }
 }

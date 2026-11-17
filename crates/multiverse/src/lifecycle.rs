@@ -788,7 +788,7 @@ fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
                 archive: asked,
             },
             Repaired::Renamed { from, archive },
-        ) => asked_from == from && asked.name == archive.name,
+        ) => asked_from == from && asked.name == archive.name && asked.id == archive.id,
         (Repaired::Deleted(asked), Repaired::Deleted(deleted)) => {
             asked.archive.id == deleted.archive.id
         }

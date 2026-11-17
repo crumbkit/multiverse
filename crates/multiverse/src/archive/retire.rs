@@ -532,8 +532,9 @@ impl<B: Backend> Workspaces<B> {
 
     /// Marks `archive`, whose workspace is gone, as finished. Only the
     /// library calls it, with the archive of an [`ArchivePlanned::Finish`],
-    /// of an [`ArchiveOutcome::Retired`] or of a repaired rename, because a
-    /// retiring archive must never be finished.
+    /// of an [`ArchiveOutcome::Retired`] or of a repaired rename, because an
+    /// archive that does not count as retired
+    /// ([`Archive::counts_as_retired`]) must never be finished.
     ///
     /// # Errors
     ///

@@ -369,6 +369,17 @@ impl CheckoutRemoval {
         }
     }
 
+    /// Returns the commit of each stash entry that the removal deletes: a
+    /// clone's stashes, and none for a worktree, whose stashes stay in its
+    /// repository.
+    #[must_use]
+    pub fn stashes(&self) -> &[String] {
+        match &self.kind {
+            RemovalKind::Clone { stashes, .. } => stashes,
+            RemovalKind::Worktree { .. } => &[],
+        }
+    }
+
     /// Reports whether the checkout is a worktree whose `.git` file is
     /// gone, as the worktree's `partial` says. A clone never is.
     #[must_use]
