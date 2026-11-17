@@ -128,6 +128,9 @@ impl<B: Backend> Workspaces<B> {
                 let to = self.dated_name(archives, &archive)?;
                 self.finish_rename(archives, &archive, &to, mode)
             }
+            // The caller holds the lock of the name, as `mxv repair` does, and
+            // `archive_case` above read the record under it, so this deletes
+            // the archive that the classification named.
             ArchiveCase::RestoreUnfinished => Ok(Repaired::Deleted(Box::new(
                 self.remove_archive(archives, archive, mode)?,
             ))),

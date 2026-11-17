@@ -27,7 +27,18 @@ fn declared(workspace: &str, routes: &[&str], ports: &[(&str, u16)]) -> Declared
             .map(|(port, number)| ((*port).to_owned(), *number))
             .collect(),
         BTreeMap::new(),
+        BTreeMap::new(),
     )
+}
+
+/// Returns `declared` with the extra host names `names` on its route
+/// `route`.
+fn hosted(mut declared: Declared, route: &str, names: &[&str]) -> Declared {
+    declared.hosts.insert(
+        route.to_owned(),
+        names.iter().map(|name| (*name).to_owned()).collect(),
+    );
+    declared
 }
 
 fn hosts(derived: &Derived) -> Vec<&str> {
@@ -44,7 +55,13 @@ fn settings(dir: &Path) -> Settings {
 
 /// Creates the workspace `workspace` in `store`, whose checkout holds the
 /// manifest `manifest`, with the ports `ports` in its ledger.
-fn workspace(store: &Store, dir: &Path, workspace: &str, manifest: &str, ports: &[(&str, u16)]) {
+pub(super) fn workspace(
+    store: &Store,
+    dir: &Path,
+    workspace: &str,
+    manifest: &str,
+    ports: &[(&str, u16)],
+) {
     let name = name(workspace);
     let path = dir.join("workspaces").join(name.as_str());
     let checkout_dir = path.join("app");
@@ -193,7 +210,7 @@ fn a_held_address_fails_with_port_held_naming_the_address_and_the_key() {
     drop(free);
     let error = proxy.sync(&store, SyncMode::Start, true).unwrap_err();
     assert!(
-        matches!(error, ProxyError::PortHeld { address: found, key: "proxy_http" } if found == address)
+        matches!(error, ProxyError::PortHeld { address: found, key: "proxy_http", .. } if found == address)
     );
     let text = error.to_string();
     assert!(text.contains(&address.to_string()), "{text}");
@@ -323,6 +340,7 @@ fn route_urls_list_only_the_routes_of_the_asked_workspace() {
     let synced = super::Synced {
         served: derived.served,
         https: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 443))),
+        ..super::Synced::default()
     };
     assert_eq!(
         synced.urls_of(&name("reading-list")),
@@ -332,4 +350,235 @@ fn route_urls_list_only_the_routes_of_the_asked_workspace() {
         ]
     );
     let _: Option<Route> = None;
+}
+
+#[test]
+fn a_route_carries_the_extra_hosts_of_its_unit() {
+    let derived = derive(vec![hosted(
+        declared("contacts", &["web"], &[("web", 21001)]),
+        "web",
+        &["local.app.example.com", "alt.app.example.com"],
+    )]);
+    assert_eq!(
+        derived.served[0].extra,
+        ["local.app.example.com", "alt.app.example.com"]
+    );
+    assert!(derived.shadowed_hosts.is_empty());
+}
+
+#[test]
+fn the_workspace_that_sorts_first_serves_an_extra_host_that_two_list() {
+    let derived = derive(vec![
+        hosted(
+            declared("triage", &["web"], &[("web", 21002)]),
+            "web",
+            &["local.app.example.com"],
+        ),
+        hosted(
+            declared("contacts", &["web"], &[("web", 21001)]),
+            "web",
+            &["local.app.example.com"],
+        ),
+    ]);
+    let contacts = derived
+        .served
+        .iter()
+        .find(|route| route.workspace.as_str() == "contacts")
+        .unwrap();
+    let triage = derived
+        .served
+        .iter()
+        .find(|route| route.workspace.as_str() == "triage")
+        .unwrap();
+    assert_eq!(contacts.extra, ["local.app.example.com"]);
+    assert!(triage.extra.is_empty());
+    assert_eq!(derived.shadowed_hosts.len(), 1);
+    let unserved = &derived.shadowed_hosts[0];
+    assert_eq!(unserved.host, "local.app.example.com");
+    assert_eq!(unserved.workspace.as_str(), "triage");
+    assert_eq!(unserved.route, "web");
+    assert_eq!(unserved.by.as_str(), "contacts");
+}
+
+#[test]
+fn the_extra_hosts_of_a_route_that_a_host_label_shadows_are_not_served() {
+    let derived = derive(vec![
+        hosted(
+            declared("my_notes", &["web"], &[("web", 21001)]),
+            "web",
+            &["first.example.com"],
+        ),
+        hosted(
+            declared("my-notes", &["web"], &[("web", 21003)]),
+            "web",
+            &["second.example.com"],
+        ),
+    ]);
+    assert_eq!(derived.served.len(), 1);
+    assert_eq!(derived.served[0].extra, ["second.example.com"]);
+    assert!(derived.shadowed_hosts.is_empty());
+    assert_eq!(derived.shadowed.len(), 1);
+}
+
+#[test]
+fn the_url_of_an_extra_host_carries_the_https_port_unless_it_is_443() {
+    let derived = derive(vec![hosted(
+        declared("contacts", &["web"], &[("web", 21001)]),
+        "web",
+        &["local.app.example.com"],
+    )]);
+    let route = &derived.served[0];
+    assert_eq!(
+        route.extra_urls(SocketAddr::from((Ipv4Addr::LOCALHOST, 443))),
+        ["https://local.app.example.com"]
+    );
+    assert_eq!(
+        route.extra_urls(SocketAddr::from((Ipv4Addr::LOCALHOST, 8443))),
+        ["https://local.app.example.com:8443"]
+    );
+}
+
+#[test]
+fn the_config_matches_extra_hosts_in_the_route_the_error_page_and_the_tls_subjects() {
+    let derived = derive(vec![hosted(
+        declared("contacts", &["web"], &[("web", 21001)]),
+        "web",
+        &["local.app.example.com"],
+    )]);
+    let rendered = caddy_config::render(&settings(Path::new("/x")), &derived.served);
+    let hosts = serde_json::json!(["web.contacts.mxv.localhost", "local.app.example.com"]);
+    let server = &rendered["apps"]["http"]["servers"]["mxv"];
+    assert_eq!(server["routes"][0]["match"][0]["host"], hosts);
+    assert_eq!(server["errors"]["routes"][0]["match"][0]["host"], hosts);
+    assert_eq!(
+        rendered["apps"]["tls"]["automation"]["policies"][0]["subjects"],
+        hosts
+    );
+}
+
+#[test]
+fn the_extra_hosts_of_a_workspace_list_as_routes_with_their_urls() {
+    let derived = derive(vec![
+        hosted(
+            declared("reading-list", &["web", "api"], &[("web", 1), ("api", 2)]),
+            "web",
+            &["local.app.example.com"],
+        ),
+        declared("triage", &["web"], &[("web", 3)]),
+    ]);
+    let synced = super::Synced {
+        served: derived.served,
+        https: Some(SocketAddr::from((Ipv4Addr::LOCALHOST, 8443))),
+        ..super::Synced::default()
+    };
+    assert_eq!(
+        synced.extra_urls_of(&name("reading-list")),
+        ["web at https://local.app.example.com:8443"]
+    );
+    assert_eq!(
+        synced.extra_hosts_of(&name("reading-list")),
+        ["local.app.example.com"]
+    );
+    assert!(synced.extra_urls_of(&name("triage")).is_empty());
+}
+
+#[test]
+fn a_workspace_that_takes_a_host_label_displaces_the_workspaces_it_shadows() {
+    let derived = derive(vec![
+        declared("my.notes", &["web"], &[("web", 1)]),
+        declared("my_notes", &["web"], &[("web", 2)]),
+    ]);
+    let synced = super::Synced {
+        served: derived.served,
+        shadowed: derived.shadowed,
+        shadowed_hosts: derived.shadowed_hosts,
+        ..super::Synced::default()
+    };
+    assert_eq!(synced.displaced_by(&name("my.notes")), [name("my_notes")]);
+    assert!(synced.displaced_by(&name("my_notes")).is_empty());
+}
+
+#[test]
+fn a_workspace_that_takes_only_an_extra_host_displaces_no_workspace() {
+    let derived = derive(vec![
+        hosted(
+            declared("alpha", &["web"], &[("web", 1)]),
+            "web",
+            &["app.example.com"],
+        ),
+        hosted(
+            declared("beta", &["api"], &[("api", 2)]),
+            "api",
+            &["app.example.com"],
+        ),
+    ]);
+    let synced = super::Synced {
+        served: derived.served,
+        shadowed: derived.shadowed,
+        shadowed_hosts: derived.shadowed_hosts,
+        ..super::Synced::default()
+    };
+    assert!(synced.displaced_by(&name("alpha")).is_empty());
+}
+
+#[test]
+fn the_served_routes_come_with_a_sentence_for_each_manifest_left_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join("records"));
+    workspace(
+        &store,
+        dir.path(),
+        "triage",
+        "ports = [\"web\"]\nroutes = [\"web\"]\n[processes.web]\nargv = [\"web\"]\nports = { PORT = \"web\" }\nlisten = \"web\"\n",
+        &[("web", 21001)],
+    );
+    let (routes, problems) = super::served(&store);
+    assert_eq!(routes.len(), 1);
+    assert!(problems.is_empty(), "{problems:?}");
+    write(
+        dir.path().join("workspaces/triage/app/mxv.toml"),
+        "routes = [",
+    );
+    let (routes, problems) = super::served(&store);
+    assert!(routes.is_empty());
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with("the manifest of triage is left out"),
+        "{problems:?}"
+    );
+}
+
+#[test]
+fn the_problems_of_a_workspace_leave_out_those_of_the_others() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join("records"));
+    for workspace_name in ["triage", "triage-two"] {
+        workspace(
+            &store,
+            dir.path(),
+            workspace_name,
+            "ports = [\"web\"]\nroutes = [\"web\"]\n",
+            &[("web", 21001)],
+        );
+        write(
+            dir.path()
+                .join("workspaces")
+                .join(workspace_name)
+                .join("app/mxv.toml"),
+            "routes = [",
+        );
+    }
+    let (_, problems) = super::served(&store);
+    assert_eq!(problems.len(), 2, "{problems:?}");
+    let synced = super::Synced {
+        problems,
+        ..super::Synced::default()
+    };
+    let own = synced.problems_of(&name("triage"));
+    assert_eq!(own.len(), 1, "{own:?}");
+    assert!(
+        own[0].starts_with("the manifest of triage is left out"),
+        "{own:?}"
+    );
+    assert!(synced.problems_of(&name("other")).is_empty());
 }

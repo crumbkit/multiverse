@@ -30,7 +30,7 @@ fn a_restore_whose_records_changed_after_the_question_offers_its_dry_run() {
     assert_eq!(failure.code(), RESTORE_CHANGED);
     assert_eq!(
         failure.to_string(),
-        "the records of triage changed after mxv asked, so mxv deleted nothing"
+        "the records of triage changed after mxv asked, so mxv changed nothing"
     );
     let Recovery::Run(call) = failure.recovery() else {
         panic!("{failure:?} offers no call");

@@ -28,6 +28,7 @@ mod disposable;
 mod error;
 mod git;
 pub mod health;
+mod lifecycle;
 mod lookup;
 mod manifest;
 mod marker;
@@ -66,6 +67,10 @@ pub use crate::disposable::{
 };
 pub use crate::error::{Error, SshRefusal};
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
+pub use crate::lifecycle::{
+    ArchiveDeleted, Archived, Finish, FinishDone, Finished, InUse, Lifecycle, RemovalDone,
+    RemoveAsked, Removed, RepairDone, Repairing, Restoration, RetireDone, VolumesAsked,
+};
 pub use crate::lookup::{ManifestInputs, ManifestSource, TaskHome, checkout_prefix, prefixed};
 pub use crate::manifest::{
     Command, Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,
@@ -79,9 +84,11 @@ pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::process::process_table;
 pub use crate::provision::{ProvisionError, Spec as ProvisionSpec, provision};
 pub use crate::proxy::{
-    Authority, DOMAIN as ROUTE_DOMAIN, Declared, Derived, Proxy, ProxyError, Route,
-    Settings as ProxySettings, Shadowed, Status as ProxyStatus, SyncMode, Synced,
-    derive as derive_routes,
+    Authority, Check as ProxyCheck, CheckRow as ProxyCheckRow, CheckState as ProxyCheckState,
+    DOMAIN as ROUTE_DOMAIN, Declared, Derived, Ensured, Proxy, ProxyError, Resolution, Resolver,
+    Route, Settings as ProxySettings, Shadowed, ShadowedHost, Status as ProxyStatus, SyncMode,
+    Synced, SystemResolver, derive as derive_routes, line_for as hosts_line,
+    missing as missing_hosts,
 };
 pub use crate::record::{
     AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,

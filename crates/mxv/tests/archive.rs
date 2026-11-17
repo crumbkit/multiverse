@@ -338,6 +338,10 @@ fn a_second_archive_during_an_archives_volume_deletion_fails_busy_and_then_has_n
     assert_eq!(
         verbs,
         [
+            // The listing before the question, and the listing under the
+            // lock, which compares with it.
+            "volume ls",
+            "volume inspect",
             "volume ls",
             "volume inspect",
             "container ls",
@@ -2510,4 +2514,427 @@ fn removing_a_workspace_beside_a_stopped_archive_of_another_id_warns_of_nothing(
     let warned = warnings(&document);
     assert!(!warned.contains("mxv repair"), "{warned}");
     assert!(!warned.contains("mxv archive"), "{warned}");
+}
+
+#[test]
+fn remove_archived_reports_archive_changed_when_the_archive_was_replaced() {
+    let setup = Setup::new();
+    let id = setup.archive_with_containers();
+    let state = setup.root().join("state/mxv");
+    let record = state.join("archives/triage/archive.json");
+    let blocked = setup.root().join("docker-blocked");
+    let release = setup.root().join("docker-release");
+    // The fake docker blocks the first volume listing, which the command
+    // makes after it has read the archive and before it asks.
+    let docker =
+        FakeDocker::new_blocking(&setup.root(), &state, &id, &["data"], (&blocked, &release));
+
+    let (exit, document, replaced_id) = std::thread::scope(|scope| {
+        let waiting = scope.spawn(|| {
+            setup.run_with_docker(
+                &docker,
+                &[
+                    "remove",
+                    "--archived",
+                    "triage",
+                    "--delete-volumes",
+                    "--yes",
+                ],
+            )
+        });
+        let released = Release(release.clone());
+        wait_for_file(&blocked, || waiting.is_finished());
+        // A new archive takes the name meanwhile, which has another id.
+        let mut replaced: Value =
+            serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+        let replaced_id: String = replaced["id"].as_str().unwrap().chars().rev().collect();
+        replaced["id"] = Value::from(replaced_id.clone());
+        write(&record, &serde_json::to_string_pretty(&replaced).unwrap());
+        drop(released);
+        let (exit, document) = waiting.join().unwrap();
+        (exit, document, replaced_id)
+    });
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::changed", "{document}");
+    let text = recovery(&document);
+    assert!(text.contains("mxv remove --archived triage"), "{text}");
+    let kept: Value = serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+    assert_eq!(kept["state"], "archived", "{kept}");
+    assert_eq!(kept["id"], replaced_id.as_str(), "{kept}");
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+}
+
+/// The fake docker of a test of an archive's volumes. It lists the volumes
+/// of one workspace id and logs each call. From its second listing on, it
+/// also lists `extra`, as docker does when a volume appears between the
+/// question and the deletion.
+struct FakeDocker {
+    /// The directory that holds the fake `docker` program.
+    bin: PathBuf,
+    /// The file that logs each call.
+    calls: PathBuf,
+}
+
+impl FakeDocker {
+    /// Writes a fake docker that lists `volumes` of the workspace id `id`
+    /// under the state directory `state`, and `extra` from the second
+    /// listing on.
+    fn new(root: &Path, state: &Path, id: &str, volumes: &[&str], extra: Option<&str>) -> Self {
+        Self::build(root, state, id, volumes, extra, None)
+    }
+
+    /// Writes a fake docker that lists `volumes` of the workspace id `id`,
+    /// and whose volume listings create the file `blocked` and then wait
+    /// until the file `release` exists.
+    fn new_blocking(
+        root: &Path,
+        state: &Path,
+        id: &str,
+        volumes: &[&str],
+        (blocked, release): (&Path, &Path),
+    ) -> Self {
+        Self::build(root, state, id, volumes, None, Some((blocked, release)))
+    }
+
+    /// Writes the fake docker for [`FakeDocker::new`] and
+    /// [`FakeDocker::new_blocking`].
+    fn build(
+        root: &Path,
+        state: &Path,
+        id: &str,
+        volumes: &[&str],
+        extra: Option<&str>,
+        block: Option<(&Path, &Path)>,
+    ) -> Self {
+        let wait = block.map_or_else(String::new, |(blocked, release)| {
+            format!(
+                ": > '{}'; while [ ! -e '{}' ]; do sleep 0.1; done;",
+                blocked.display(),
+                release.display()
+            )
+        });
+        let bin = root.join("fake-bin");
+        let calls = root.join("docker-calls");
+        let lists = root.join("docker-lists");
+        let hash = volume_hash(id);
+        let named = |kind: &str| format!("phase-{hash}.{kind}");
+        let first: Vec<String> = volumes.iter().map(|kind| named(kind)).collect();
+        let extra = extra.map(named).unwrap_or_default();
+        let labels = |kind: &str| {
+            serde_json::json!({
+                "mxv.volume": kind,
+                "mxv.workspace-id": id,
+                "mxv.run-record": state.join(format!("phase/runs/{id}.json")).display().to_string(),
+            })
+        };
+        let script = format!(
+            "#!/bin/sh\n\
+             echo \"$*\" >> '{calls}'\n\
+             for last; do :; done\n\
+             case \"$1 $2\" in\n\
+             'volume ls')\n\
+             {wait}\n\
+             echo x >> '{lists}'\n\
+             n=$(wc -l < '{lists}')\n\
+             for volume in {first}; do echo \"$volume\"; done\n\
+             if [ \"$n\" -ge 2 ] && [ -n '{extra}' ]; then echo '{extra}'; fi ;;\n\
+             'volume inspect')\n\
+             case \"$last\" in\n\
+             *.data) echo '{data}' ;;\n\
+             *) echo '{other}' ;;\n\
+             esac ;;\n\
+             'container ls') ;;\n\
+             'volume rm') echo \"$last\" ;;\n\
+             *) echo 'the fake docker has no answer' >&2; exit 1 ;;\n\
+             esac\n",
+            calls = calls.display(),
+            lists = lists.display(),
+            first = first.join(" "),
+            data = labels("data"),
+            other = labels("search"),
+        );
+        fs::create_dir_all(&bin).unwrap();
+        write(&bin.join("docker"), &script);
+        let made = Command::new("chmod")
+            .args(["+x", &bin.join("docker").display().to_string()])
+            .env("PATH", PATH)
+            .output()
+            .unwrap();
+        assert!(made.status.success());
+        Self { bin, calls }
+    }
+
+    /// Returns what the fake docker logged.
+    fn logged(&self) -> String {
+        fs::read_to_string(&self.calls).unwrap_or_default()
+    }
+}
+
+impl Setup {
+    /// Archives `triage` as a workspace whose containers ran, and returns
+    /// the workspace's stable id.
+    fn archive_with_containers(&self) -> String {
+        self.archive();
+        let path = self.root().join("state/mxv/archives/triage/archive.json");
+        let record = fs::read_to_string(&path).unwrap();
+        write(
+            &path,
+            &record.replacen(
+                "\"state\": \"archived\",",
+                "\"state\": \"archived\",\n  \"containers_ran\": true,",
+                1,
+            ),
+        );
+        let record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        record["workspace_id"].as_str().unwrap().to_owned()
+    }
+
+    /// Runs `mxv` with `args` and `--json` with `docker` first on the
+    /// search path.
+    fn run_with_docker(&self, docker: &FakeDocker, args: &[&str]) -> (i32, Value) {
+        let path = format!("{}:{PATH}", docker.bin.display());
+        Self::finished(self.command(&self.root()).env("PATH", &path), args)
+    }
+}
+
+#[test]
+fn removing_an_archive_with_delete_volumes_asks_before_it_deletes_the_volumes() {
+    let setup = Setup::new();
+    let id = setup.archive_with_containers();
+    let state = setup.root().join("state/mxv");
+    let docker = FakeDocker::new(&setup.root(), &state, &id, &["data", "search"], None);
+
+    let (exit, document) = setup.run_with_docker(
+        &docker,
+        &["remove", "--archived", "triage", "--delete-volumes"],
+    );
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::confirmation::needs_yes",
+        "{document}"
+    );
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+    assert!(state.join("archives/triage/archive.json").exists());
+    let (exit, document) = setup.run_with_docker(
+        &docker,
+        &[
+            "remove",
+            "--archived",
+            "triage",
+            "--delete-volumes",
+            "--yes",
+        ],
+    );
+    assert_eq!(exit, 0, "{document}");
+    let data = format!("phase-{}.data", volume_hash(&id));
+    let search = format!("phase-{}.search", volume_hash(&id));
+    assert_eq!(
+        document["data"]["volumes"],
+        serde_json::json!([data, search])
+    );
+    assert!(!state.join("archives/triage/archive.json").exists());
+}
+
+#[test]
+fn an_archive_deletion_refuses_a_volume_that_the_question_did_not_name() {
+    let setup = Setup::new();
+    let id = setup.archive_with_containers();
+    let state = setup.root().join("state/mxv");
+    // The first listing, before the question, holds one volume. The second,
+    // under the lock, holds another that the question did not name.
+    let docker = FakeDocker::new(&setup.root(), &state, &id, &["data"], Some("search"));
+
+    let (exit, document) = setup.run_with_docker(
+        &docker,
+        &[
+            "remove",
+            "--archived",
+            "triage",
+            "--delete-volumes",
+            "--yes",
+        ],
+    );
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::changed", "{document}");
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+    assert!(state.join("archives/triage/archive.json").exists());
+}
+
+impl Setup {
+    /// Returns the stable id of the workspace `triage`.
+    fn workspace_id(&self) -> String {
+        let record: Value = serde_json::from_str(
+            &fs::read_to_string(self.root().join("state/mxv/workspaces/triage.json")).unwrap(),
+        )
+        .unwrap();
+        record["id"].as_str().unwrap().to_owned()
+    }
+
+    /// Archives `triage` as a workspace whose containers ran, and marks
+    /// the archive retired, as a run that stopped after it retired every
+    /// checkout leaves it. It returns the workspace's stable id.
+    fn retired_with_containers(&self) -> String {
+        let id = self.archive_with_containers();
+        self.mark_retired();
+        id
+    }
+}
+
+#[test]
+fn finishing_an_archive_with_delete_volumes_asks_before_it_deletes_the_volumes() {
+    let setup = Setup::new();
+    let id = setup.retired_with_containers();
+    let state = setup.root().join("state/mxv");
+    let docker = FakeDocker::new(&setup.root(), &state, &id, &["data", "search"], None);
+
+    let (exit, document) =
+        setup.run_with_docker(&docker, &["archive", "-w", "triage", "--delete-volumes"]);
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::confirmation::needs_yes",
+        "{document}"
+    );
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+    let kept: Value =
+        serde_json::from_str(&fs::read_to_string(setup.archive_record("triage")).unwrap()).unwrap();
+    assert_eq!(kept["state"], "retired", "{kept}");
+    let (exit, document) = setup.run_with_docker(
+        &docker,
+        &["archive", "-w", "triage", "--delete-volumes", "--yes"],
+    );
+    assert_eq!(exit, 0, "{document}");
+    let data = format!("phase-{}.data", volume_hash(&id));
+    let search = format!("phase-{}.search", volume_hash(&id));
+    assert_eq!(
+        document["data"]["volumes"],
+        serde_json::json!([data, search])
+    );
+    let kept: Value =
+        serde_json::from_str(&fs::read_to_string(setup.archive_record("triage")).unwrap()).unwrap();
+    assert_eq!(kept["state"], "archived", "{kept}");
+}
+
+#[test]
+fn finishing_an_archive_without_volumes_asks_nothing() {
+    // Without `--delete-volumes`, the finish deletes no volume.
+    let setup = Setup::new();
+    let id = setup.retired_with_containers();
+    let state = setup.root().join("state/mxv");
+    let docker = FakeDocker::new(&setup.root(), &state, &id, &["data"], None);
+    let (exit, document) = setup.run_with_docker(&docker, &["archive", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "done", "{document}");
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+
+    // With `--delete-volumes` and no volume to delete, nothing needs a yes.
+    let setup = Setup::new();
+    setup.archive();
+    setup.mark_retired();
+    let (exit, document) = setup.run(&["archive", "-w", "triage", "--delete-volumes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "done", "{document}");
+}
+
+#[test]
+fn an_archive_refuses_a_volume_that_the_question_did_not_name() {
+    let setup = Setup::new();
+    let id = setup.workspace_id();
+    let state = setup.root().join("state/mxv");
+    // The note says that a container of the workspace ran, so the archive
+    // asks docker for its volumes.
+    write(&state.join("runs/triage/.containers"), "");
+    // The first listing, before the question, holds one volume. The second,
+    // under the lock, holds another that the question did not name.
+    let docker = FakeDocker::new(&setup.root(), &state, &id, &["data"], Some("search"));
+
+    let (exit, document) = setup.run_with_docker(
+        &docker,
+        &["archive", "-w", "triage", "--delete-volumes", "--yes"],
+    );
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::changed", "{document}");
+    let text = recovery(&document);
+    assert!(text.contains("mxv archive -w triage"), "{text}");
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+    assert!(setup.checkout().is_dir());
+    assert!(state.join("workspaces/triage.json").exists());
+    assert!(!state.join("archives/triage").exists());
+}
+
+#[test]
+fn an_archive_refuses_a_unit_that_started_after_the_question_and_mxv_up_runs_meanwhile() {
+    let setup = Setup::new();
+    let id = setup.workspace_id();
+    let state = setup.root().join("state/mxv");
+    write(
+        &setup.checkout().join("mxv.toml"),
+        "[processes.sleeper]\nargv = [\"sh\", \"-c\", \"exec sleep 600\"]\n",
+    );
+    write(&state.join("runs/triage/.containers"), "");
+    let blocked = setup.root().join("docker-blocked");
+    let release = setup.root().join("docker-release");
+    // The archive lists the volumes after it read which units run and
+    // before it asks, so the blocked listing stands for the open question.
+    let docker =
+        FakeDocker::new_blocking(&setup.root(), &state, &id, &["data"], (&blocked, &release));
+
+    let (archived, started) = std::thread::scope(|scope| {
+        let archiving = scope.spawn(|| {
+            setup.run_with_docker(
+                &docker,
+                &["archive", "-w", "triage", "--delete-volumes", "--yes"],
+            )
+        });
+        let released = Release(release.clone());
+        wait_for_file(&blocked, || archiving.is_finished());
+        // The archive holds no lock while its question is open, so `up`
+        // starts the unit instead of failing busy.
+        let started = setup.run(&["up", "-w", "triage"]);
+        drop(released);
+        (archiving.join().unwrap(), started)
+    });
+    let (_, status) = setup.run(&["status", "-w", "triage"]);
+    let _ = setup.run(&["down", "-w", "triage"]);
+
+    let (exit, document) = started;
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = archived;
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::archive::changed", "{document}");
+    assert_eq!(status["data"][0]["state"], "running", "{status}");
+    assert!(
+        !docker.logged().contains("volume rm"),
+        "{}",
+        docker.logged()
+    );
+    assert!(setup.checkout().is_dir());
 }

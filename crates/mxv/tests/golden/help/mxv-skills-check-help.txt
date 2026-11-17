@@ -1,4 +1,4 @@
-Check that each installed copy of mxv's skill matches this mxv
+Check that each installed copy of this tool's skills matches this build
 
 Usage: mxv skills check [OPTIONS]
 

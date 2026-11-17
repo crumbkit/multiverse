@@ -1473,3 +1473,181 @@ fn a_manifest_that_joins_others_may_route_one_of_their_ports() {
     .unwrap();
     assert_eq!(manifest.routes, ["api-http"]);
 }
+
+const HOSTED: &str = r#"ports = ["web", "api"]
+routes = ["web"]
+
+[processes.web]
+argv = ["pnpm", "dev"]
+ports = { PORT = "web" }
+listen = "web"
+hosts = ["local.app.example.com", "alt.app.example.com"]
+"#;
+
+#[test]
+fn a_process_that_listens_on_a_routed_port_may_list_extra_hosts() {
+    let manifest = parse(HOSTED).unwrap();
+    assert_eq!(
+        manifest.processes["web"].hosts,
+        ["local.app.example.com", "alt.app.example.com"]
+    );
+}
+
+#[test]
+fn a_container_that_publishes_one_routed_port_may_list_extra_hosts() {
+    let manifest = parse(
+        r#"ports = ["web"]
+routes = ["web"]
+
+[containers.web]
+image = "nginx:1.27"
+ports = { 80 = "web" }
+hosts = ["local.app.example.com"]
+"#,
+    )
+    .unwrap();
+    assert_eq!(manifest.containers["web"].hosts, ["local.app.example.com"]);
+}
+
+#[test]
+fn a_unit_without_hosts_has_none() {
+    let manifest = parse(APP).unwrap();
+    assert!(manifest.processes["api"].hosts.is_empty());
+}
+
+fn invalid_hosts(text: &str) -> (Option<usize>, String) {
+    match problem(text) {
+        (line, ManifestProblem::Invalid { message }) => (line, message),
+        other => panic!("expected an invalid manifest, got {other:?}"),
+    }
+}
+
+#[test]
+fn hosts_on_a_process_that_listens_on_no_routed_port_fail_on_the_hosts_line() {
+    let (line, message) = invalid_hosts(
+        r#"ports = ["web", "api"]
+routes = ["web"]
+
+[processes.api]
+argv = ["api"]
+ports = { PORT = "api" }
+listen = "api"
+hosts = ["local.app.example.com"]
+"#,
+    );
+    assert_eq!(line, Some(8));
+    assert!(
+        message.contains("`api`") && message.contains("routes"),
+        "{message}"
+    );
+}
+
+#[test]
+fn hosts_on_a_process_that_listens_on_nothing_fail() {
+    let (line, message) = invalid_hosts(
+        "ports = [\"web\"]\nroutes = [\"web\"]\n[processes.idle]\nargv = [\"x\"]\nhosts = [\"local.app.example.com\"]\n",
+    );
+    assert_eq!(line, Some(5));
+    assert!(message.contains("`idle`"), "{message}");
+}
+
+#[test]
+fn hosts_on_a_container_that_publishes_two_routed_ports_fail() {
+    let (line, message) = invalid_hosts(
+        r#"ports = ["web", "admin"]
+routes = ["web", "admin"]
+
+[containers.proxy]
+image = "nginx:1.27"
+ports = { 80 = "web", 8080 = "admin" }
+hosts = ["local.app.example.com"]
+"#,
+    );
+    assert_eq!(line, Some(7));
+    assert!(
+        message.contains("`proxy`") && message.contains("more than one"),
+        "{message}"
+    );
+}
+
+fn with_host(host: &str) -> String {
+    HOSTED.replace(
+        "[\"local.app.example.com\", \"alt.app.example.com\"]",
+        &format!("[{host:?}]"),
+    )
+}
+
+#[test]
+fn a_host_that_is_not_a_lower_case_dns_name_fails_on_its_line() {
+    let long_label = format!("{}.example.com", "a".repeat(64));
+    let long_name = format!("{}.example.com", vec!["a".repeat(60); 5].join("."));
+    for host in [
+        "Local.App.Example.com",
+        "local_app.example.com",
+        "local..example.com",
+        ".example.com",
+        "example.com.",
+        "",
+        "local app.example.com",
+        long_label.as_str(),
+        long_name.as_str(),
+    ] {
+        let (line, message) = invalid_hosts(&with_host(host));
+        assert_eq!(line, Some(8), "{host:?}");
+        assert!(message.contains("DNS name"), "{host:?}: {message}");
+    }
+}
+
+#[test]
+fn a_host_that_is_an_ip_address_localhost_or_below_mxv_localhost_fails() {
+    for host in [
+        "127.0.0.1",
+        "::1",
+        "localhost",
+        "mxv.localhost",
+        "web.demo.mxv.localhost",
+    ] {
+        let (line, message) = invalid_hosts(&with_host(host));
+        assert_eq!(line, Some(8), "{host:?}");
+        assert!(message.contains(host), "{host:?}: {message}");
+    }
+}
+
+#[test]
+fn a_name_below_another_localhost_domain_is_allowed() {
+    let manifest = parse(&with_host("app.test.localhost")).unwrap();
+    assert_eq!(manifest.processes["web"].hosts, ["app.test.localhost"]);
+}
+
+#[test]
+fn the_same_host_twice_in_one_manifest_fails_on_the_second_line() {
+    let (line, message) = invalid_hosts(
+        r#"ports = ["web", "work"]
+routes = ["web", "work"]
+
+[processes.web]
+argv = ["web"]
+ports = { PORT = "web" }
+listen = "web"
+hosts = ["local.app.example.com"]
+
+[processes.worker]
+argv = ["worker"]
+ports = { PORT = "work" }
+listen = "work"
+hosts = ["local.app.example.com"]
+"#,
+    );
+    assert_eq!(line, Some(14));
+    assert!(message.contains("twice"), "{message}");
+}
+
+#[test]
+fn a_renamed_manifest_keeps_the_hosts_of_its_units() {
+    let manifest = parse(HOSTED).unwrap();
+    let renamed = manifest.renamed(&|name| format!("app-{name}"));
+    assert_eq!(
+        renamed.processes["app-web"].hosts,
+        ["local.app.example.com", "alt.app.example.com"]
+    );
+}

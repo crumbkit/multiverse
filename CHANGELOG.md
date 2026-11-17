@@ -15,11 +15,96 @@ workspace may need to act on.
 - `mxv proxy status`, `start`, `stop` and `trust` operate the proxy. The
   config keys `proxy_http`, `proxy_https` and `caddy` set its addresses and
   program. `mxv proxy trust` needs a terminal and a confirmation.
+- A process or container can list `hosts` in its manifest, and the proxy
+  serves the route that it listens on at each extra name too. When two
+  workspaces list a name, the workspace whose name sorts first serves it. mxv
+  looks each name up after `mxv up`, `restart` and `restore`, and prints the
+  `/etc/hosts` line to add when it does not resolve to this machine; it never
+  writes the file.
+- Host processes and tasks of a workspace with a served route receive
+  `MXV_DOMAIN`, `MXV_HOST_<PORT>` and `MXV_URL_<PORT>`, and a process that
+  listens on a served route also receives `MXV_HOST` and `MXV_URL`.
+- `mxv proxy install` finds Caddy, starts it, with the routes there are or
+  with none, and asks a person to trust its certificate authority. Running it
+  again changes nothing that is set up, and it never stops a Caddy that runs.
+  The check marks `caddy runs` failed when Caddy holds other routes than the
+  records give, and every row and recovery that tells a person to edit the
+  config file names the file mxv reads, including under `XDG_CONFIG_HOME`.
+  `mxv proxy check` reads what the proxy needs, prints a row for each and
+  exits with `mxv::proxy::check_failed` when one is missing or failed. The
+  library gains `Proxy::check`, `Proxy::ensure_running`, `Proxy::caddy`,
+  the `Resolver` trait with `SystemResolver`, `missing_hosts` and `hosts_line`.
+  A host lookup that takes more than two seconds is `unknown` in the check and
+  prints no `/etc/hosts` line. The check marks an authority whose trust mxv
+  cannot read as `unknown`, which does not fail it. `mxv up` prints a note
+  for the manifest of the workspace it ran when the routes leave it out, and
+  names each running workspace that lost a route to the workspace it started, with the `mxv restart` command that gives it the current
+  variables.
 - `.github/workflows/proxy.yml` runs the tests that start a real Caddy, with
   the Caddy release pinned by digest. It is not a required check.
 
 ### Changed
 
+- `mxv restore` and `mxv repair NAME` take the workspace lock, plan again
+  and act through the library, in `Lifecycle::restore` and
+  `Lifecycle::repair`. A second `mxv restore` that waited for the lock
+  while the first one brought the workspace back reports `unchanged` and
+  exits 0. Before, it failed with `mxv::restore::name_taken`. A restore
+  whose archive another archive of the same name replaced after the
+  question builds nothing and fails with `mxv::restore::changed`. Before,
+  it restored the new archive. The library gains `Lifecycle::restore`,
+  `Lifecycle::repair`, `Restoration`, `Repairing` and `RepairDone`.
+- `mxv archive` holds the workspace's lock from its second plan, after the
+  question, until its last write, and it asks without the lock. Before, it
+  took the lock before its first plan and held it through the question, so
+  an `mxv up` of the same name failed with `mxv::workspace::busy` until the
+  person answered. Now `mxv up` runs while the question is open. When a
+  unit runs that the question did not name, when docker holds a volume
+  that it did not name, or when the workspace or the archive to finish is
+  another one, the command changes nothing and fails with
+  `mxv::archive::changed`. A second `mxv archive` of an unfinished archive
+  finishes it, and one of a finished archive reports `unchanged`. With
+  `--delete-volumes`, every question of an archive names the docker
+  volumes that it deletes, and the finish path of an archive that an
+  earlier run left unfinished asks before it deletes them, so a script that
+  runs `mxv archive -w NAME --delete-volumes` without a terminal needs
+  `--yes` there. The library gains `Lifecycle::plan_archive`,
+  `Lifecycle::archive`, `Lifecycle::finish`, `Lifecycle::finish_held`,
+  `Lifecycle::with_in_use`, `Archived`, `Finished`, `Finish`, `FinishDone`,
+  `RetireDone` and `InUse`, and `VolumesAsked::with_units`.
+- `mxv remove` holds the workspace's lock from before it stops the units
+  until after it deletes the last docker volume, and `mxv new` holds it from
+  before it writes the record until it has copied the ignored directories.
+  Before, `mxv remove` took the lock only to stop units and `mxv new` took
+  none, so `mxv remove --force` could delete the checkouts under a running
+  `mxv up`, and `mxv remove` could delete the checkouts that `mxv new` was
+  making. A command that meets the held lock waits 5 seconds and fails with
+  `mxv::workspace::busy`, and `mxv new` of a name that a workspace holds
+  still fails with `mxv::workspace::exists` at once. `mxv remove` also reads
+  the workspace again under the lock and fails with
+  `mxv::workspace::changed`, before it stops anything, when the record is
+  another one than the question was about or docker holds a volume that the
+  question did not name. With `--delete-volumes`, the question of `mxv
+  remove` names the docker volumes that it deletes. The library gains
+  `Lifecycle`, `RemoveAsked`, `Removed` and `RemovalDone`.
+- `mxv remove --archived` reads the archive again once it holds the
+  workspace's lock, and deletes only the archive that the question was
+  about. Before, it passed the archive that it read before the question to
+  the deletion, so a person who restored the workspace and archived it
+  again while the question was open lost the record of the new archive, and
+  its references and its tar of ignored files stayed with no record. Now,
+  when another archive holds the name, when the archive is no longer
+  finished, or when docker holds a volume of it that the question did not
+  name, the command deletes nothing and fails with the new code
+  `mxv::archive::changed`. With `--delete-volumes`, the question names the
+  docker volumes that it deletes. The library gains
+  `Lifecycle::delete_archive`, `Lifecycle::delete_archive_held`,
+  `Lifecycle::volumes_in_use`, `VolumesAsked` and `ArchiveDeleted`;
+  `Lifecycle::new` takes the archives, and `Removed` is no longer
+  `#[non_exhaustive]`.
+- The help of `mxv skills install`, `check` and `print` and of `mxv skills`
+  takes crumbkit's wording: "this tool's skills" in place of "mxv's skill",
+  and crumbkit's examples.
 - On macOS, mxv finds the deadband daemon's socket in the per-user
   temporary directory, where the launchd daemon listens, before `TMPDIR`.
   Before, a shell whose `TMPDIR` differed from that directory made mxv find

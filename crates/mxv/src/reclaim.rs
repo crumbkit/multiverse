@@ -159,37 +159,37 @@ pub(crate) enum ReclaimState {
 }
 
 /// One workspace, as `mxv reclaim` prints it.
-#[derive(Debug, Serialize, JsonSchema)]
+#[derive(Debug, Serialize, JsonSchema, Row)]
 pub(crate) struct ReclaimRow {
     /// The workspace's name.
+    // A person copies the name into the next command.
+    #[row(column, uncut)]
     name: String,
     /// `stopped`, `would_stop`, `cleaned`, `would_clean` or `kept`.
+    #[row(column)]
     state: ReclaimState,
     /// The bytes that the run freed, or would free on a dry run, which is
     /// 0 for a workspace that it kept. For memory it is the resident
     /// memory of the workspace's processes, measured before the stop, and
     /// on Linux of its containers too.
+    #[row(column)]
     freed: Size,
     /// For memory, the resident memory of the workspace's containers,
     /// measured before the stop, and 0 for a workspace that the run kept
     /// or a disk need. On macOS Docker Desktop's virtual machine keeps the
     /// memory that stopped containers free for a while, so freed leaves it
     /// out there.
+    #[row(column)]
     containers: Size,
     /// How long ago the workspace was last active: its checkouts changed
     /// or an mxv command named it. It is null when neither happened, and
     /// for a workspace that the run kept without measuring.
+    #[row(column)]
     active: Option<Age>,
     /// Why the workspace counts as idle, for one that the run stopped or
     /// cleaned, or why the run kept it.
+    #[row(column)]
     reason: Option<String>,
-}
-
-impl Row for ReclaimRow {
-    const COLUMNS: &'static [&'static str] =
-        &["name", "state", "freed", "containers", "active", "reason"];
-    // A person copies the name into the next command.
-    const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
 /// The facts about one running workspace that decide whether it is idle.

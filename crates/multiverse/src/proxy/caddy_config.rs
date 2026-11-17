@@ -11,7 +11,7 @@ use super::routes::Route;
 /// for the same routes and settings, so a sync compares it with the running
 /// configuration.
 pub(super) fn render(settings: &Settings, routes: &[Route]) -> Value {
-    let hosts: Vec<&str> = routes.iter().map(|route| route.host.as_str()).collect();
+    let hosts: Vec<&str> = routes.iter().flat_map(names).collect();
     let mut apps = Map::new();
     apps.insert(
         "pki".to_owned(),
@@ -64,10 +64,16 @@ fn logging() -> Value {
     json!({ "logs": { "default": { "level": "INFO", "writer": { "output": "stderr" } } } })
 }
 
+/// Returns the host names that `route` answers: its own, then its extra
+/// names.
+fn names(route: &Route) -> impl Iterator<Item = &str> {
+    std::iter::once(route.host.as_str()).chain(route.extra.iter().map(String::as_str))
+}
+
 /// Returns the route that forwards the host of `route` to its port.
 fn forward(route: &Route) -> Value {
     json!({
-        "match": [{ "host": [route.host] }],
+        "match": [{ "host": names(route).collect::<Vec<_>>() }],
         "handle": [{
             "handler": "reverse_proxy",
             "upstreams": [{ "dial": format!("localhost:{}", route.port) }],
@@ -80,7 +86,7 @@ fn forward(route: &Route) -> Value {
 /// answer, which is the usual state of a stopped workspace.
 fn error_page(route: &Route) -> Value {
     json!({
-        "match": [{ "host": [route.host] }],
+        "match": [{ "host": names(route).collect::<Vec<_>>() }],
         "handle": [{
             "handler": "static_response",
             "status_code": "502",

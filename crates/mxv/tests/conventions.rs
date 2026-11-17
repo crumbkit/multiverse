@@ -50,9 +50,9 @@ mod support;
 
 use crumbkit::codes::CONFIRM_NEEDS_YES;
 use mxv::{
-    ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_CODES, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE,
-    ARCHIVE_MIRROR_MISSING, ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE,
-    ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED,
+    ARCHIVE_CHANGED, ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_CODES, ARCHIVE_IN_USE,
+    ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING, ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND,
+    ARCHIVE_PINS_GONE, ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED,
     ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE, ARCHIVE_WORKSPACE_REMOVED,
     BRANCH_EXISTS, BUILD_FAILED, BUILD_TIMED_OUT, BUILD_UNSTARTABLE, CHECKOUT_INCOMPLETE,
     CHECKOUT_INVALID_NAME, CHECKOUT_LOCKED, CHECKOUT_NAME_TAKEN, CHECKOUT_NOT_FOUND,
@@ -68,15 +68,15 @@ use mxv::{
     PROCESS_DETACHED_LISTENER, PROCESS_EXITED, PROCESS_FOREIGN_LISTENER, PROCESS_NOT_FOUND,
     PROCESS_NOT_READY, PROCESS_STILL_NEEDED, PROCESS_TABLE_UNREADABLE, PROCESS_UNSTARTABLE,
     PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, PROXY_CADDY_MISSING, PROXY_CADDY_TOO_OLD,
-    PROXY_CODES, PROXY_LOAD_FAILED, PROXY_PORT_DENIED, PROXY_PORT_HELD, PROXY_SOCKET_PATH_TOO_LONG,
-    PROXY_START_FAILED, PROXY_TRUST_FAILED, PROXY_TRUST_NEEDS_TERMINAL, RECORD_CORRUPT,
-    RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPAIR_CHANGED, REPAIR_NAMES_TAKEN,
-    REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH, REPOSITORY_NO_ORIGIN,
-    REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED, RESTORE_CHANGED, RESTORE_COMMIT_MISSING,
-    RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING, RESTORE_NAME_TAKEN,
-    RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED, RUN_CODES,
-    SSH_AUTHENTICATION_FAILED, SSH_HOST_KEY_CHANGED, SSH_HOST_KEY_UNVERIFIED, TASK_AMBIGUOUS,
-    TASK_UNKNOWN, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED,
+    PROXY_CHECK_FAILED, PROXY_CODES, PROXY_LOAD_FAILED, PROXY_PORT_DENIED, PROXY_PORT_HELD,
+    PROXY_SOCKET_PATH_TOO_LONG, PROXY_START_FAILED, PROXY_TRUST_FAILED, PROXY_TRUST_NEEDS_TERMINAL,
+    RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPAIR_CHANGED,
+    REPAIR_NAMES_TAKEN, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH,
+    REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED, RESTORE_CHANGED,
+    RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING,
+    RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
+    RUN_CODES, SSH_AUTHENTICATION_FAILED, SSH_HOST_KEY_CHANGED, SSH_HOST_KEY_UNVERIFIED,
+    TASK_AMBIGUOUS, TASK_UNKNOWN, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED,
     WORKSPACE_ARCHIVE_UNFINISHED, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED,
     WORKSPACE_CREATING, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
     WORKSPACE_MISMATCHED_CHECKOUT, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
@@ -99,11 +99,14 @@ const NO_QUESTION: &str = "The command stops only units that mxv up started for 
 /// The reason that a code of `archive` and `restore` is unprovoked here.
 const ARCHIVE_STATE: &str = "Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.";
 
+/// Why the start probes cannot provoke `mxv::archive::changed`.
+const ARCHIVE_RACE: &str = "Only a second command that replaces the archive of the name, or starts a unit or a docker volume, between the question of `mxv remove --archived` or `mxv archive` and its deletion provokes it, and the start probes run no second command; tests/archive.rs holds the command at a docker listing while it makes the change.";
+
 /// Why the start probes cannot provoke `mxv::repair::changed`.
 const REPAIR_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv repair` and its repair provokes it, and no test runs two commands at that moment.";
 
 /// Why the start probes cannot provoke `mxv::restore::changed`.
-const RESTORE_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv restore`, which offers to delete the archive that an earlier restore left, and the deletion provokes it, and no test runs two commands at that moment; the unit tests of mxv's failures check its message and its recovery.";
+const RESTORE_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv restore` and the restore, or between its question about the archive that an earlier restore left and the deletion, provokes it, and no test runs two commands at that moment; the unit tests of mxv's failures check its message and its recovery.";
 
 /// Why the start probes cannot provoke `mxv::repair::names_taken`.
 const REPAIR_NAMES: &str = "Only an older archive beside a newer workspace whose 99 dated names are all taken provokes it, and the fixture holds no such archive; multiverse's health tests check the names that the repair tries.";
@@ -172,6 +175,16 @@ const ALLOW: &[Allow] = &[
         Rule::Examples,
         "proxy trust",
         "The command asks a person at a terminal and raises the system's password prompt, which a test cannot answer; tests/proxy.rs checks its refusal without a terminal.",
+    ),
+    Allow::new(
+        Rule::Examples,
+        "proxy install",
+        "The command needs a Caddy program and asks a person at a terminal, which a test cannot answer; tests/proxy.rs checks its refusals without Caddy and without a terminal.",
+    ),
+    Allow::new(
+        Rule::Examples,
+        "proxy check",
+        "The command exits with 1 while anything is missing, and the fixture's machine has no Caddy; tests/proxy.rs checks its rows and its exit code.",
     ),
     Allow::untwinned(
         NEWER_RECORD,
@@ -470,6 +483,7 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(PROXY_SOCKET_PATH_TOO_LONG, PROXY_STATE),
     Unprovoked::new(PROXY_TRUST_NEEDS_TERMINAL, PROXY_STATE),
     Unprovoked::new(PROXY_TRUST_FAILED, PROXY_STATE),
+    Unprovoked::new(PROXY_CHECK_FAILED, PROXY_STATE),
     Unprovoked::new(ARCHIVE_NOT_FOUND, ARCHIVE_STATE),
     Unprovoked::new(ARCHIVE_NAME_TAKEN, ARCHIVE_STATE),
     Unprovoked::new(ARCHIVE_SOURCE_CHANGED, ARCHIVE_STATE),
@@ -481,6 +495,7 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(ARCHIVE_PINS_GONE, ARCHIVE_STATE),
     Unprovoked::new(ARCHIVE_WORKSPACE_REMOVED, ARCHIVE_STATE),
     Unprovoked::new(ARCHIVE_RENAME_UNFINISHED, ARCHIVE_STATE),
+    Unprovoked::new(ARCHIVE_CHANGED, ARCHIVE_RACE),
     Unprovoked::new(REPAIR_CHANGED, REPAIR_RACE),
     Unprovoked::new(RESTORE_CHANGED, RESTORE_RACE),
     Unprovoked::new(REPAIR_NAMES_TAKEN, REPAIR_NAMES),

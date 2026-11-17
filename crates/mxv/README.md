@@ -878,12 +878,21 @@ runs each manifest process as a phase app with one process named `main`, so
 the log of a manifest process is `<process>.main.log` in that directory. A
 container has no such file, and `mxv logs` reads its log from Docker.
 
-`mxv up`, `down` and `restart`, `mxv ports reset`, and `remove --force`
-while processes run, hold an exclusive lock on
-`$XDG_STATE_HOME/mxv/locks/<name>.lock` while they start or stop the
-workspace's processes. No command deletes that file, so a command that
-deletes the workspace's run directory still holds the lock. Each reads the workspace's record again once it
-holds the lock, so it uses the ports that a command before it stored.
+`mxv up`, `down` and `restart` and `mxv ports reset` hold an exclusive lock
+on `$XDG_STATE_HOME/mxv/locks/<name>.lock` while they start or stop the
+workspace's processes. `mxv remove` holds it from before it stops the units
+until after it deletes the last docker volume, `mxv archive` holds it from
+its second plan, after the question, until its last write, `mxv restore`
+holds it from its second plan, after the question, until it deletes the
+archive, `mxv repair NAME` holds the lock of each name that it changes from
+its second plan until its last write, and `mxv new` holds it from
+before it writes the record until it has copied the ignored directories, so
+a second command of the same name fails with `mxv::workspace::busy` after
+the lock wait instead of deleting or changing what the first one makes. No
+command deletes that file, so a command that deletes the workspace's run
+directory still holds the lock. `mxv up`, `down` and `restart` and
+`mxv ports reset` read the workspace's record again once they hold the
+lock, so they use the ports that a command before them stored.
 Allocating ports holds a second lock, `$XDG_STATE_HOME/mxv/runs/.ports.lock`,
 so two workspaces never take the same port. A command that finds a lock
 held tries again for 5 seconds, then fails with `mxv::workspace::busy`. The
@@ -1083,6 +1092,8 @@ prints a warning that carries an error code, such as `mxv::proxy::port_held`,
 | `mxv proxy start` | Starts Caddy, or loads the current routes into the Caddy that runs. |
 | `mxv proxy stop` | Stops Caddy. The next `mxv up` of a workspace with a route starts it again. |
 | `mxv proxy trust` | Installs Caddy's local certificate authority in the system trust store. |
+| `mxv proxy install` | Finds Caddy and checks its version, starts it with the routes of every workspace, or with none, and then runs the trust step of `mxv proxy trust`. It skips the question when this machine already trusts the authority, so running it again changes nothing. |
+| `mxv proxy check` | Reads what the proxy needs and prints a row for each: the Caddy program, the HTTP and HTTPS addresses, the certificate authority, a running Caddy and the extra host names. It exits with `mxv::proxy::check_failed` when a row is `missing` or `failed`. It never starts Caddy, loads a configuration, takes the proxy's lock or trusts anything. |
 
 Three config keys control it. `proxy_http` and `proxy_https` are the
 addresses Caddy listens on, by default `127.0.0.1:80` and `127.0.0.1:443`;
@@ -1094,10 +1105,62 @@ Two workspaces whose names make the same host label, such as `my_notes` and
 `my.notes`, share the label `my-notes`. mxv serves the one whose name sorts
 first and lists the other as not served, with a note that names both.
 
-HTTPS uses Caddy's own certificate authority. Until `mxv proxy trust` runs,
-a browser warns about the certificate. `mxv proxy trust` asks first, needs a
-terminal and raises the system's own password prompt, so an agent never runs
-it and a person runs it once. The HTTP names work without it.
+HTTPS uses Caddy's own certificate authority. Until `mxv proxy trust` or
+`mxv proxy install` runs, a browser warns about the certificate. Both ask
+first, need a terminal and raise the system's own password prompt, so an
+agent never runs them and a person runs one of them once. Without a terminal,
+`mxv proxy install` still starts Caddy and then refuses with
+`mxv::proxy::trust_needs_terminal`. A machine with no workspace that declares
+a route gets a Caddy that holds only its certificate authority, so a person
+can trust it before the first route exists. `mxv proxy install` never stops a
+Caddy that runs. The HTTP names work without trust.
+
+### Extra host names
+
+A unit that listens on a route can list more names for it in `hosts`:
+
+```toml
+ports = ["web"]
+routes = ["web"]
+
+[processes.web]
+argv = ["pnpm", "dev"]
+listen = "web"
+hosts = ["local.app.example.com"]
+```
+
+The proxy then serves the route at each listed name too, over HTTP and over
+HTTPS with a certificate from the same authority. A name must be a lower-case
+DNS name of letters, digits and hyphens, and may not be an IP address,
+`localhost`, or a name below `mxv.localhost`. A name that the manifest lists
+twice is refused with `mxv::manifest::invalid`, which names the line, and a
+name that two manifests of one workspace both list is refused with
+`mxv::manifest::name_clash`. When two workspaces list
+one name, the workspace whose name sorts first serves it, and
+`mxv proxy status` lists the name under the other workspace's route as not
+served.
+
+mxv never writes `/etc/hosts`. After `mxv up`, `mxv restart` and
+`mxv restore`, mxv looks up each extra name, with a deadline of two seconds,
+and prints the line to add when the name does not resolve only to a loopback
+address:
+
+```
+note: local.app.example.com does not resolve to this machine; add this line to /etc/hosts: 127.0.0.1 local.app.example.com
+```
+
+`mxv proxy status` and `mxv proxy check` report the same.
+
+### Variables that name the proxy
+
+Each host process and task of a workspace with a served route receives
+`MXV_DOMAIN`, the workspace's domain such as `reading-list.mxv.localhost`,
+and `MXV_HOST_<PORT>` and `MXV_URL_<PORT>` for each served route, with
+`<PORT>` spelled as in `MXV_PORT_<NAME>`. A process that listens on a served
+route also receives `MXV_HOST` and `MXV_URL` for that route. The URL carries
+the HTTPS port unless it is 443. A variable of the manifest with the same name
+wins. Containers receive none, and neither does a workspace without a served
+route, such as one whose host label another workspace keeps.
 
 ## The workspace manifest
 
@@ -1513,7 +1576,12 @@ refuses the removal, mxv reports that refusal and removes nothing. When the
 removal would lose more than mxv showed, such as a new untracked file under
 `--force` or a new commit on a detached `HEAD` under `--delete-unmerged`, it
 refuses with `mxv::workspace::changed`, whose recovery is the dry run that
-shows the new plan. mxv deletes a branch only while it still points at the
+shows the new plan. It also refuses with `mxv::workspace::changed`, before it
+stops or deletes anything, when the workspace's record is another one than
+the question was about, such as a workspace that another command removed and
+made again under the name, and when docker holds a volume that the question
+did not name. With `--delete-volumes` the question names the docker volumes
+that the removal deletes. mxv deletes a branch only while it still points at the
 commit that mxv checked. A branch that moved, such as one that gained a
 commit while mxv waited, stays, and the result reports `kept_moved`.
 
@@ -1596,15 +1664,35 @@ references and the commits that no branch reaches. The directory
 record `archive.json`, the workspace manifest and a copy of each extra file
 in the workspace's directory. Docker volumes stay under the workspace's stable
 id, so `mxv up` finds them after a restore, and `--delete-volumes` deletes
-them instead.
+them instead. With `--delete-volumes`, the question of an archive names the
+docker volumes that it deletes, whether the archive is new or an unfinished
+one that a second run finishes.
+
+`mxv archive` holds the workspace's lock only while it plans. It releases the
+lock before it asks, then takes it again, plans again and compares what it
+finds with what the question named. When a unit runs that the question did
+not name, when docker holds a volume that it did not name, or when the
+archive that it would finish is another one, it changes nothing and fails with
+`mxv::archive::changed`; run `mxv archive` again to be asked about the
+workspace as it now stands. An archive that stopped before it finished is
+finished by running `mxv archive -w NAME` again, and a finished archive
+reports `unchanged`.
 
 Archives have no expiry, and `mxv clean` never touches one. `mxv list
 --archived` lists them with each one's age and the number of commits that
 exist only on this machine. `mxv remove --archived NAME` deletes an archive,
-its ignored-files tar and its references. `--delete-volumes` on that command deletes its docker
-volumes first. It fails and keeps the archive when docker does not answer, and
-refuses with `mxv::archive::volumes_in_use` when a live workspace has the same
-stable id.
+its ignored-files tar and its references. `--delete-volumes` on that command
+deletes its docker volumes first, and its question names them. It fails and
+keeps the archive when docker does not answer, and refuses with
+`mxv::archive::volumes_in_use` when a live workspace has the same stable id.
+The command holds the workspace's lock when it deletes, and it reads the
+archive again then. When another archive holds the name by then, such as one
+that a restore and a new archive made while the question was open, when the
+archive is no longer finished, or when docker holds a volume of it that the
+question did not name, the command deletes nothing and fails with
+`mxv::archive::changed`. Run it again to be asked about the archive as it now
+stands. `mxv archive` fails with the same code when the workspace changed
+after its question.
 
 mxv never pushes. The result of an archive lists each commit that no remote
 branch of `origin` holds, and those commits exist only on this machine until
@@ -1732,7 +1820,7 @@ A restore refuses, and builds nothing, with these codes:
 | --- | --- |
 | `mxv::restore::not_found` | No archive and no workspace has the name. |
 | `mxv::restore::name_taken` | A workspace of another stable id holds the name, a workspace of the archive's stable id has lost its directory or a checkout's directory, or something exists at the recorded path. |
-| `mxv::restore::changed` | The records of the name changed after mxv asked to delete the archive that an earlier restore left, so mxv deleted nothing. `mxv restore NAME --dry-run` shows the records as they now stand. |
+| `mxv::restore::changed` | The records of the name changed after mxv asked to restore the archive or to delete the archive that an earlier restore left, so mxv built and deleted nothing. `mxv restore NAME --dry-run` shows the records as they now stand. |
 | `mxv::restore::branch_moved` | A worktree's branch points at another commit than the archive pinned. |
 | `mxv::restore::commit_missing` | No repository that mxv can read holds the pinned commit. |
 | `mxv::restore::unfinished` | The archive stopped partway, and `mxv archive -w NAME` finishes it. |

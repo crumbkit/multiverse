@@ -52,6 +52,8 @@ Each --repo adds one clone, in the folder \<ROOT\>/\<NAME\>/\<FOLDER\>, where th
 
 The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it is set, or else the `root` that the config file $XDG\_CONFIG\_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG\_DATA\_HOME/mxv/workspaces, which is \~/.local/share/mxv/workspaces when XDG\_DATA\_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
 
+New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock. A dry run takes no lock.
+
 ### Arguments
 
 - `<NAME>`: The workspace's name, which also names its directory and its branch. Required.
@@ -509,11 +511,13 @@ Archive a workspace, so restore can rebuild it at the same commits.
 
 When no workspace has the name and its archive has finished, the workspace is already archived, so mxv changes nothing and the result's state is unchanged.
 
+Archive holds the workspace's lock while it plans, and holds no lock while its question is open, so `mxv up` and the other commands of the workspace run meanwhile. After the question, it takes the lock, plans again, and goes on only with what the question named. When a unit runs that the question did not name, or docker holds a volume that it did not name, mxv stops and deletes nothing and fails with mxv::archive::changed. An archive that an earlier run retired and did not finish is finished by running `mxv archive -w NAME` again, and an archive that finished has nothing to do, so a second archive of a name reports unchanged. With --delete-volumes, every question names the docker volumes that the archive deletes, and the finish of a retired archive asks too.
+
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
 - `--force`: Lose what the archive cannot keep, such as a paused merge or a file over archive\_max\_file, and list it in the archive
-- `--delete-volumes`: Delete the workspace's docker volumes and the data in them; without this flag the volumes stay for the restore
+- `--delete-volumes`: Delete the workspace's docker volumes and the data in them, which the question names; without this flag the volumes stay for the restore
 - `--dry-run`: Report what the command would change, and change nothing
 - `--yes`: Proceed without asking for confirmation
 
@@ -533,7 +537,7 @@ Rebuild an archived workspace at its archived commits.
 
 `mxv restore NAME` rebuilds the workspace from the archive and its mirrors, and fetches nothing. A clone's archived commits live in its mirror, so when a mirror is gone or has lost its pins, mxv refuses with mxv::restore::mirror\_missing, lists per checkout what only the mirror held, such as uncommitted work, stashes, local branches and commits that origin did not hold, and changes nothing. `--from-origin` is the one option that contacts origin: it fetches origin into each clone's mirror, making the mirror again when it is gone or has lost its pins, and rebuilds each checkout at the archived commit when origin holds it, else at the tip of the archived branch on origin, else at the tip of origin's default branch. It restores the workspace's root files and the ignored files, lists each pin that it could not restore as lost, and then deletes the archive. A fetch that fails leaves the new mirror deleted and the archive whole.
 
-When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name\_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed.
+When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name\_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed. After the question, a restore takes the workspace's lock and plans again, and holds the lock until the archive is deleted. When another restore brought the workspace back meanwhile, the state is unchanged, and when the archive of the name is another one than the question was about, mxv builds nothing and fails with mxv::restore::changed.
 
 ### Arguments
 
@@ -593,6 +597,10 @@ Remove a workspace's checkouts, its merged branches, its directory and its recor
 Remove fetches nothing. It counts a clone's unpushed commits against the clone's own remote branches and the heads and tags that its mirror last fetched from origin, and a refusal names how long ago the mirror fetched.
 
 When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
+
+Remove holds the workspace's lock from before it stops the units until after it deletes the last docker volume, so a removal that meets a command that holds the lock for more than 5 seconds fails with mxv::workspace::busy and deletes nothing. After the question, it reads the workspace again, and when the workspace changed, or a unit runs that --force did not allow it to stop, or docker holds a volume that the question did not name, it deletes nothing and fails with mxv::workspace::changed or mxv::workspace::running. With --delete-volumes, the question names the docker volumes that the removal deletes.
+
+With --archived, mxv holds the lock, reads the archive again after the question, and deletes only the archive that the question was about. When the archive is another one, such as a new archive of the same name after a restore, or is no longer finished, or docker holds a volume of it that the question did not name, mxv deletes nothing and fails with mxv::archive::changed. With --archived and --delete-volumes, the question names the docker volumes that the deletion deletes.
 
 ### Arguments
 
@@ -776,6 +784,8 @@ Serve the routes that workspaces declare at stable names
 - [`mxv proxy start`](#mxv-proxy-start): Start the proxy, and load the routes of every workspace
 - [`mxv proxy stop`](#mxv-proxy-stop): Stop the proxy; the next `mxv up` of a workspace with routes starts it again
 - [`mxv proxy trust`](#mxv-proxy-trust): Ask a person to trust the proxy's certificate authority, so browsers accept its certificates
+- [`mxv proxy install`](#mxv-proxy-install): Start the proxy and ask a person to trust its authority; safe to run again
+- [`mxv proxy check`](#mxv-proxy-check): Say what the proxy still needs; it changes nothing
 
 ## `mxv proxy status`
 
@@ -799,7 +809,7 @@ mxv proxy status
 
 Effects: read-only, closed-world.
 
-Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Children: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 
 ## `mxv proxy start`
 
@@ -823,7 +833,7 @@ mxv proxy start
 
 Effects: additive, idempotent, open-world.
 
-Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Children: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 
 ## `mxv proxy stop`
 
@@ -847,7 +857,7 @@ mxv proxy stop
 
 Effects: destructive, idempotent, closed-world.
 
-Children: one indented line under a route that the proxy does not serve, which says which workspace keeps the host name.
+Children: one indented line under a route for each extra host name it serves, which says when the name does not resolve to this machine, and for a route or name that the proxy does not serve, which says which workspace keeps it.
 
 ## `mxv proxy trust`
 
@@ -862,6 +872,42 @@ mxv proxy trust
 ```
 
 Effects: additive, idempotent, open-world.
+
+## `mxv proxy install`
+
+Start the proxy and ask a person to trust its authority; safe to run again
+
+### Examples
+
+Start the proxy and trust its certificate authority, which a person at a terminal confirms.
+
+```sh
+mxv proxy install
+```
+
+Effects: additive, idempotent, open-world.
+
+## `mxv proxy check`
+
+Say what the proxy still needs; it changes nothing
+
+### Examples
+
+Say whether Caddy, its addresses, the authority and each extra host name are set up.
+
+```sh
+mxv proxy check
+```
+
+### Columns
+
+- `check`: What the row checks.
+- `state`: `ok`, `missing` for something that `mxv proxy install` or the person sets up, `failed` for something that is wrong, or `unknown` when mxv cannot tell.
+- `detail`: What mxv found.
+
+Effects: read-only, closed-world.
+
+Children: one indented line under a row, such as the line to add to /etc/hosts for an extra host name that does not resolve to this machine.
 
 ## `mxv commands`
 
@@ -1102,13 +1148,13 @@ Give coding agents mxv's skill
 
 ### Commands
 
-- [`mxv skills install`](#mxv-skills-install): Install mxv's skill into each agent skills directory that exists
-- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of mxv's skill matches this mxv
-- [`mxv skills print`](#mxv-skills-print): Print mxv's skill
+- [`mxv skills install`](#mxv-skills-install): Install this tool's skills into each agent skills directory that exists
+- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of this tool's skills matches this build
+- [`mxv skills print`](#mxv-skills-print): Print this tool's skill
 
 ## `mxv skills install`
 
-Install mxv's skill into each agent skills directory that exists
+Install this tool's skills into each agent skills directory that exists
 
 ### Arguments
 
@@ -1117,13 +1163,13 @@ Install mxv's skill into each agent skills directory that exists
 
 ### Examples
 
-Install mxv's skill into each agent skills directory that exists.
+Install the skills into each agent skills directory that exists.
 
 ```sh
 mxv skills install
 ```
 
-Install it, replacing a file or a link that install did not write.
+Install them, replacing a file or a link that install did not write.
 
 ```sh
 mxv skills install --force
@@ -1144,7 +1190,7 @@ Effects: additive, idempotent, closed-world.
 
 ## `mxv skills check`
 
-Check that each installed copy of mxv's skill matches this mxv
+Check that each installed copy of this tool's skills matches this build
 
 ### Arguments
 
@@ -1173,11 +1219,11 @@ Effects: read-only, closed-world.
 
 ## `mxv skills print`
 
-Print mxv's skill
+Print this tool's skill
 
 ### Examples
 
-Print mxv's skill.
+Print the skill.
 
 ```sh
 mxv skills print

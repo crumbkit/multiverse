@@ -503,6 +503,10 @@ pub struct Runs {
     /// The command that provisions a workspace's services, or `None`
     /// until [`Runs::with_provisioner`] names it.
     provisioner: Option<Vec<String>>,
+    /// The directory of the workspace records and the proxy's HTTPS address,
+    /// from which plans name the proxy's routes, or `None` until
+    /// [`Runs::with_proxy_urls`] names them.
+    proxy_urls: Option<(PathBuf, std::net::SocketAddr)>,
 }
 
 impl Runs {
@@ -523,7 +527,18 @@ impl Runs {
             build_wait: phased::BUILD_WAIT,
             caller: CallerEnvironment::default(),
             provisioner: None,
+            proxy_urls: None,
         }
+    }
+
+    /// Returns these run files with `records`, the directory of the
+    /// workspace records, and `https`, the proxy's HTTPS address, from which
+    /// each plan names the proxy's routes in the `MXV_DOMAIN`, `MXV_HOST_*`
+    /// and `MXV_URL_*` variables of host processes and tasks.
+    #[must_use]
+    pub fn with_proxy_urls(mut self, records: PathBuf, https: std::net::SocketAddr) -> Self {
+        self.proxy_urls = Some((records, https));
+        self
     }
 
     /// Returns these run files with `program`, followed by the words of

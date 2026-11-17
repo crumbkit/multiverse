@@ -364,6 +364,147 @@ fn two_workspaces_that_make_one_host_label_serve_the_first_and_shadow_the_second
     );
 }
 
+/// Returns a manifest whose unit `web` serves the route `web`, lists the
+/// extra host name `host`, and records its proxy variables in `proxy.txt`
+/// in its checkout.
+fn hosted(host: &str) -> String {
+    format!(
+        r#"ports = ["web"]
+routes = ["web"]
+
+[processes.web]
+argv = ["sh", "-c", "echo \"$MXV_URL $MXV_DOMAIN $MXV_HOST_WEB\" > proxy.txt && exec sleep 60"]
+ports = {{ PORT = "web" }}
+listen = "web"
+ready = {{ timeout_seconds = 1 }}
+hosts = ["{host}"]
+"#
+    )
+}
+
+#[test]
+fn a_unit_receives_the_proxy_names_of_its_workspace_in_its_environment() {
+    let setup = Setup::new();
+    setup.without_caddy();
+    setup.workspace("triage", &hosted("app.localhost"));
+    let (exit, _, errors) = setup.json_and_errors(&["up", "-w", "triage"]);
+    let _ = errors;
+    assert!(exit == 0 || exit == 1);
+    let file = setup.root().join("workspaces/triage/app/proxy.txt");
+    let deadline = Instant::now() + MOST_WAIT;
+    while !file.exists() && Instant::now() < deadline {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test polls for a file that the unit writes"
+        )]
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let port = setup.https_port();
+    assert_eq!(
+        fs::read_to_string(&file).unwrap().trim(),
+        format!(
+            "https://web.triage.mxv.localhost:{port} triage.mxv.localhost web.triage.mxv.localhost"
+        )
+    );
+}
+
+#[test]
+fn status_lists_the_extra_host_names_under_the_route() {
+    let setup = Setup::new();
+    setup.without_caddy();
+    setup.workspace("triage", &hosted("app.localhost"));
+    let (exit, _, _) = setup.json_and_errors(&["up", "-w", "triage"]);
+    assert!(exit == 0 || exit == 1);
+    let routes = setup.routes();
+    assert_eq!(
+        routes[0]["notes"][0],
+        format!("https://app.localhost:{}", setup.https_port())
+    );
+}
+
+#[test]
+fn status_names_the_workspace_that_serves_an_extra_host_name_that_two_list() {
+    let setup = Setup::new();
+    setup.without_caddy();
+    setup.workspace("alpha", &hosted("app.localhost"));
+    setup.workspace("beta", &hosted("app.localhost"));
+    for name in ["alpha", "beta"] {
+        let (exit, _, _) = setup.json_and_errors(&["up", "-w", name]);
+        assert!(exit == 0 || exit == 1);
+    }
+    let routes = setup.routes();
+    let beta = routes
+        .iter()
+        .find(|row| row["workspace"] == "beta")
+        .unwrap();
+    assert!(
+        beta["notes"][0]
+            .as_str()
+            .unwrap()
+            .contains("app.localhost is not served for beta; alpha lists it too and serves it"),
+        "{beta}"
+    );
+}
+
+#[test]
+fn check_without_caddy_prints_a_row_for_each_check_and_fails_with_its_code() {
+    let setup = Setup::new();
+    setup.without_caddy();
+    let (exit, text, errors) = setup.text(&["proxy", "check"]);
+    assert_eq!(exit, 1, "{text}{errors}");
+    for row in ["caddy", "http", "https", "authority", "caddy runs", "hosts"] {
+        assert!(text.contains(row), "{row}: {text}");
+    }
+    assert!(text.contains("no extra host names"), "{text}");
+    assert!(errors.contains("mxv::proxy::check_failed"), "{errors}");
+    assert!(errors.contains("2 of 6 proxy checks failed"), "{errors}");
+    assert!(
+        !setup.root().join("state/mxv/proxy").exists(),
+        "a check created the proxy directory"
+    );
+}
+
+#[test]
+fn check_reports_an_address_that_another_process_holds() {
+    let setup = Setup::new();
+    let holder = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let held = holder.local_addr().unwrap();
+    setup.config(&[format!("proxy_https = \"{held}\"")]);
+    let (exit, printed, _) = setup.text(&["proxy", "check", "--json"]);
+    assert_eq!(exit, 1, "{printed}");
+    let document: Value = serde_json::from_str(printed.lines().next().unwrap()).unwrap();
+    let rows = document["data"].as_array().unwrap();
+    let https = rows.iter().find(|row| row["check"] == "https").unwrap();
+    assert_eq!(https["state"], "failed");
+    let config = setup.root().join("config/mxv/config.toml");
+    assert!(
+        https["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&config.display().to_string()),
+        "the row names the config file under XDG_CONFIG_HOME: {https}"
+    );
+    assert!(
+        https["detail"]
+            .as_str()
+            .unwrap()
+            .contains(&format!("{held} is held by another process")),
+        "{https}"
+    );
+}
+
+#[test]
+fn install_without_caddy_refuses_with_the_missing_caddy_code() {
+    let setup = Setup::new();
+    setup.without_caddy();
+    let (exit, document, _) = setup.json_and_errors(&["proxy", "install"]);
+    assert_eq!(exit, 1, "{document}");
+    assert!(
+        document.to_string().contains("mxv::proxy::caddy_missing"),
+        "{document}"
+    );
+}
+
 #[test]
 fn down_of_a_workspace_with_no_routes_leaves_no_proxy_files() {
     let setup = Setup::new();
@@ -558,4 +699,180 @@ fn starting_the_proxy_again_with_the_routes_unchanged_loads_nothing() {
         fs::metadata(&bootstrap).unwrap().modified().unwrap(),
         before
     );
+}
+
+#[test]
+fn a_real_caddy_serves_an_extra_host_name_and_prints_the_hosts_line_for_it() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    let manifest = site().replace(
+        "listen = \"web\"\n",
+        "listen = \"web\"\nhosts = [\"local.app.invalid\"]\n",
+    );
+    setup.workspace("reading-list", &manifest);
+    let (exit, _, errors) = setup.json_and_errors(&["up", "-w", "reading-list"]);
+    assert_eq!(exit, 0, "{errors}");
+    assert!(
+        errors.contains(&format!(
+            "mxv also serves web at https://local.app.invalid:{}",
+            real.https
+        )),
+        "{errors}"
+    );
+    assert!(
+        errors.contains(
+            "note: local.app.invalid does not resolve to this machine; add this line to /etc/hosts: 127.0.0.1 local.app.invalid"
+        ),
+        "{errors}"
+    );
+    assert!(
+        real.wait_for("https", "local.app.invalid", "200")
+            .contains("hello-from-web")
+    );
+    let (exit, text, _) = setup.text(&["proxy", "check"]);
+    assert_eq!(exit, 1, "{text}");
+    assert!(
+        text.contains("local.app.invalid does not resolve"),
+        "{text}"
+    );
+    assert!(
+        text.contains("add this line to /etc/hosts: 127.0.0.1 local.app.invalid"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_real_caddy_that_install_starts_before_any_route_exists_leaves_the_trust_to_a_person() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    let (exit, document, _) = setup.json_and_errors(&["proxy", "install"]);
+    assert_eq!(exit, 1, "{document}");
+    assert!(
+        document
+            .to_string()
+            .contains("mxv::proxy::trust_needs_terminal"),
+        "{document}"
+    );
+    let (exit, status) = setup.json(&["proxy", "status"]);
+    assert_eq!(exit, 0, "{status}");
+    assert!(status.to_string().contains("\"running\":true"), "{status}");
+    let (_, text, _) = setup.text(&["proxy", "check"]);
+    let running = text
+        .lines()
+        .find(|line| line.starts_with("caddy runs"))
+        .unwrap();
+    assert!(running.contains("ok"), "{running}");
+    let authority = text
+        .lines()
+        .find(|line| line.starts_with("authority"))
+        .unwrap();
+    assert!(!authority.contains("not created yet"), "{authority}");
+    let before = caddy_pid(&setup);
+    let (exit, _, errors) = setup.json_and_errors(&["proxy", "install"]);
+    assert_eq!(
+        exit, 1,
+        "a second install finds Caddy running and asks again"
+    );
+    assert!(errors.contains("Caddy already runs"), "{errors}");
+    assert_eq!(
+        caddy_pid(&setup),
+        before,
+        "a second install leaves the same Caddy running"
+    );
+    setup.json(&["proxy", "stop"]);
+}
+
+/// Returns the process id that `mxv proxy status` reports for Caddy.
+fn caddy_pid(setup: &Setup) -> u64 {
+    fn find(value: &Value) -> Option<u64> {
+        match value {
+            Value::Object(map) => map
+                .get("pid")
+                .and_then(Value::as_u64)
+                .or_else(|| map.values().find_map(find)),
+            Value::Array(items) => items.iter().find_map(find),
+            _ => None,
+        }
+    }
+    let (_, status) = setup.json(&["proxy", "status"]);
+    find(&status).unwrap_or_else(|| panic!("Caddy has no pid: {status}"))
+}
+
+#[test]
+fn a_real_caddy_that_install_started_stops_when_a_sync_finds_no_route() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    setup.workspace("plain", "[processes.idle]\nargv = [\"sleep\", \"60\"]\n");
+    let (exit, _, _) = setup.json_and_errors(&["proxy", "install"]);
+    assert_eq!(exit, 1);
+    let (_, status) = setup.json(&["proxy", "status"]);
+    assert!(status.to_string().contains("\"running\":true"), "{status}");
+    let (exit, _, errors) = setup.json_and_errors(&["down", "-w", "plain"]);
+    assert_eq!(exit, 0, "{errors}");
+    let (_, status) = setup.json(&["proxy", "status"]);
+    assert!(
+        status.to_string().contains("\"running\":false"),
+        "a sync with no route stops the route-free Caddy: {status}"
+    );
+}
+
+#[test]
+fn a_real_caddy_that_holds_a_route_the_records_no_longer_declare_fails_the_check() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    setup.workspace("reading-list", &site());
+    let (exit, _, errors) = setup.json_and_errors(&["up", "-w", "reading-list"]);
+    assert_eq!(exit, 0, "{errors}");
+    let (_, text, _) = setup.text(&["proxy", "check"]);
+    let running = text
+        .lines()
+        .find(|line| line.starts_with("caddy runs"))
+        .unwrap();
+    assert!(running.contains("1 route loaded"), "{running}");
+    write(
+        &setup.root().join("workspaces/reading-list/app/mxv.toml"),
+        "[processes.idle]\nargv = [\"sleep\", \"60\"]\n",
+    );
+    let (_, text, _) = setup.text(&["proxy", "check"]);
+    let running = text
+        .lines()
+        .find(|line| line.starts_with("caddy runs"))
+        .unwrap();
+    assert!(running.contains("failed"), "{running}");
+    assert!(running.contains("mxv proxy start"), "{running}");
+    setup.json(&["proxy", "stop"]);
+}
+
+#[test]
+fn a_real_caddy_that_install_starts_leaves_the_trust_to_a_person_at_a_terminal() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    setup.workspace("reading-list", &site());
+    let (exit, _, errors) = setup.json_and_errors(&["up", "-w", "reading-list"]);
+    assert_eq!(exit, 0, "{errors}");
+    let (exit, _) = setup.json(&["proxy", "stop"]);
+    assert_eq!(exit, 0);
+    let (exit, document, _) = setup.json_and_errors(&["proxy", "install"]);
+    assert_eq!(exit, 1, "{document}");
+    assert!(
+        document
+            .to_string()
+            .contains("mxv::proxy::trust_needs_terminal"),
+        "{document}"
+    );
+    assert!(
+        document.to_string().contains("mxv proxy install"),
+        "{document}"
+    );
+    let (_, text, _) = setup.text(&["proxy", "check"]);
+    let running = text
+        .lines()
+        .find(|line| line.starts_with("caddy runs"))
+        .unwrap();
+    assert!(running.contains("ok"), "{running}");
 }

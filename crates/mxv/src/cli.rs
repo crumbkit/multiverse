@@ -11,9 +11,7 @@ use crumbkit::completion::{
 use crumbkit::help::{Effects, Example, Goal, Group, Help, Leaf};
 use crumbkit::schemas::{SCHEMAS_LIST, SCHEMAS_SHOW, SchemasList, SchemasShow};
 use crumbkit::{DryRun, NoInput, Page, Tool, ViewFlags, Yes};
-use crumbkit_skills::{
-    SKILLS_CHECK, SKILLS_INSTALL, SKILLS_PRINT, Skill, SkillsCheck, SkillsInstall,
-};
+use crumbkit_skills::Skill;
 use crumbkit_usage::{
     SELF_FIGURES_LIST, SELF_RUNS_LIST, SELF_USAGE, SelfFigures, SelfRuns, SelfUsage,
 };
@@ -22,7 +20,8 @@ use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
 use crate::proxy::{
-    START as PROXY_START, STATUS as PROXY_STATUS, STOP as PROXY_STOP, TRUST as PROXY_TRUST,
+    CHECK as PROXY_CHECK, INSTALL as PROXY_INSTALL, START as PROXY_START, STATUS as PROXY_STATUS,
+    STOP as PROXY_STOP, TRUST as PROXY_TRUST,
 };
 use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
 use crate::repair::{REPAIR, RepairArgs};
@@ -202,6 +201,20 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::additive().idempotent().open_world())
             .document(PROXY_TRUST),
+        Leaf::new(&["proxy", "install"])
+            .examples(&[Example::new(
+                &[],
+                "Start the proxy and trust its certificate authority, which a person at a terminal confirms",
+            )])
+            .effects(Effects::additive().idempotent().open_world())
+            .document(PROXY_INSTALL),
+        Leaf::new(&["proxy", "check"])
+            .examples(&[Example::new(
+                &[],
+                "Say whether Caddy, its addresses, the authority and each extra host name are set up",
+            )])
+            .effects(Effects::read_only())
+            .document(PROXY_CHECK),
         Leaf::new(&["archive"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "--dry-run"],
@@ -297,30 +310,9 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::read_only())
             .document(SELF_RUNS_LIST),
-        Leaf::new(&["skills", "install"])
-            .examples(&[
-                Example::new(
-                    &[],
-                    "Install mxv's skill into each agent skills directory that exists",
-                ),
-                Example::new(
-                    &["--force"],
-                    "Install it, replacing a file or a link that install did not write",
-                ),
-            ])
-            .effects(Effects::additive().idempotent())
-            .document(SKILLS_INSTALL),
-        Leaf::new(&["skills", "check"])
-            .examples(&[Example::new(
-                &[],
-                "Report each agent skills directory whose copy is missing or differs",
-            )])
-            .effects(Effects::read_only())
-            .document(SKILLS_CHECK),
-        Leaf::new(&["skills", "print"])
-            .examples(&[Example::new(&[], "Print mxv's skill")])
-            .effects(Effects::read_only())
-            .document(SKILLS_PRINT),
+        crumbkit_skills::install_leaf(&["skills", "install"]),
+        crumbkit_skills::check_leaf(&["skills", "check"]),
+        crumbkit_skills::print_leaf(&["skills", "print"]),
         Leaf::new(&["completion", "install"])
             .examples(&[
                 Example::new(&["--shell", "fish"], "Install mxv's completion for fish"),
@@ -363,6 +355,8 @@ pub(crate) enum Verb {
     /// Each --repo adds one clone, in the folder <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that an --as right after that --repo gives. Two folders with the same name, compared without case, are refused. Every clone is on the branch NAME. The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG_DATA_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
     ///
     /// The workspace's directory is <ROOT>/<NAME>. The root is $MXV_ROOT when it is set, or else the `root` that the config file $XDG_CONFIG_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG_DATA_HOME/mxv/workspaces, which is ~/.local/share/mxv/workspaces when XDG_DATA_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
+    ///
+    /// New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock. A dry run takes no lock.
     New(NewArgs),
     /// Add a clone of a repository to a workspace, on the workspace's branch.
     ///
@@ -405,12 +399,14 @@ pub(crate) enum Verb {
     /// Archive a workspace, so restore can rebuild it at the same commits.
     ///
     /// When no workspace has the name and its archive has finished, the workspace is already archived, so mxv changes nothing and the result's state is unchanged.
+    ///
+    /// Archive holds the workspace's lock while it plans, and holds no lock while its question is open, so `mxv up` and the other commands of the workspace run meanwhile. After the question, it takes the lock, plans again, and goes on only with what the question named. When a unit runs that the question did not name, or docker holds a volume that it did not name, mxv stops and deletes nothing and fails with mxv::archive::changed. An archive that an earlier run retired and did not finish is finished by running `mxv archive -w NAME` again, and an archive that finished has nothing to do, so a second archive of a name reports unchanged. With --delete-volumes, every question names the docker volumes that the archive deletes, and the finish of a retired archive asks too.
     Archive(ArchiveArgs),
     /// Rebuild an archived workspace at its archived commits.
     ///
     /// `mxv restore NAME` rebuilds the workspace from the archive and its mirrors, and fetches nothing. A clone's archived commits live in its mirror, so when a mirror is gone or has lost its pins, mxv refuses with mxv::restore::mirror_missing, lists per checkout what only the mirror held, such as uncommitted work, stashes, local branches and commits that origin did not hold, and changes nothing. `--from-origin` is the one option that contacts origin: it fetches origin into each clone's mirror, making the mirror again when it is gone or has lost its pins, and rebuilds each checkout at the archived commit when origin holds it, else at the tip of the archived branch on origin, else at the tip of origin's default branch. It restores the workspace's root files and the ignored files, lists each pin that it could not restore as lost, and then deletes the archive. A fetch that fails leaves the new mirror deleted and the archive whole.
     ///
-    /// When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed.
+    /// When a workspace already has the name and no archive of it needs restoring, mxv changes nothing and the result's state is unchanged. When an earlier restore stopped after it rebuilt the workspace and before it deleted the archive, so the archive has the workspace's stable id, and the workspace's directory and every checkout's directory are there, mxv asks and then deletes the archive with its pins, because the workspace holds every commit again, and the state is still unchanged. When one of those directories is gone, the archive may hold the only copies of the workspace's files, so mxv keeps it and refuses with mxv::restore::name_taken; `mxv remove NAME` removes what is left of the workspace, and a restore then brings it back. When the workspace's containers ran, `mxv remove` needs --delete-volumes, which deletes the workspace's docker volumes, so the restore then brings back the files but not the volumes. When the records change after the question, so the archive is no longer the one that mxv offered to delete, mxv deletes nothing and fails with mxv::restore::changed. After the question, a restore takes the workspace's lock and plans again, and holds the lock until the archive is deleted. When another restore brought the workspace back meanwhile, the state is unchanged, and when the archive of the name is another one than the question was about, mxv builds nothing and fails with mxv::restore::changed.
     Restore(RestoreArgs),
     /// Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans list what no record names.
     ///
@@ -423,6 +419,10 @@ pub(crate) enum Verb {
     /// Remove fetches nothing. It counts a clone's unpushed commits against the clone's own remote branches and the heads and tags that its mirror last fetched from origin, and a refusal names how long ago the mirror fetched.
     ///
     /// When no workspace has the name, or with --archived no archive, there is nothing to remove, so mxv changes nothing and the result's state is unchanged.
+    ///
+    /// Remove holds the workspace's lock from before it stops the units until after it deletes the last docker volume, so a removal that meets a command that holds the lock for more than 5 seconds fails with mxv::workspace::busy and deletes nothing. After the question, it reads the workspace again, and when the workspace changed, or a unit runs that --force did not allow it to stop, or docker holds a volume that the question did not name, it deletes nothing and fails with mxv::workspace::changed or mxv::workspace::running. With --delete-volumes, the question names the docker volumes that the removal deletes.
+    ///
+    /// With --archived, mxv holds the lock, reads the archive again after the question, and deletes only the archive that the question was about. When the archive is another one, such as a new archive of the same name after a restore, or is no longer finished, or docker holds a volume of it that the question did not name, mxv deletes nothing and fails with mxv::archive::changed. With --archived and --delete-volumes, the question names the docker volumes that the deletion deletes.
     // `rm` is a hidden alias, so a person can type it, and help, `Next:`
     // lines and `commands list` name only `remove`.
     #[command(alias = "rm")]
@@ -474,7 +474,7 @@ pub(crate) enum Verb {
     Skills {
         /// What to do with the skill.
         #[command(subcommand)]
-        command: SkillsCommand,
+        command: crumbkit_skills::SkillsCommand,
     },
     /// Set up mxv's completion in a shell.
     Completion {
@@ -502,6 +502,10 @@ pub(crate) enum ProxyCommand {
     Stop,
     /// Ask a person to trust the proxy's certificate authority, so browsers accept its certificates.
     Trust,
+    /// Start the proxy and ask a person to trust its authority; safe to run again.
+    Install,
+    /// Say what the proxy still needs; it changes nothing.
+    Check,
 }
 
 /// The commands for a workspace's host ports.
@@ -556,17 +560,6 @@ pub(crate) enum SelfCommand {
 pub(crate) enum FiguresCommand {
     /// List the figures of each command in mxv's usage log.
     List(SelfFigures),
-}
-
-/// The commands for mxv's agent skill.
-#[derive(Debug, Subcommand)]
-pub(crate) enum SkillsCommand {
-    /// Install mxv's skill into each agent skills directory that exists.
-    Install(SkillsInstall),
-    /// Check that each installed copy of mxv's skill matches this mxv.
-    Check(SkillsCheck),
-    /// Print mxv's skill.
-    Print,
 }
 
 /// The commands for mxv's shell completion.

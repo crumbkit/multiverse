@@ -1,4 +1,4 @@
-Print mxv's skill
+Print this tool's skill
 
 Usage: mxv skills print [OPTIONS]
 

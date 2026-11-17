@@ -6,9 +6,9 @@ use std::path::PathBuf;
 
 use multiverse::health::{self, Problem};
 use multiverse::{
-    AddOutcome, Allow, ArchiveState, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined, Manifest,
-    ManifestProblem, Mode, NewOutcome, PathGlob, RemovalOutcome, RemovalPlan, Repo, Store,
-    Workspace, WorkspaceName, Workspaces, checkout_prefix, prefixed,
+    AddOutcome, Allow, ArchiveState, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined,
+    Lifecycle, Manifest, ManifestProblem, Mode, NewOutcome, PathGlob, RemovalPlan, RemoveAsked,
+    Removed, Repo, Store, Workspace, WorkspaceName, Workspaces, checkout_prefix, prefixed,
 };
 
 use crate::cli::{AddArgs, CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
@@ -306,6 +306,21 @@ pub(crate) fn new(
     let repos = repos(args)?;
     let (copied, warnings) = copied(environment, &workspaces, args, &repos, &root.path)?;
     let text = copied.as_ref().map(|copied| copied.text.as_str());
+    // The lock stays held until the ignored directories are copied, so a
+    // command such as `mxv remove` cannot delete the checkouts while they
+    // are made. A name that a workspace already holds is reported before
+    // the lock, so it does not wait for another command that holds it.
+    let _lock = if mode == Mode::Change {
+        if workspaces.find(&name).map_err(MxvFailure::from)?.is_some() {
+            return Err(MxvFailure::Exists {
+                name: name.to_string(),
+            }
+            .into());
+        }
+        Some(processes::lock(environment, &name)?)
+    } else {
+        None
+    };
     let outcome = workspaces
         .create_repos(&root.path, &name, &repos, mode, text)
         .map_err(MxvFailure::from)?;
@@ -718,13 +733,10 @@ pub(crate) fn remove(
         discard_changes: args.force,
         delete_unmerged: args.delete_unmerged,
     };
-    let mut running = Vec::new();
     let mut volumes = None;
     let mut containers = Vec::new();
-    let mut id = None;
     if let Some(workspace) = workspaces.find(&name).map_err(MxvFailure::from)? {
-        id.clone_from(&workspace.id);
-        running = processes::running(environment, &workspace)?;
+        let running = processes::running(environment, &workspace)?;
         if !running.is_empty() && !args.force {
             return Err(RunFailure::Running {
                 workspace: name.to_string(),
@@ -812,12 +824,20 @@ pub(crate) fn remove(
             crate::rows::stashes(u32::try_from(stashes).unwrap_or(u32::MAX))
         ));
     }
-    output.confirm(args.yes, &question)?;
-    if !running.is_empty() {
-        processes::stop_all(environment, &removal.workspace)?;
+    if args.delete_volumes {
+        question.push_str(&crate::archive::volumes_clause(&names));
     }
-    match workspaces.remove(removal).map_err(MxvFailure::from)? {
-        RemovalOutcome::Done(removed) => {
+    output.confirm(args.yes, &question)?;
+    let runs = environment.runs()?;
+    let archives = crate::archive::archives(environment)?;
+    let asked = RemoveAsked::new(args.force, names.clone());
+    let outcome = Lifecycle::new(&workspaces, &archives, &runs)
+        .remove(removal, &asked)
+        .map_err(MxvFailure::from)?;
+    match outcome {
+        Removed::Done(done) => {
+            let removed = done.removal;
+            let mut held = processes::held_sentences(&name, done.held);
             crate::proxy::sync(
                 environment,
                 &multiverse::Store::new(environment.records()?),
@@ -825,11 +845,7 @@ pub(crate) fn remove(
                 multiverse::SyncMode::IfRunning,
                 served,
             );
-            let mut held = processes::forget(environment, &name, id.as_ref())?;
             held.extend(stopped_archive(environment, &removed.workspace)?);
-            if let Some(volumes) = volumes {
-                processes::delete_volumes(environment, volumes)?;
-            }
             Ok(Prose::new(
                 RemovalResult::new(&removed, false)
                     .with_docker(containers, names)
@@ -837,13 +853,25 @@ pub(crate) fn remove(
             ))
         }
         // Another removal finished after the question.
-        RemovalOutcome::Changed(RemovalPlan::NotFound) => gone(),
-        RemovalOutcome::Changed(RemovalPlan::Ready(_)) => Err(MxvFailure::Changed {
+        Removed::Unchanged | Removed::Refused(RemovalPlan::NotFound) => gone(),
+        Removed::Changed | Removed::Refused(RemovalPlan::Ready(_)) => Err(MxvFailure::Changed {
             name: name.to_string(),
             allow,
         }
         .into()),
-        RemovalOutcome::Changed(refused) => Err(refusal(&name, allow, refused).into()),
+        Removed::Refused(refused) => Err(refusal(&name, allow, refused).into()),
+        Removed::Running(processes) => Err(RunFailure::Running {
+            workspace: name.to_string(),
+            processes,
+        }
+        .into()),
+        Removed::Unstoppable(unstoppable) => Err(RunFailure::Unstoppable {
+            process: unstoppable.process,
+            pid: unstoppable.pid,
+            unverified: unstoppable.unverified,
+            not_started: Vec::new(),
+        }
+        .into()),
     }
 }
 

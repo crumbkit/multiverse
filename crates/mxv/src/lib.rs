@@ -35,18 +35,19 @@ use crumbkit::Code;
 
 #[doc(hidden)]
 pub use crate::archive::{
-    ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_MIRROR_MISSING,
-    ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE, ARCHIVE_RECORD_TOO_LARGE,
-    ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED, ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE,
-    ARCHIVE_VOLUMES_IN_USE, ARCHIVE_WORKSPACE_REMOVED, RESTORE_BRANCH_MOVED,
-    RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING,
-    RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
+    ARCHIVE_CHANGED, ARCHIVE_CHECKOUT_UNUSABLE, ARCHIVE_IN_USE, ARCHIVE_MANIFEST_DISPOSABLE,
+    ARCHIVE_MIRROR_MISSING, ARCHIVE_NAME_TAKEN, ARCHIVE_NOT_FOUND, ARCHIVE_PINS_GONE,
+    ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_RENAME_UNFINISHED, ARCHIVE_SOURCE_CHANGED,
+    ARCHIVE_UNFINISHED, ARCHIVE_UNKEEPABLE, ARCHIVE_VOLUMES_IN_USE, ARCHIVE_WORKSPACE_REMOVED,
+    RESTORE_BRANCH_MOVED, RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN,
+    RESTORE_MIRROR_MISSING, RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
+    RESTORE_UNFINISHED,
 };
 #[doc(hidden)]
 pub use crate::cli::{Cli, TOOL};
 use crate::cli::{
     CommandsCommand, CompletionCommand, FiguresCommand, PortsCommand, RunsCommand, SKILL,
-    SchemasCommand, SelfCommand, SkillsCommand, Verb,
+    SchemasCommand, SelfCommand, Verb,
 };
 #[doc(hidden)]
 pub use crate::environment::{Bases, Environment, VARIABLES, Variable};
@@ -76,9 +77,9 @@ pub use crate::failures::{
 };
 #[doc(hidden)]
 pub use crate::proxy::{
-    PROXY_CADDY_MISSING, PROXY_CADDY_TOO_OLD, PROXY_LOAD_FAILED, PROXY_PORT_DENIED,
-    PROXY_PORT_HELD, PROXY_SOCKET_PATH_TOO_LONG, PROXY_START_FAILED, PROXY_TRUST_FAILED,
-    PROXY_TRUST_NEEDS_TERMINAL,
+    PROXY_CADDY_MISSING, PROXY_CADDY_TOO_OLD, PROXY_CHECK_FAILED, PROXY_LOAD_FAILED,
+    PROXY_PORT_DENIED, PROXY_PORT_HELD, PROXY_SOCKET_PATH_TOO_LONG, PROXY_START_FAILED,
+    PROXY_TRUST_FAILED, PROXY_TRUST_NEEDS_TERMINAL,
 };
 #[doc(hidden)]
 pub use crate::run_failures::{
@@ -271,20 +272,7 @@ where
                 crumbkit::finish(output, crumbkit_usage::SELF_RUNS_LIST, result)
             }
         },
-        Verb::Skills { command } => match command {
-            SkillsCommand::Install(args) => {
-                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::install(&[SKILL], &args));
-                crumbkit::finish(output, crumbkit_skills::SKILLS_INSTALL, result)
-            }
-            SkillsCommand::Check(args) => {
-                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::check(&[SKILL], &args));
-                crumbkit::finish(output, crumbkit_skills::SKILLS_CHECK, result)
-            }
-            SkillsCommand::Print => {
-                let result = Ok::<_, crumbkit::Error>(crumbkit_skills::print(&SKILL));
-                crumbkit::finish(output, crumbkit_skills::SKILLS_PRINT, result)
-            }
-        },
+        Verb::Skills { command } => crumbkit_skills::run(output, &[SKILL], &command),
         Verb::Completion { command } => match command {
             CompletionCommand::Install(args) => {
                 let result = crumbkit::completion::install(Cli::command, &args);

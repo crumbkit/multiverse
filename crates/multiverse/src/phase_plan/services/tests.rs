@@ -69,6 +69,7 @@ fn plan_with(
         grace: Duration::from_secs(5),
         caller,
         provisioner,
+        urls: crate::phase_plan::ProxyUrls::default(),
     })
 }
 
