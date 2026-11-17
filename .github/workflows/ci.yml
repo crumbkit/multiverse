@@ -81,8 +81,14 @@ jobs:
         run: cargo nextest run --locked --workspace --all-features
       # mxv-phase without its default sandbox feature runs every app
       # unsandboxed, and its tests check that it never starts one sandboxed.
+      # The step leaves out the engine::container tests because they run
+      # docker and never read the feature, and the tests step above already
+      # runs them. A container test that reads the feature must change the
+      # filter.
       - name: tests without the sandbox
-        run: cargo nextest run --locked -p mxv-phase --no-default-features
+        run: >-
+          cargo nextest run --locked -p mxv-phase --no-default-features
+          -E 'not test(/^engine::container::/)'
       - name: doctests
         run: cargo test --locked --doc --workspace --all-features
       - name: rustdoc
