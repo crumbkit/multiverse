@@ -1021,8 +1021,10 @@ pub(crate) fn containers(
     Ok(environment.runs()?.docker_containers(workspace)?)
 }
 
-/// Stops every process and container of `workspace` through the stop of
-/// `mxv down`, for `mxv reclaim`, and marks the workspace with what ran.
+/// Marks `workspace` with the processes and containers that run, and
+/// then stops each of them through the stop of `mxv down`, for `mxv
+/// reclaim`. When the stop fails, or mxv dies during it, the mark stays
+/// and names what ran, so `mxv up` without names starts that set again.
 /// It holds the workspace's lock, reads the record again and the names of
 /// what still runs, and passes both to `check`, which returns why the
 /// workspace is no longer idle, or `None`. When `check` gives a reason,
@@ -1066,13 +1068,15 @@ pub(crate) fn reclaim_stop(
     if let Some(reason) = check(&context.workspace, &running)? {
         return Ok(Err(reason));
     }
-    let manifest = lenient_manifest(&context.workspace);
-    stop_every(&context, &lock, manifest.as_ref())?;
+    // The mark goes first, so a stop that fails or a death during it
+    // leaves the mark naming what ran, and `mxv up` starts that set again.
     context.workspace.reclaimed = Some(Reclaimed::new(running));
     context
         .store
         .update(&mut context.workspace)
         .map_err(MxvFailure::from)?;
+    let manifest = lenient_manifest(&context.workspace);
+    stop_every(&context, &lock, manifest.as_ref())?;
     Ok(Ok(()))
 }
 

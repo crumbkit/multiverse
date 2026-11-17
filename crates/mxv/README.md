@@ -2071,8 +2071,8 @@ the workspace when it became pinned, an mxv command named it, a process
 outside phase started working in it, its checkouts changed, or its
 processes stopped since mxv measured it.
 
-mxv marks each workspace that it stopped with the units
-that ran. `mxv status` reports the mark in `reclaimed`, and `mxv up` without
+mxv marks each workspace that it stops with the units
+that ran, before it stops them, so a stop that fails leaves the mark. `mxv status` reports the mark in `reclaimed`, and `mxv up` without
 names starts those units again and removes the mark.
 `mxv up` with names, `mxv restart` and `mxv down` remove only the names
 that they start or stop, or the whole mark when they name none.
