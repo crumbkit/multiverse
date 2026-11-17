@@ -970,6 +970,36 @@ fn a_repair_whose_plan_changed_after_the_question_changes_nothing() {
 }
 
 #[test]
+fn a_repair_that_would_delete_another_archive_than_the_one_confirmed_changes_nothing() {
+    let setup = fresh();
+    let first = setup.stopped_restore();
+    let planned = setup.repair_plan();
+    // While the question is open, another repair deletes the first
+    // archive, the workspace is archived again, and a restore of the
+    // second archive stops after its record, so the name needs the same
+    // kind of repair of another archive.
+    let other = setup.lifecycle().repair(&name(), &planned).unwrap();
+    assert!(matches!(other, Repairing::Done(_)), "{other:?}");
+    let second = setup.archive();
+    assert_ne!(first.id, second.id);
+    let plan = setup.restore_plan();
+    stop_at("record");
+    let stopped = setup.lifecycle().restore(&plan);
+    assert!(
+        matches!(stopped, Err(Error::Unwritable { .. })),
+        "{stopped:?}"
+    );
+    HOOK.with(|hook| *hook.borrow_mut() = None);
+    assert!(matches!(setup.repair_plan(), Repaired::Deleted(_)));
+
+    let outcome = setup.lifecycle().repair(&name(), &planned).unwrap();
+
+    assert!(matches!(outcome, Repairing::Changed), "{outcome:?}");
+    assert_eq!(setup.archive_record().as_ref(), Some(&second));
+    assert!(!setup.pins_of(&second).is_empty());
+}
+
+#[test]
 fn a_repair_that_renames_holds_both_locks_and_finishes_the_archive_under_the_dated_name() {
     let setup = fresh();
     let older = setup.retired_beside_a_newer_workspace();

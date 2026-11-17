@@ -286,7 +286,9 @@ impl<B: Backend> Workspaces<B> {
         let _lock = match &orphan.kind {
             OrphanKind::Unrecorded => return Ok(Swept::Kept(vec![UNRECORDED.to_owned()])),
             OrphanKind::RunFiles { name } => Some(runs.lock(name)?),
-            _ => None,
+            OrphanKind::RunRecord { .. }
+            | OrphanKind::MovedAside { .. }
+            | OrphanKind::IgnoredFiles => None,
         };
         // Only a run record may be one that docker's labels alone name.
         let ask_docker = delete_volumes && matches!(orphan.kind, OrphanKind::RunRecord { .. });

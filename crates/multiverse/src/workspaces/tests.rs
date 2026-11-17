@@ -454,7 +454,7 @@ fn commits_on_a_detached_head_stop_the_removal_unless_unmerged_commits_may_be_de
     };
     assert_eq!(commits, 1);
     let removal = ready(&setup, "reading-list", UNMERGED);
-    assert_eq!(removal.checkouts[0].stray_commits, 1);
+    assert_eq!(removal.checkouts[0].lost_commits(), 1);
     done(setup.workspaces.remove(removal).unwrap());
     assert!(!workspace.path.exists());
 }
@@ -700,7 +700,7 @@ fn commits_on_a_detached_head_of_a_checkout_whose_directory_is_gone_stop_the_rem
     assert_eq!(commits, 2);
     let removal = ready(&setup, "reading-list", UNMERGED);
     assert_eq!(removal.checkouts[0].directory, Fate::Missing);
-    assert_eq!(removal.checkouts[0].stray_commits, 2);
+    assert_eq!(removal.checkouts[0].lost_commits(), 2);
     done(setup.workspaces.remove(removal).unwrap());
 }
 
@@ -1198,7 +1198,7 @@ fn commits_that_no_branch_holds_made_after_the_plan_stop_a_removal_that_allows_d
     let RemovalOutcome::Changed(RemovalPlan::Ready(fresh)) = outcome else {
         panic!("{outcome:?}");
     };
-    assert_eq!(fresh.checkouts[0].stray_commits, 1);
+    assert_eq!(fresh.checkouts[0].lost_commits(), 1);
     assert!(checkout.exists());
     assert!(
         setup
@@ -1499,7 +1499,7 @@ fn a_worktree_that_an_interrupted_removal_left_without_its_git_file_is_finished_
     assert!(changes[0].contains("no .git"), "{changes:?}");
     assert!(checkout.join("notes.md").exists());
     let removal = ready(&setup, "reading-list", FORCE);
-    assert!(removal.checkouts[0].partial);
+    assert!(removal.checkouts[0].partial_worktree());
     done(setup.workspaces.remove(removal).unwrap());
     assert!(!workspace.path.exists());
     let listed = git(&setup.fixture.clone, &["worktree", "list", "--porcelain"]);

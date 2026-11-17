@@ -13,7 +13,8 @@ use crate::record::{Workspace, WorkspaceKind, WorkspaceState};
 use crate::store::{self, Store};
 use crate::testing::{Fixture, advance_origin, fixture, git, write};
 use crate::workspaces::{
-    Allow, BranchFate, Fate, Mode, NewOutcome, Removal, RemovalOutcome, RemovalPlan, Workspaces,
+    Allow, BranchFate, Fate, Mode, NewOutcome, Removal, RemovalKind, RemovalOutcome, RemovalPlan,
+    Workspaces,
 };
 
 const NOTHING: Allow = Allow {
@@ -625,7 +626,10 @@ fn a_stash_added_after_the_plan_stops_a_forced_removal() {
     let RemovalPlan::Ready(confirmed) = plan(&setup, "reading-list", FORCE) else {
         panic!("the forced removal is refused");
     };
-    assert_eq!(confirmed.checkouts[0].stashes.len(), 1);
+    let RemovalKind::Clone { stashes, .. } = &confirmed.checkouts[0].kind else {
+        panic!("{:?}", confirmed.checkouts[0].kind);
+    };
+    assert_eq!(stashes.len(), 1);
     git(&checkout, &["stash", "drop", "--quiet"]);
     write(checkout.join("notes.md"), "second");
     git(

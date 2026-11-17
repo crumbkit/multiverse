@@ -348,32 +348,76 @@ pub struct CheckoutRemoval {
     /// was planned, or `None` when the branch was gone. The removal deletes
     /// the branch only while it still points at this commit.
     pub tip: Option<String>,
-    /// The number of commits that the checkout's `HEAD` holds and no
-    /// branch holds, such as commits on a detached `HEAD`, which the
-    /// removal loses. For a clone, it is the number of commits that
-    /// `origin` does not hold, which `lost` lists.
-    pub stray_commits: u32,
-    /// The commits of a clone that `origin` does not hold, which the
-    /// removal loses, or none for a worktree.
-    pub lost: Vec<String>,
-    /// The commit of each stash entry of a clone, which the removal
-    /// deletes, or none for a worktree.
-    pub stashes: Vec<String>,
-    /// Whether the removal unlocks the checkout first, because a killed
-    /// `git worktree add` left it locked with the reason
-    /// [`INITIALIZING`].
-    pub unlock: bool,
     /// The checkout's disposable directories, relative to the checkout,
     /// such as `target/`. The removal deletes them by file descriptor
     /// before it hands the checkout to git or deletes the clone, so no
     /// deadline of git's covers the bulk of the deletion.
     pub disposable: Vec<String>,
-    /// Whether the checkout is a worktree whose `.git` file is gone,
-    /// because an earlier removal stopped partway. Git can no longer read
-    /// it, so the removal deletes what is left by file descriptor and then
-    /// prunes the repository's entry, and only when the caller allowed
-    /// discarding changes.
-    pub partial: bool,
+    /// What only a worktree or only a clone has.
+    pub kind: RemovalKind,
+}
+
+impl CheckoutRemoval {
+    /// Returns the number of commits that the removal loses: for a
+    /// worktree, those that its `HEAD` holds and no branch holds, and for
+    /// a clone, those that `origin` does not hold.
+    #[must_use]
+    pub fn lost_commits(&self) -> u32 {
+        match &self.kind {
+            RemovalKind::Worktree { stray_commits, .. } => *stray_commits,
+            RemovalKind::Clone { lost, .. } => count(lost),
+        }
+    }
+
+    /// Returns the commit of each stash entry that the removal deletes: a
+    /// clone's stashes, and none for a worktree, whose stashes stay in its
+    /// repository.
+    #[must_use]
+    pub fn stashes(&self) -> &[String] {
+        match &self.kind {
+            RemovalKind::Clone { stashes, .. } => stashes,
+            RemovalKind::Worktree { .. } => &[],
+        }
+    }
+
+    /// Reports whether the checkout is a worktree whose `.git` file is
+    /// gone, as the worktree's `partial` says. A clone never is.
+    #[must_use]
+    pub const fn partial_worktree(&self) -> bool {
+        matches!(self.kind, RemovalKind::Worktree { partial: true, .. })
+    }
+}
+
+/// What removing a checkout does that depends on how the checkout was
+/// made.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RemovalKind {
+    /// A worktree of the person's repository.
+    Worktree {
+        /// The number of commits that the checkout's `HEAD` holds and no
+        /// branch holds, such as commits on a detached `HEAD`, which the
+        /// removal loses.
+        stray_commits: u32,
+        /// Whether the removal unlocks the checkout first, because a
+        /// killed `git worktree add` left it locked with the reason
+        /// [`INITIALIZING`].
+        unlock: bool,
+        /// Whether the checkout's `.git` file is gone, because an earlier
+        /// removal stopped partway. Git can no longer read it, so the
+        /// removal deletes what is left by file descriptor and then prunes
+        /// the repository's entry, and only when the caller allowed
+        /// discarding changes.
+        partial: bool,
+    },
+    /// A clone of its own, whose branch and commits live only in its
+    /// `.git`.
+    Clone {
+        /// The commits that `origin` does not hold, which the removal
+        /// loses.
+        lost: Vec<String>,
+        /// The commit of each stash entry, which the removal deletes.
+        stashes: Vec<String>,
+    },
 }
 
 /// What removing a workspace does to a checkout's directory or to the
@@ -453,13 +497,22 @@ fn loses_more(fresh: &Removal, confirmed: &Removal) -> bool {
             .checkouts
             .iter()
             .zip(&confirmed.checkouts)
-            .any(|(now, seen)| {
-                now.stray_commits > seen.stray_commits
-                    || now.lost.iter().any(|commit| !seen.lost.contains(commit))
-                    || now
-                        .stashes
-                        .iter()
-                        .any(|stash| !seen.stashes.contains(stash))
+            .any(|(now, seen)| match (&now.kind, &seen.kind) {
+                (
+                    RemovalKind::Clone { lost, stashes },
+                    RemovalKind::Clone {
+                        lost: seen_lost,
+                        stashes: seen_stashes,
+                    },
+                ) => {
+                    lost.iter().any(|commit| !seen_lost.contains(commit))
+                        || stashes.iter().any(|stash| !seen_stashes.contains(stash))
+                }
+                (RemovalKind::Worktree { .. }, RemovalKind::Worktree { .. }) => {
+                    now.lost_commits() > seen.lost_commits()
+                }
+                // A checkout made another way is another checkout.
+                (RemovalKind::Clone { .. } | RemovalKind::Worktree { .. }, _) => true,
             })
         || fresh
             .discarded
@@ -2190,12 +2243,12 @@ impl<B: Backend> Workspaces<B> {
                 directory,
                 branch,
                 tip,
-                stray_commits: stray,
-                lost: Vec::new(),
-                stashes: Vec::new(),
-                unlock,
                 disposable,
-                partial,
+                kind: RemovalKind::Worktree {
+                    stray_commits: stray,
+                    unlock,
+                    partial,
+                },
             });
         }
         let Sorted {
@@ -2297,12 +2350,11 @@ impl<B: Backend> Workspaces<B> {
             directory: Fate::Missing,
             branch: BranchFate::Missing,
             tip: None,
-            stray_commits: 0,
-            lost: Vec::new(),
-            stashes: Vec::new(),
-            unlock: false,
             disposable: Vec::new(),
-            partial: false,
+            kind: RemovalKind::Clone {
+                lost: Vec::new(),
+                stashes: Vec::new(),
+            },
         };
         match entry {
             Entry::Link => return refused(CloneRefusal::Unowned(checkout.path.clone())),
@@ -2349,9 +2401,7 @@ impl<B: Backend> Workspaces<B> {
             });
         }
         planned.directory = Fate::Removed;
-        planned.stray_commits = unpushed;
-        planned.lost = lost;
-        planned.stashes = stashes;
+        planned.kind = RemovalKind::Clone { lost, stashes };
         planned.branch = if unpushed == 0 {
             BranchFate::Deleted
         } else {
@@ -2405,9 +2455,9 @@ impl<B: Backend> Workspaces<B> {
     /// `target/` never runs into the deadline of `git worktree remove`. A
     /// clone is moved aside before it is deleted, and what an earlier
     /// removal left aside is deleted first, so a removal that stopped
-    /// partway is finished by the next one. A worktree that is
-    /// [`CheckoutRemoval::partial`] is deleted by file descriptor and then
-    /// pruned from its repository.
+    /// partway is finished by the next one. A worktree whose `.git` file is
+    /// gone, as [`CheckoutRemoval::partial_worktree`] reports, is deleted by
+    /// file descriptor and then pruned from its repository.
     pub fn remove(&self, confirmed: Removal) -> Result<RemovalOutcome, Error> {
         let mut removal = match self.plan_removal(&confirmed.workspace.name, confirmed.allow)? {
             RemovalPlan::Ready(fresh) if !loses_more(&fresh, &confirmed) => fresh,
@@ -2419,7 +2469,7 @@ impl<B: Backend> Workspaces<B> {
             if let Some(aside) = aside(&checkout.path) {
                 delete_directory(&aside)?;
             }
-            if planned.directory == Fate::Removed && !planned.partial {
+            if planned.directory == Fate::Removed && !planned.partial_worktree() {
                 self.delete_disposable(checkout, &planned.disposable)?;
             }
             if removal.workspace.kind == WorkspaceKind::Clone {
@@ -2431,12 +2481,12 @@ impl<B: Backend> Workspaces<B> {
                 planned.branch = seen.branch;
                 continue;
             }
-            if planned.unlock {
+            if matches!(planned.kind, RemovalKind::Worktree { unlock: true, .. }) {
                 self.backend
                     .unlock_checkout(&checkout.source, &checkout.path)?;
             }
             match planned.directory {
-                Fate::Removed if planned.partial => {
+                Fate::Removed if planned.partial_worktree() => {
                     delete_directory(&checkout.path)?;
                     if checkout.source.is_dir() {
                         self.backend.prune_checkouts(&checkout.source)?;

@@ -816,7 +816,7 @@ pub(crate) fn remove(
     let stashes: usize = removal
         .checkouts
         .iter()
-        .map(|checkout| checkout.stashes.len())
+        .map(|checkout| checkout.stashes().len())
         .sum();
     if stashes > 0 {
         question.push_str(&format!(

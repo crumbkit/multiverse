@@ -45,6 +45,18 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv repair NAME` deletes an archive that a restore already rebuilt only
+  when it is the archive the person confirmed. When another archive of the
+  name needs that repair by the time the lock is held, the repair reports
+  `mxv::repair::changed` and deletes nothing.
+- The library's `Workspaces::finish_archive` is private to the crate, so a caller outside it cannot mark an archive of any
+  state as archived. `Lifecycle::archive` and `Lifecycle::finish` still
+  finish archives.
+- `CheckoutRemoval` holds what only a worktree or only a clone has in
+  `kind`, a `RemovalKind`: a worktree's `stray_commits`, `unlock` and
+  `partial`, or a clone's `lost` commits and `stashes`.
+  `CheckoutRemoval::lost_commits` returns the count that `stray_commits`
+  held for both kinds.
 - `mxv restore` and `mxv repair NAME` take the workspace lock, plan again
   and act through the library, in `Lifecycle::restore` and
   `Lifecycle::repair`. A second `mxv restore` that waited for the lock
@@ -69,7 +81,7 @@ workspace may need to act on.
   earlier run left unfinished asks before it deletes them, so a script that
   runs `mxv archive -w NAME --delete-volumes` without a terminal needs
   `--yes` there. The library gains `Lifecycle::plan_archive`,
-  `Lifecycle::archive`, `Lifecycle::finish`, `Lifecycle::finish_held`,
+  `Lifecycle::archive`, `Lifecycle::finish`,
   `Lifecycle::with_in_use`, `Archived`, `Finished`, `Finish`, `FinishDone`,
   `RetireDone` and `InUse`, and `VolumesAsked::with_units`.
 - `mxv remove` holds the workspace's lock from before it stops the units

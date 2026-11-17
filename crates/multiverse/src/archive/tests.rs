@@ -2891,3 +2891,25 @@ fn an_archive_admits_a_live_workspace_of_either_kind() {
         setup.plan(ArchiveOptions::default());
     }
 }
+
+#[test]
+fn a_resumed_archive_record_keeps_its_state_and_an_archived_one_is_refused_as_name_taken() {
+    use crate::archive::admit::{RecordStart, record_start};
+
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let mut earlier = setup.archive();
+    assert_eq!(record_start(None), Ok(RecordStart::Retiring));
+    earlier.state = ArchiveState::Retiring;
+    assert_eq!(record_start(Some(&earlier)), Ok(RecordStart::Retiring));
+    earlier.state = ArchiveState::Retired;
+    assert_eq!(record_start(Some(&earlier)), Ok(RecordStart::Retired));
+    earlier.state = ArchiveState::Archived;
+
+    let refused = record_start(Some(&earlier));
+
+    assert_eq!(
+        refused,
+        Err(ArchiveRefusal::NameTaken(Box::new(earlier.clone())))
+    );
+}

@@ -612,7 +612,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     ///
     /// Returns the errors of the run files, docker and the archive's record.
     /// The steps before a failure stay done, and the archive stays retired.
-    pub fn finish_held(
+    pub(crate) fn finish_held(
         &self,
         _lock: &Lock,
         archive: &mut Archive,
@@ -701,7 +701,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// plans the repair again, and changes nothing unless that plan is the
     /// confirmed one, which means the same directory moved aside, the same
     /// rename, or a deletion. A renamed archive is finished under the lock
-    /// of its new name, as [`Lifecycle::finish_held`] does.
+    /// of its new name, as [`Lifecycle::finish`] finishes an archive.
     ///
     /// # Errors
     ///
@@ -772,8 +772,11 @@ fn lock_names(name: &WorkspaceName, planned: &Repaired) -> Vec<WorkspaceName> {
 }
 
 /// Reports whether `again` is the repair that `confirmed` asked about: the
-/// same directory moved aside, the same rename, or a deletion of the
-/// archive. Any other plan asks no question, so it is never confirmed.
+/// same directory moved aside, the same rename, or a deletion of the same
+/// archive. A deletion names its archive by id, because another repair,
+/// a new archive and a stopped restore can leave another archive of the
+/// name to delete while the question is open. Any other plan asks no
+/// question, so it is never confirmed.
 fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
     match (confirmed, again) {
         (Repaired::MovedAside { kept: asked, .. }, Repaired::MovedAside { kept, .. }) => {
@@ -785,8 +788,10 @@ fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
                 archive: asked,
             },
             Repaired::Renamed { from, archive },
-        ) => asked_from == from && asked.name == archive.name,
-        (Repaired::Deleted(_), Repaired::Deleted(_)) => true,
+        ) => asked_from == from && asked.name == archive.name && asked.id == archive.id,
+        (Repaired::Deleted(asked), Repaired::Deleted(deleted)) => {
+            asked.archive.id == deleted.archive.id
+        }
         _ => false,
     }
 }
