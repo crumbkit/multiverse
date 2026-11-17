@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::thread;
 
 use super::{
-    Declared, Derived, Proxy, ProxyError, Route, Settings, SyncMode, admin, caddy_config, derive,
+    Declared, Derived, Proxy, ProxyError, ProxyProblem, Route, Settings, SyncMode, admin,
+    caddy_config, derive, process,
 };
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
@@ -274,6 +275,71 @@ fn a_caddy_older_than_2_8_fails_with_caddy_too_old() {
     );
     let error = proxy.sync(&store, SyncMode::Start, true).unwrap_err();
     assert!(matches!(error, ProxyError::CaddyTooOld { ref found, .. } if found == "2.7.6"));
+}
+
+/// Writes an executable `caddy` in `dir` that prints `line` and returns it.
+pub(super) fn fake_caddy(dir: &Path, line: &str) -> PathBuf {
+    let caddy = dir.join("caddy");
+    write(&caddy, format!("#!/bin/sh\necho '{line}'\n"));
+    std::fs::set_permissions(&caddy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    caddy
+}
+
+#[test]
+fn a_version_with_a_major_and_minor_is_parsed_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let found = |line: &str| match process::version(&fake_caddy(dir.path(), line)) {
+        process::Version::Found(version) => Some((version.major_minor(), version.to_string())),
+        process::Version::Unusable(_) => None,
+    };
+    assert_eq!(found("v2.10.0 h1:x"), Some(((2, 10), "2.10.0".to_owned())));
+    assert_eq!(
+        found("2.8.0-beta.1"),
+        Some(((2, 8), "2.8.0-beta.1".to_owned()))
+    );
+}
+
+#[test]
+fn a_version_without_a_major_and_minor_is_unusable_and_names_what_was_printed() {
+    let dir = tempfile::tempdir().unwrap();
+    let reason = |line: &str| match process::version(&fake_caddy(dir.path(), line)) {
+        process::Version::Unusable(reason) => reason,
+        process::Version::Found(version) => panic!("found {version}"),
+    };
+    let devel = reason("devel");
+    assert!(devel.contains("`devel`"), "{devel}");
+    assert!(devel.contains("no major and minor"), "{devel}");
+    assert_eq!(reason(""), "it did not print a version");
+}
+
+#[test]
+fn a_caddy_with_an_unparseable_version_is_refused_as_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join("records"));
+    workspace(
+        &store,
+        dir.path(),
+        "triage",
+        "ports = [\"web\"]\nroutes = [\"web\"]\n",
+        &[("web", 21001)],
+    );
+    let caddy = fake_caddy(dir.path(), "devel");
+    let free = || {
+        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+    };
+    let proxy = Proxy::new(
+        settings(dir.path())
+            .with_addresses(free(), free())
+            .with_caddy(Some(caddy)),
+    );
+    let error = proxy.sync(&store, SyncMode::Start, true).unwrap_err();
+    assert!(
+        matches!(error, ProxyError::CaddyMissing { ref reason, .. } if reason.contains("`devel`")),
+        "{error}"
+    );
 }
 
 #[test]
@@ -543,7 +609,13 @@ fn the_served_routes_come_with_a_sentence_for_each_manifest_left_out() {
     assert!(routes.is_empty());
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
-        problems[0].starts_with("the manifest of triage is left out"),
+        matches!(&problems[0], ProxyProblem::ManifestLeftOut { workspace, .. } if workspace == &name("triage")),
+        "{problems:?}"
+    );
+    assert!(
+        problems[0]
+            .to_string()
+            .starts_with("the manifest of triage is left out: "),
         "{problems:?}"
     );
 }
@@ -576,9 +648,81 @@ fn the_problems_of_a_workspace_leave_out_those_of_the_others() {
     };
     let own = synced.problems_of(&name("triage"));
     assert_eq!(own.len(), 1, "{own:?}");
-    assert!(
-        own[0].starts_with("the manifest of triage is left out"),
-        "{own:?}"
-    );
+    assert_eq!(own[0].workspace(), Some(&name("triage")));
     assert!(synced.problems_of(&name("other")).is_empty());
+}
+
+#[test]
+fn the_problems_of_a_workspace_leave_out_those_that_name_no_workspace() {
+    let synced = super::Synced {
+        problems: vec![
+            ProxyProblem::RecordLeftOut {
+                error: "bad".to_owned(),
+            },
+            ProxyProblem::RecordsUnreadable {
+                error: "bad".to_owned(),
+            },
+            ProxyProblem::LabelTooLong {
+                workspace: name("triage"),
+                bytes: 70,
+            },
+            ProxyProblem::ManifestLeftOut {
+                workspace: name("other"),
+                error: "bad".to_owned(),
+            },
+        ],
+        ..super::Synced::default()
+    };
+    assert_eq!(
+        synced.problems_of(&name("triage")),
+        [&ProxyProblem::LabelTooLong {
+            workspace: name("triage"),
+            bytes: 70
+        }]
+    );
+}
+
+#[test]
+fn each_problem_writes_the_sentence_a_person_reads() {
+    let text = |problem: ProxyProblem| problem.to_string();
+    assert_eq!(
+        text(ProxyProblem::ManifestLeftOut {
+            workspace: name("triage"),
+            error: "bad".to_owned()
+        }),
+        "the manifest of triage is left out: bad"
+    );
+    assert_eq!(
+        text(ProxyProblem::LabelTooLong {
+            workspace: name("triage"),
+            bytes: 70
+        }),
+        "the workspace triage makes a host label of 70 bytes, and a label holds at most 63"
+    );
+    assert_eq!(
+        text(ProxyProblem::RecordLeftOut {
+            error: "bad".to_owned()
+        }),
+        "a workspace record is left out: bad"
+    );
+    assert_eq!(
+        text(ProxyProblem::RecordsUnreadable {
+            error: "bad".to_owned()
+        }),
+        "the workspace records cannot be read: bad"
+    );
+}
+
+#[test]
+fn a_workspace_name_that_makes_a_label_over_63_bytes_is_a_label_too_long_problem() {
+    let long = "a".repeat(64);
+    let derived = derive(vec![declared(&long, &["web"], &[("web", 21001)])]);
+    assert!(derived.served.is_empty());
+    assert_eq!(
+        derived.problems,
+        [ProxyProblem::LabelTooLong {
+            workspace: name(&long),
+            bytes: 64
+        }]
+    );
 }

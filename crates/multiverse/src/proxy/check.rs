@@ -280,7 +280,7 @@ mod tests {
     use std::path::Path;
 
     use super::super::hosts::{Resolution, Resolver};
-    use super::super::tests::workspace;
+    use super::super::tests::{fake_caddy, workspace};
     use super::super::{Proxy, Settings};
     use super::CheckState;
     use crate::store::Store;
@@ -316,6 +316,23 @@ mod tests {
             .filter(|row| row.name == name)
             .map(|row| row.state)
             .collect()
+    }
+
+    #[test]
+    fn a_caddy_with_an_unparseable_version_makes_the_caddy_row_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::new(dir.path().join("records"));
+        let caddy = fake_caddy(dir.path(), "devel");
+        let proxy = Proxy::new(
+            Settings::new(dir.path().join("state"), dir.path().join("data"))
+                .with_addresses(free(), free())
+                .with_caddy(Some(caddy)),
+        );
+        let check = proxy.check(&store, &Fake(BTreeMap::new())).unwrap();
+        let row = check.rows.iter().find(|row| row.name == "caddy").unwrap();
+        assert_eq!(row.state, CheckState::Missing);
+        assert!(row.detail.contains("`devel`"), "{}", row.detail);
+        assert!(check.failing() >= 1);
     }
 
     #[test]

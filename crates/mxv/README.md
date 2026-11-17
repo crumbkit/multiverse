@@ -1099,7 +1099,10 @@ Three config keys control it. `proxy_http` and `proxy_https` are the
 addresses Caddy listens on, by default `127.0.0.1:80` and `127.0.0.1:443`;
 the URL carries the HTTPS port unless it is 443. `caddy` is the absolute or
 `~/` path of the Caddy program, found on `PATH` when unset. mxv needs
-Caddy 2.8 or later.
+Caddy 2.8 or later. A Caddy whose version has no numeric major and minor,
+such as a development build that prints `devel`, is refused with
+`mxv::proxy::caddy_missing`, and `mxv proxy check` marks the `caddy` row
+`missing`; set `caddy` to a release build.
 
 Two workspaces whose names make the same host label, such as `my_notes` and
 `my.notes`, share the label `my-notes`. mxv serves the one whose name sorts
