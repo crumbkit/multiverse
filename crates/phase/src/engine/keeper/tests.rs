@@ -1176,6 +1176,13 @@ fn a_keeper_that_outlives_a_killed_engine_records_its_app_under_the_keepers_entr
         group: u32::try_from(pid).unwrap(),
         boot_id: None,
     };
+    // The boot id is read from the system where one exists, so the
+    // comparisons below match a process by its pid and start time.
+    let names = |recorded: Option<&HostProcess>, process: &HostProcess| {
+        recorded.is_some_and(|held| {
+            held.pid == process.pid && held.started_at_us == process.started_at_us
+        })
+    };
     let keeper = host(numbers[0], numbers[1]);
     let app_process = host(numbers[2], numbers[3]);
     let _cleanup = Killed(vec![keeper.clone(), app_process.clone()]);
@@ -1186,7 +1193,7 @@ fn a_keeper_that_outlives_a_killed_engine_records_its_app_under_the_keepers_entr
         .unwrap()
         .unwrap();
     let (entry, _) = record.host_pair(&app("api"), &process("server"));
-    assert_eq!(entry.unwrap().host.as_ref(), Some(&keeper));
+    assert!(names(entry.unwrap().host.as_ref(), &keeper));
     assert_eq!(fixture.recorded().unwrap().1, None);
 
     engine.kill().unwrap();
@@ -1194,7 +1201,7 @@ fn a_keeper_that_outlives_a_killed_engine_records_its_app_under_the_keepers_entr
 
     eventually("the keeper's record of its app", || {
         fixture.recorded().is_some_and(|(state, host, _)| {
-            state == EntryState::Running && host.as_ref() == Some(&app_process)
+            state == EntryState::Running && names(host.as_ref(), &app_process)
         })
     });
     let record = RunStore::new(&fixture.dir)
@@ -1202,7 +1209,7 @@ fn a_keeper_that_outlives_a_killed_engine_records_its_app_under_the_keepers_entr
         .unwrap()
         .unwrap();
     let (entry, _) = record.host_pair(&app("api"), &process("server"));
-    assert_eq!(entry.unwrap().host.as_ref(), Some(&keeper));
+    assert!(names(entry.unwrap().host.as_ref(), &keeper));
     assert!(alive(&keeper));
     assert!(alive(&app_process));
 }
