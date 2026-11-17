@@ -18,20 +18,22 @@ use tempfile::TempDir;
 
 use super::recorder::Note;
 use super::spawn::{command_line, read_handshake};
-use super::spec::{Handshake, NotInherited, read_spec, write_handshake};
+use super::spec::{GO, Handshake, NotInherited, read_spec, write_handshake};
 use super::supervise::keep;
 use super::{
-    BadKeeperArgs, KeeperArgs, KeeperCommand, KeeperEnvironment, KeeperExit, KeeperSpec, Kept,
-    Launch, run, spawn,
+    BadKeeperArgs, BeforeGo, Failed, KeeperArgs, KeeperCommand, KeeperEnvironment, KeeperExit,
+    KeeperSpec, Kept, Launch, run, spawn,
 };
 use crate::cancel::Cancel;
 use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::engine::host::{HostRunner as _, HostStop, HostStopped};
 use crate::engine::restart::RunEnd;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName};
-use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits, Stop};
+use crate::plan::restart::{Backoff, Resolve, Restart, RestartLimits, Stop, StopSignal};
 use crate::record::process::{Processes, Start, System};
+use crate::record::run::Started;
 use crate::record::run::{Ended, EntryState, Exit, HostProcess, ObjectKey, Ready};
 use crate::record::store::{Journal, RunStore};
 use crate::record::testing::{app, empty_record, process, workspace};
@@ -97,10 +99,13 @@ fn the_test_binary_runs_a_keeper_when_it_is_started_as_one() {
             libc::signal(libc::SIGPIPE, libc::SIG_DFL);
         }
     }
-    let output: Box<dyn Write> = if keeper_args.process().as_str() == "slow-handshake" {
-        Box::new(Slow(stdout))
-    } else {
-        Box::new(stdout)
+    let output: Box<dyn Write> = match keeper_args.process().as_str() {
+        "slow-handshake" => Box::new(Slow(stdout)),
+        "slow-started" => Box::new(SlowAfterFirst {
+            output: stdout,
+            written: false,
+        }),
+        _ => Box::new(stdout),
     };
     #[expect(
         clippy::disallowed_methods,
@@ -128,7 +133,25 @@ fn the_test_binary_starts_a_keeper_when_it_is_started_as_a_spawner() {
     };
     let fixture = Fixture::at(PathBuf::from(&args[at + 1]));
     let spec = fixture.spec(spin!(), Restart::No, Stop::default());
-    let running = fixture.start(&spec).unwrap();
+    // A recording spawner plays the engine: it holds the lifecycle lock and
+    // writes the keeper's entry before the keeper may start its app.
+    let recording = args.get(at + 2).is_some_and(|mode| mode == "recording");
+    let store = RunStore::new(&fixture.dir);
+    let mut journal = recording.then(|| Journal::open(&store, &workspace(), PATIENCE).unwrap());
+    let running = fixture
+        .start_recording(
+            &spec,
+            &Fixed(vec![("GREETING", "hello")]),
+            now() + PATIENCE,
+            &mut |keeper| match journal.as_mut() {
+                Some(journal) => journal.started(
+                    &ObjectKey::Keeper(app("api"), process("server")),
+                    Started::Host(keeper.clone()),
+                ),
+                None => Ok(()),
+            },
+        )
+        .unwrap();
     println!(
         "spawned {} {} {} {}",
         running.kept.keeper.pid,
@@ -136,6 +159,8 @@ fn the_test_binary_starts_a_keeper_when_it_is_started_as_a_spawner() {
         running.kept.app.pid,
         running.kept.app.started_at_us
     );
+    // The lock stays held until this process ends.
+    std::mem::forget(journal);
     // The spawner leaves the keeper running, and waits for a signal or for
     // its standard input to close.
     std::mem::forget(running);
@@ -162,6 +187,32 @@ impl<W: Write> Write for Slow<W> {
 
     fn flush(&mut self) -> std::io::Result<()> {
         self.0.flush()
+    }
+}
+
+/// An output whose first write comes at once and whose later writes wait
+/// for [`WEDGED`], as a keeper that writes its `Spawned` line and then
+/// stalls before its `Started` line.
+struct SlowAfterFirst<W> {
+    output: W,
+    written: bool,
+}
+
+/// How long the keeper of the process `slow-started` stalls after its
+/// first line. The engine ends the keeper long before.
+const WEDGED: Duration = Duration::from_secs(120);
+
+impl<W: Write> Write for SlowAfterFirst<W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.written {
+            pause(WEDGED);
+        }
+        self.written = true;
+        self.output.write(bytes)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.output.flush()
     }
 }
 
@@ -331,6 +382,20 @@ impl Fixture {
         environment: &dyn AppliedEnvironment,
         deadline: Instant,
     ) -> Result<Running, PhaseError> {
+        self.start_recording(spec, environment, deadline, &mut |_| Ok(()))
+            .map_err(Failed::into_error)
+    }
+
+    /// Starts a keeper of `spec` from this test binary, as
+    /// [`Fixture::start_by`] does, and calls `before_go` with the keeper
+    /// before the keeper may start the app.
+    fn start_recording(
+        &self,
+        spec: &KeeperSpec,
+        environment: &dyn AppliedEnvironment,
+        deadline: Instant,
+        before_go: BeforeGo<'_>,
+    ) -> Result<Running, Failed> {
         let command = KeeperCommand::new(
             std::env::current_exe().unwrap(),
             ["--exact", "--nocapture", "--", ENTRY, "keep"]
@@ -338,13 +403,16 @@ impl Fixture {
                 .map(OsString::from)
                 .collect(),
         );
-        spawn(&Launch {
-            command: &command,
-            args: &self.args(),
-            spec,
-            environment,
-            deadline,
-        })
+        spawn(
+            &Launch {
+                command: &command,
+                args: &self.args(),
+                spec,
+                environment,
+                deadline,
+            },
+            before_go,
+        )
         .map(|kept| {
             // The guard of `Running` ends the keeper's session, so it
             // tests nothing unless the keeper leads one.
@@ -1075,6 +1143,71 @@ fn a_keeper_survives_a_hangup_sent_to_the_group_that_started_it() {
 }
 
 #[test]
+fn a_keeper_that_outlives_a_killed_engine_records_its_app_under_the_keepers_entry() {
+    let fixture = Fixture::new();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test starts this test binary as a spawner that plays the engine"
+    )]
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "--nocapture", "--", SPAWNER, "spawn-keeper"])
+        .arg(&fixture.dir)
+        .arg("recording")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test starts this test binary as a spawner that plays the engine"
+    )]
+    let mut engine = command.spawn().unwrap();
+    let mut lines = BufReader::new(engine.stdout.take().unwrap()).lines();
+    let spawned = lines
+        .find_map(|line| line.unwrap().strip_prefix("spawned ").map(str::to_owned))
+        .unwrap();
+    let numbers: Vec<u64> = spawned
+        .split(' ')
+        .map(|word| word.parse().unwrap())
+        .collect();
+    let host = |pid: u64, started_at_us: u64| HostProcess {
+        pid: u32::try_from(pid).unwrap(),
+        started_at_us,
+        group: u32::try_from(pid).unwrap(),
+        boot_id: None,
+    };
+    let keeper = host(numbers[0], numbers[1]);
+    let app_process = host(numbers[2], numbers[3]);
+    let _cleanup = Killed(vec![keeper.clone(), app_process.clone()]);
+    // The engine holds the lifecycle lock, so the keeper's writer waits,
+    // and the record names the keeper and not yet the app.
+    let record = RunStore::new(&fixture.dir)
+        .read(&workspace())
+        .unwrap()
+        .unwrap();
+    let (entry, _) = record.host_pair(&app("api"), &process("server"));
+    assert_eq!(entry.unwrap().host.as_ref(), Some(&keeper));
+    assert_eq!(fixture.recorded().unwrap().1, None);
+
+    engine.kill().unwrap();
+    engine.wait().unwrap();
+
+    eventually("the keeper's record of its app", || {
+        fixture.recorded().is_some_and(|(state, host, _)| {
+            state == EntryState::Running && host.as_ref() == Some(&app_process)
+        })
+    });
+    let record = RunStore::new(&fixture.dir)
+        .read(&workspace())
+        .unwrap()
+        .unwrap();
+    let (entry, _) = record.host_pair(&app("api"), &process("server"));
+    assert_eq!(entry.unwrap().host.as_ref(), Some(&keeper));
+    assert!(alive(&keeper));
+    assert!(alive(&app_process));
+}
+
+#[test]
 fn an_app_receives_only_path_home_and_its_resolved_environment() {
     let fixture = Fixture::new();
     let spec = fixture.spec(
@@ -1113,6 +1246,237 @@ fn a_keeper_whose_handshake_misses_the_deadline_is_unstartable_and_leaves_no_app
         .unwrap();
 
     assert_eq!(error.code(), "phase::keeper::unstartable");
+    eventually("the app's pid in its log", || {
+        fixture.log_text().ends_with('\n')
+    });
+    let pid: u32 = fixture.log_text().trim().parse().unwrap();
+    eventually("the end of the app", || !exists(pid));
+}
+
+/// Starts this test binary as a keeper of the process `server`, with its
+/// standard input and output piped, and returns the child.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the test plays the engine's side of the keeper's protocol and holds the keeper it started"
+)]
+fn raw_keeper(fixture: &Fixture) -> std::process::Child {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test starts this test binary as a keeper, to play the engine's side of its protocol by hand"
+    )]
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", "--nocapture", "--", ENTRY, "keep"])
+        .args(command_line(&fixture.args()))
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test starts this test binary as a keeper, to play the engine's side of its protocol by hand"
+    )]
+    command.spawn().unwrap()
+}
+
+#[test]
+fn a_keeper_whose_input_closes_before_go_starts_no_app_and_exits_withheld() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("echo started", Restart::No, Stop::default());
+    let mut keeper = raw_keeper(&fixture);
+    let mut stdin = keeper.stdin.take().unwrap();
+    // The engine writes the specification, and dies before it says go.
+    stdin
+        .write_all(&[serde_json::to_vec(&spec).unwrap(), b"\n".to_vec()].concat())
+        .unwrap();
+    drop(stdin);
+
+    let status = keeper.wait().unwrap();
+
+    assert_eq!(status.code(), Some(i32::from(KeeperExit::Withheld.code())));
+    assert_eq!(fixture.log_text(), "");
+    assert_eq!(fixture.recorded().unwrap().1, None);
+    assert!(
+        fixture
+            .diagnostics_text()
+            .contains("the engine did not say go"),
+        "{}",
+        fixture.diagnostics_text()
+    );
+}
+
+#[test]
+fn a_keeper_starts_its_app_only_once_it_reads_go() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("echo started; exec sleep 30", Restart::No, Stop::default());
+    let mut keeper = raw_keeper(&fixture);
+    let mut stdin = keeper.stdin.take().unwrap();
+    let stdout = keeper.stdout.take().unwrap();
+    stdin
+        .write_all(&[serde_json::to_vec(&spec).unwrap(), b"\n".to_vec()].concat())
+        .unwrap();
+    pause(Duration::from_millis(500));
+    assert_eq!(fixture.log_text(), "", "the app started before go");
+
+    stdin.write_all(format!("{GO}\n").as_bytes()).unwrap();
+
+    let mut lines = BufReader::new(stdout);
+    let mut next = || {
+        // The test harness prints a header before the keeper's lines.
+        loop {
+            let mut line = String::new();
+            assert_ne!(
+                lines.read_line(&mut line).unwrap(),
+                0,
+                "the keeper's output ended"
+            );
+            if line.starts_with(super::spec::HANDSHAKE_PREFIX) {
+                return line;
+            }
+        }
+    };
+    let line = next();
+    let Some(Handshake::Spawned(app)) = read_handshake(line.as_bytes()).unwrap() else {
+        panic!("the keeper's first line is not Spawned: {line}");
+    };
+    let _cleanup = Killed(vec![app.clone()]);
+    let line = next();
+    let Some(Handshake::Started(started)) = read_handshake(line.as_bytes()).unwrap() else {
+        panic!("the keeper's second line is not Started: {line}");
+    };
+    assert_eq!(started.app, app);
+    assert_eq!(started.keeper_group, keeper.id());
+    keeper.kill().unwrap();
+    keeper.wait().unwrap();
+}
+
+#[test]
+fn the_engine_records_the_keeper_before_the_keeper_may_start_its_app() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("echo started", Restart::No, Stop::default());
+    let mut seen = None;
+
+    let running = fixture
+        .start_recording(&spec, &Fixed(vec![]), now() + PATIENCE, &mut |keeper| {
+            let store = RunStore::new(&fixture.dir);
+            let mut journal = Journal::open(&store, &workspace(), PATIENCE)?;
+            journal.started(
+                &ObjectKey::Keeper(app("api"), process("server")),
+                Started::Host(keeper.clone()),
+            )?;
+            // A keeper that did not wait for go would have started
+            // its app, and the app would have written to its log.
+            pause(Duration::from_millis(500));
+            seen = Some((fixture.log_text(), fixture.recorded()));
+            Ok(())
+        })
+        .unwrap();
+
+    let (log, recorded) = seen.unwrap();
+    assert_eq!(log, "");
+    assert_eq!(recorded.unwrap().1, None);
+    let record = RunStore::new(&fixture.dir)
+        .read(&workspace())
+        .unwrap()
+        .unwrap();
+    let (keeper, _) = record.host_pair(&app("api"), &process("server"));
+    let keeper = keeper.unwrap();
+    assert_eq!(keeper.state, EntryState::Running);
+    assert_eq!(keeper.host.as_ref().unwrap().pid, running.kept.keeper.pid);
+    eventually("the app's output", || fixture.log_text() == "started\n");
+}
+
+#[test]
+fn a_keeper_that_cannot_be_recorded_is_killed_before_it_starts_an_app() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("echo started", Restart::No, Stop::default());
+    let mut keeper_pid = None;
+
+    let failed = fixture
+        .start_recording(&spec, &Fixed(vec![]), now() + PATIENCE, &mut |keeper| {
+            keeper_pid = Some(keeper.pid);
+            Err(PhaseError::StateUnwritable {
+                path: PathBuf::from("/runs"),
+                source: std::io::Error::other("read-only"),
+            })
+        })
+        .err()
+        .unwrap();
+
+    assert!(matches!(failed, Failed::Recording(_)));
+    eventually("the end of the keeper", || !exists(keeper_pid.unwrap()));
+    assert_eq!(fixture.log_text(), "");
+}
+
+#[test]
+fn a_handshake_deadline_after_the_spawned_line_names_the_app_so_the_engine_can_stop_it() {
+    let fixture = Fixture::of("slow-started");
+    let mut spec = fixture.spec("echo $$; exec sleep 60", Restart::No, grace(Duration::ZERO));
+    // The engine kills the keeper at once, before it can stop the app.
+    spec.kill_wait = Duration::ZERO;
+
+    let failed = fixture
+        .start_recording(
+            &spec,
+            &Fixed(vec![]),
+            now() + Duration::from_secs(8),
+            &mut |_| Ok(()),
+        )
+        .err()
+        .unwrap();
+
+    let Failed::Keeper { error, abandoned } = failed else {
+        panic!("the failure is not the keeper's");
+    };
+    assert_eq!(error.code(), "phase::keeper::unstartable");
+    let app = abandoned.expect("the keeper reported its app before the deadline");
+    let _cleanup = Killed(vec![app.clone()]);
+    let pid: u32 = fixture.log_text().trim().parse().unwrap();
+    assert_eq!(app.pid, pid);
+    assert!(alive(&app), "the killed keeper left no app to stop");
+
+    let stopped = System
+        .stop(
+            &HostStop {
+                keeper: None,
+                app: Some(&app),
+                signal: StopSignal::Term,
+                grace: Duration::from_secs(5),
+                kill_wait: Duration::from_secs(5),
+            },
+            now() + Duration::from_secs(5),
+        )
+        .unwrap();
+
+    assert_eq!(stopped, HostStopped::Stopped);
+    eventually("the end of the app", || !exists(pid));
+}
+
+#[test]
+fn a_handshake_deadline_before_the_spawned_line_names_no_app() {
+    let fixture = Fixture::of("slow-handshake");
+    let spec = fixture.spec("echo $$; exec sleep 30", Restart::No, Stop::default());
+
+    let failed = fixture
+        .start_recording(
+            &spec,
+            &Fixed(vec![]),
+            now() + Duration::from_millis(500),
+            &mut |_| Ok(()),
+        )
+        .err()
+        .unwrap();
+
+    assert!(matches!(
+        failed,
+        Failed::Keeper {
+            abandoned: None,
+            ..
+        }
+    ));
+    // The keeper's own stop of the app covers what the line would have
+    // named.
     eventually("the app's pid in its log", || {
         fixture.log_text().ends_with('\n')
     });
@@ -1210,7 +1574,7 @@ fn a_specification_that_inherits_a_variable_other_than_path_and_home_is_refused(
         .insert("TMPDIR".to_owned(), "/tmp".to_owned());
     let bytes = serde_json::to_vec(&spec).unwrap();
 
-    let refused = read_spec(bytes.as_slice()).unwrap_err();
+    let refused = read_spec(&mut bytes.as_slice()).unwrap_err();
 
     assert!(refused.contains("TMPDIR"), "{refused}");
 }
@@ -1263,7 +1627,7 @@ fn a_specification_whose_resolved_names_are_not_variable_names_is_refused() {
         spec.resolved.insert(name.to_owned());
         let bytes = serde_json::to_vec(&spec).unwrap();
 
-        let refused = read_spec(bytes.as_slice());
+        let refused = read_spec(&mut bytes.as_slice());
 
         assert!(refused.is_err(), "{name:?} was accepted");
     }

@@ -25,12 +25,19 @@
 //! - Environment: the keeper's environment is cleared, and then receives
 //!   only `PATH` and `HOME` from the caller and the process's resolved
 //!   environment through [`AppliedEnvironment::apply`]. Standard input
-//!   carries the keeper's specification, a `phase/keeper/v1` JSON document
-//!   of at most [`MOST_SPEC_BYTES`] bytes that names the command, its
-//!   directory, its log, its restart policy, its stop handling, the
-//!   values of `PATH` and `HOME`, and holds no other environment value.
-//! - Streams and deadline: the keeper writes one handshake line to standard
-//!   output once its app has started or failed to start. Once that first
+//!   carries two lines. The first is the keeper's specification, a
+//!   `phase/keeper/v1` JSON document of at most [`MOST_SPEC_BYTES`] bytes
+//!   that names the command, its directory, its log, its restart policy,
+//!   its stop handling, the values of `PATH` and `HOME`, and holds no other
+//!   environment value. The second is `go`, which the engine writes once
+//!   the run record names the keeper. The keeper reads the specification,
+//!   then waits for `go`, and starts no app before it. When its input ends
+//!   or holds another line first, it exits with [`KeeperExit::Withheld`],
+//!   so an engine that dies before it records the keeper leaves no app.
+//! - Streams and deadline: once the app exists, the keeper writes a
+//!   `Spawned` line that names the app's process. Once the keeper has
+//!   queued the record of the start, it writes one handshake line, which
+//!   says the app started or failed to start. Once that first
 //!   start of the app ends, the keeper writes one end line, which says how
 //!   the app ended, and writes nothing more. `up` reads the end line when
 //!   it sees the app gone during its readiness wait, and closes its end of
@@ -39,16 +46,18 @@
 //!   is appended to its diagnostic log, `<log dir>/<app>.<process>.keeper.log`,
 //!   which the `logfile` module describes. The engine reads at most
 //!   [`MOST_HANDSHAKE_BYTES`] bytes before the deadline it is given. The
-//!   handshake names the app's process and the keeper's group. When the
-//!   deadline passes or the handshake cannot be read, the keeper may
-//!   already have started the app, so the engine sends the keeper `TERM`,
-//!   which makes it stop the app, waits the app's grace and kill wait, and
-//!   then kills the keeper and its group. A window remains. When the
-//!   keeper's start of the app takes longer than that wait, the engine
-//!   kills the keeper before it can stop the app. The app then keeps
-//!   running in its own group with no keeper, and since the engine never
-//!   received its pid, the run record does not name it and phase does not
-//!   stop it.
+//!   handshake names the app's process and the keeper's group, which the
+//!   engine checks against the keeper's pid. When the deadline passes or
+//!   the handshake cannot be read, the keeper may already have started the
+//!   app, so the engine sends the keeper `TERM`, which makes it stop the
+//!   app, waits the app's grace and kill wait, and then kills the keeper
+//!   and its group. When the keeper's start of the app outlasts that wait,
+//!   the engine kills the keeper before it stops the app, and the app keeps
+//!   running in its own group with no keeper. The engine knows it from the
+//!   `Spawned` line, so it stops the app by its identity, as `down` does.
+//!   A window remains between the fork of the app and the keeper's write of
+//!   the `Spawned` line, in which a killed keeper can leave an app that
+//!   nothing names.
 //! - End: the keeper's first action is `setsid`, so it leads a session and
 //!   a group of its own. A keeper that cannot start a session refuses its
 //!   specification and exits with [`KeeperExit::BadInput`]. It outlives
@@ -126,9 +135,9 @@
 //! last crash of an app that restarts. A thread of its own
 //! writes these through the run record's journal, which takes the
 //! workspace's lifecycle lock, so an `up` or `down` that holds the lock
-//! never blocks supervision. The engine also records the first start from
-//! the handshake, while it holds the lock. A change applies only while the
-//! record's entry names the keeper's own app, so a process that another
+//! never blocks supervision. The engine records the keeper before it says
+//! `go`, and the first start from the handshake, while it holds the lock.
+//! A change applies only while the record's entry names the keeper's own app, so a process that another
 //! operation recorded meanwhile keeps its entry, and the keeper notes the
 //! skipped change in its diagnostic log. When the keeper exits after a stop
 //! request (`TERM` or `INT`), it tries the lock once more without waiting.
@@ -170,7 +179,7 @@ mod tests;
 pub use crate::sandbox::{SANDBOX_REFUSED, launch};
 pub use args::{BadKeeperArgs, KeeperArgs};
 pub use environment::KeeperEnvironment;
-pub(crate) use spawn::{AppEnd, KeeperCommand, Kept, Launch, spawn};
+pub(crate) use spawn::{AppEnd, BeforeGo, Failed, KeeperCommand, Kept, Launch, spawn};
 pub(crate) use spec::{KeeperSpec, check_inherited, check_resolved};
 
 /// The most bytes of the specification that a keeper reads from its
@@ -198,6 +207,7 @@ pub const RESOLVE_WAIT: Duration = Duration::from_secs(60);
 /// | [`EnvironmentUnresolved`](KeeperExit::EnvironmentUnresolved) | 3 |
 /// | [`BadInput`](KeeperExit::BadInput) | 64 |
 /// | [`Unstartable`](KeeperExit::Unstartable) | 69 |
+/// | [`Withheld`](KeeperExit::Withheld) | 75 |
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum KeeperExit {
@@ -219,6 +229,10 @@ pub enum KeeperExit {
     /// environment source failed to resolve one on each try until the
     /// policy's most restarts.
     EnvironmentUnresolved,
+    /// The engine closed the keeper's standard input, or wrote something
+    /// other than `go`, before the keeper started an app, so the keeper
+    /// started none.
+    Withheld,
 }
 
 impl KeeperExit {
@@ -232,6 +246,7 @@ impl KeeperExit {
             Self::EnvironmentUnresolved => 3,
             Self::BadInput => 64,
             Self::Unstartable => 69,
+            Self::Withheld => 75,
         }
     }
 }
@@ -252,8 +267,8 @@ impl From<KeeperExit> for ExitCode {
 }
 
 /// Runs the keeper that `args` names: starts a session of its own, reads
-/// its specification from `input`, starts the app, writes the handshake
-/// line to `output`, and supervises the app until it is stopped or its
+/// its specification and then `go` from `input`, starts the app, writes
+/// the handshake line to `output`, and supervises the app until it is stopped or its
 /// policy leaves it ended. Once the app's first start ends, the keeper
 /// writes one end line to `output`, which says how the app ended. The
 /// engine reads it only while it waits for the app to be ready, and closes

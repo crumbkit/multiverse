@@ -26,7 +26,7 @@ use std::time::{Duration, Instant};
 
 pub use crate::engine::host::follow::{LogFollower, MOST_FOLLOW_BYTES};
 pub use crate::engine::host::listen::{Holder, listen_holder};
-use crate::engine::keeper::{Kept, Launch, spawn};
+use crate::engine::keeper::{BeforeGo, Failed, Kept, Launch, spawn};
 use crate::engine::probe::LogLines;
 use crate::error::PhaseError;
 use crate::plan::restart::StopSignal;
@@ -42,14 +42,14 @@ use crate::record::run::HostProcess;
 /// still the one phase started, follow a log file, and find what listens
 /// on a port.
 pub(crate) trait HostRunner {
-    /// Starts the keeper that `launch` describes and waits for its
+    /// Starts the keeper that `launch` describes, calls `before_go` with
+    /// the keeper before the keeper starts its app, and waits for its
     /// handshake, as the keeper module's `spawn` does.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::KeeperUnstartable`] or
-    /// [`PhaseError::ProcessUnstartable`], as `spawn` does.
-    fn launch(&self, launch: &Launch<'_>) -> Result<Kept, PhaseError>;
+    /// Returns [`Failed`], as `spawn` does.
+    fn launch(&self, launch: &Launch<'_>, before_go: BeforeGo<'_>) -> Result<Kept, Failed>;
 
     /// Stops the keeper and the app that `stop` names, as [`HostStop`]
     /// says. It gives up the wait for the stop signal at `deadline`, sends
@@ -157,8 +157,8 @@ pub(crate) enum HostStopped {
 }
 
 impl HostRunner for System {
-    fn launch(&self, launch: &Launch<'_>) -> Result<Kept, PhaseError> {
-        spawn(launch)
+    fn launch(&self, launch: &Launch<'_>, before_go: BeforeGo<'_>) -> Result<Kept, Failed> {
+        spawn(launch, before_go)
     }
 
     fn stop(&self, stop: &HostStop<'_>, deadline: Instant) -> Result<HostStopped, PhaseError> {

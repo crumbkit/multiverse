@@ -21,7 +21,7 @@ use crate::engine::keeper::KeeperArgs;
 use crate::engine::keeper::MOST_HANDSHAKE_BYTES;
 use crate::engine::keeper::args::{APP, PROCESS, STATE_DIR, WORKSPACE};
 use crate::engine::keeper::logfile::{diagnostic_log, open_append};
-use crate::engine::keeper::spec::{EndLine, HANDSHAKE_PREFIX, Handshake, KeeperSpec};
+use crate::engine::keeper::spec::{EndLine, GO, HANDSHAKE_PREFIX, Handshake, KeeperSpec};
 use crate::env::AppliedEnvironment;
 use crate::error::PhaseError;
 use crate::record::process::{Processes, Start, System};
@@ -224,19 +224,76 @@ impl Kept {
     }
 }
 
-/// Starts the keeper that `launch` describes and waits for its handshake
-/// until the deadline.
+/// Why [`spawn`] returned no keeper.
+#[derive(Debug)]
+pub(crate) enum Failed {
+    /// The engine's record of the keeper failed, so the keeper was killed
+    /// before it started an app.
+    Recording(Box<PhaseError>),
+    /// The keeper did not start the app.
+    Keeper {
+        /// Why.
+        error: Box<PhaseError>,
+        /// The app that the keeper reported as spawned before the keeper
+        /// was ended, or `None` when it reported none. That app may still
+        /// run, and the engine stops it by its identity.
+        abandoned: Option<HostProcess>,
+    },
+}
+
+impl From<PhaseError> for Failed {
+    fn from(error: PhaseError) -> Self {
+        Self::Keeper {
+            error: Box::new(error),
+            abandoned: None,
+        }
+    }
+}
+
+impl Failed {
+    /// Returns the error that the failure reports.
+    #[cfg(test)]
+    pub(crate) fn into_error(self) -> PhaseError {
+        match self {
+            Self::Recording(error) | Self::Keeper { error, .. } => *error,
+        }
+    }
+}
+
+/// What the keeper's output says to the engine's waiting thread.
+enum Heard {
+    /// The keeper's `Spawned` line.
+    Spawned(HostProcess),
+    /// The line that ends the handshake, or why none could be read, and
+    /// the output after it.
+    Done(io::Result<Option<Handshake>>, KeeperOutput),
+}
+
+/// The engine's step between handing the keeper its specification and
+/// telling it to start the app, which records the keeper in the run
+/// record.
+pub(crate) type BeforeGo<'a> = &'a mut dyn FnMut(&HostProcess) -> Result<(), PhaseError>;
+
+/// Starts the keeper that `launch` describes, calls `before_go` with the
+/// keeper's process, tells the keeper to start the app, and waits for its
+/// handshake until the deadline.
+///
+/// The keeper starts no app until it reads `go`, which comes after
+/// `before_go` returns. A keeper whose input closes first starts none.
 ///
 /// # Errors
 ///
-/// Returns [`PhaseError::KeeperUnstartable`] when the keeper cannot start,
-/// refuses its specification, or gives no readable handshake before the
-/// deadline, and [`PhaseError::ProcessUnstartable`] when the keeper reports
-/// that the app cannot start. In each case the keeper is gone and reaped.
-/// A keeper whose handshake is missing or unreadable may have started the
-/// app, so it first receives `TERM`, which makes it stop the app, and
-/// `KILL` only after the app's grace and kill wait.
-pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
+/// Returns [`Failed::Recording`] with the error of `before_go`, and
+/// [`Failed::Keeper`] with [`PhaseError::KeeperUnstartable`] when the
+/// keeper cannot start, refuses its specification, or gives no readable
+/// handshake before the deadline, and with
+/// [`PhaseError::ProcessUnstartable`] when the keeper reports that the app
+/// cannot start. In each case the keeper is gone and reaped. A keeper whose
+/// handshake is missing or unreadable may have started the app, so it
+/// first receives `TERM`, which makes it stop the app, and `KILL` only
+/// after the app's grace and kill wait. The failure names the app when the
+/// keeper reported it as spawned.
+pub(crate) fn spawn(launch: &Launch<'_>, before_go: BeforeGo<'_>) -> Result<Kept, Failed> {
     let args = launch.args;
     let keeper_failed = |reason: String| PhaseError::KeeperUnstartable {
         app: args.app().clone(),
@@ -245,8 +302,9 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
     };
     let mut spec = launch.spec.clone();
     spec.resolved = launch.environment.names();
-    let spec = serde_json::to_vec(&spec)
+    let mut spec = serde_json::to_vec(&spec)
         .map_err(|error| keeper_failed(format!("the specification cannot be written: {error}")))?;
+    spec.push(b'\n');
     let diagnostics = diagnostic_log(&launch.spec.log, args.app(), args.process());
     let stderr = open_append(&diagnostics).map_err(|error| {
         keeper_failed(format!(
@@ -267,25 +325,8 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
     let boot_id = System.boot_id();
     let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
         kill(&mut child);
-        return Err(keeper_failed(
-            "the keeper has no standard streams".to_owned(),
-        ));
+        return Err(keeper_failed("the keeper has no standard streams".to_owned()).into());
     };
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        // A keeper that ended before reading gives EPIPE here, and its
-        // handshake or its missing handshake says why.
-        let _ = stdin.write_all(&spec);
-        drop(stdin);
-        let mut output = BufReader::new(stdout.take(MOST_HANDSHAKE_BYTES));
-        let handshake = read_handshake_from(&mut output);
-        let _ = sender.send((handshake, output));
-    });
-    let (handshake, output) =
-        match receiver.recv_timeout(launch.deadline.saturating_duration_since(now())) {
-            Ok((handshake, output)) => (Ok(handshake), Some(output)),
-            Err(error) => (Err(error), None),
-        };
     let keeper = match (started, boot_id) {
         (Ok(Start::At(started_at_us)), Ok(boot_id)) => HostProcess {
             pid,
@@ -294,53 +335,106 @@ pub(crate) fn spawn(launch: &Launch<'_>) -> Result<Kept, PhaseError> {
             boot_id,
         },
         _ => {
-            end(&mut child, launch.spec);
-            return Err(keeper_failed(format!(
-                "the start time of the keeper {pid} is unreadable"
-            )));
+            // The keeper has no `go`, so it has started no app.
+            kill(&mut child);
+            return Err(
+                keeper_failed(format!("the start time of the keeper {pid} is unreadable")).into(),
+            );
         }
     };
-    match handshake {
-        Ok(Ok(Some(Handshake::Started(started)))) => Ok(Kept {
-            keeper: HostProcess {
-                group: started.keeper_group,
-                ..keeper
-            },
-            app: started.app,
-            child: Some(child),
-            end: AppEnd(output.map_or(EndSource::Unreported, EndSource::Keeper)),
-        }),
-        Ok(Ok(Some(Handshake::Unstartable(reason)))) => {
+    // A thread writes the specification, because a keeper that never reads
+    // it would block the write for good. The same thread writes `go` once
+    // the engine sends it, and closes the input when the engine drops the
+    // sender instead, which makes the keeper start nothing.
+    let (go, told) = mpsc::channel::<()>();
+    thread::spawn(move || {
+        // A keeper that ended before reading gives EPIPE here, and its
+        // handshake or its missing handshake says why.
+        if stdin.write_all(&spec).is_ok() && told.recv().is_ok() {
+            let _ = stdin.write_all(format!("{GO}\n").as_bytes());
+        }
+    });
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let mut output = BufReader::new(stdout.take(MOST_HANDSHAKE_BYTES));
+        loop {
+            match read_handshake_from(&mut output) {
+                Ok(Some(Handshake::Spawned(app))) => {
+                    if sender.send(Heard::Spawned(app)).is_err() {
+                        return;
+                    }
+                }
+                heard => {
+                    let _ = sender.send(Heard::Done(heard, output));
+                    return;
+                }
+            }
+        }
+    });
+    if let Err(error) = before_go(&keeper) {
+        drop(go);
+        kill(&mut child);
+        return Err(Failed::Recording(Box::new(error)));
+    }
+    let _ = go.send(());
+    let mut app = None;
+    let heard = loop {
+        match receiver.recv_timeout(launch.deadline.saturating_duration_since(now())) {
+            Ok(Heard::Spawned(spawned)) => app = Some(spawned),
+            Ok(Heard::Done(handshake, output)) => break Some((handshake, output)),
+            Err(_) => break None,
+        }
+    };
+    let abandoned = |error: PhaseError| Failed::Keeper {
+        error: Box::new(error),
+        abandoned: app.clone(),
+    };
+    match heard {
+        Some((Ok(Some(Handshake::Started(started))), output)) if started.keeper_group == pid => {
+            Ok(Kept {
+                keeper,
+                app: started.app,
+                child: Some(child),
+                end: AppEnd(EndSource::Keeper(output)),
+            })
+        }
+        Some((Ok(Some(Handshake::Started(started))), _)) => {
+            end(&mut child, launch.spec);
+            Err(abandoned(keeper_failed(format!(
+                "the keeper {pid} reports the group {}, which is not its own",
+                started.keeper_group
+            ))))
+        }
+        Some((Ok(Some(Handshake::Unstartable(reason))), _)) => {
             kill(&mut child);
             Err(PhaseError::ProcessUnstartable {
                 app: args.app().clone(),
                 process: args.process().clone(),
                 reason,
-            })
+            }
+            .into())
         }
-        Ok(Ok(Some(Handshake::Refused(reason)))) => {
+        Some((Ok(Some(Handshake::Refused(reason))), _)) => {
             kill(&mut child);
-            Err(keeper_failed(format!(
-                "the keeper refused its specification: {reason}"
-            )))
+            Err(keeper_failed(format!("the keeper refused its specification: {reason}")).into())
         }
-        Ok(Ok(None)) => {
+        Some((Ok(Some(Handshake::Spawned(_)) | None), _)) => {
             let status = kill(&mut child);
-            Err(keeper_failed(format!(
+            Err(abandoned(keeper_failed(format!(
                 "the keeper ended without a handshake, with {status}"
-            )))
+            ))))
         }
-        Ok(Err(error)) => {
+        Some((Err(error), _)) => {
             end(&mut child, launch.spec);
-            Err(keeper_failed(format!(
+            Err(abandoned(keeper_failed(format!(
                 "the keeper's handshake cannot be read: {error}"
-            )))
+            ))))
         }
-        Err(_) => {
+        None => {
             end(&mut child, launch.spec);
-            Err(keeper_failed(
+            Err(abandoned(keeper_failed(
                 "the keeper gave no handshake before the deadline".to_owned(),
-            ))
+            )))
         }
     }
 }
@@ -371,7 +465,8 @@ fn keeper_command(launch: &Launch<'_>, stderr: Stdio) -> Command {
 /// waits the app's grace and kill wait for the keeper to stop the app and
 /// exit, and then kills the keeper. A keeper whose start of the app takes
 /// longer than that wait is killed before it can stop the app, which then
-/// runs on with no keeper and no entry in the run record.
+/// runs on with no keeper. The failure that [`spawn`] returns names such
+/// an app when the keeper reported it, so the engine stops it.
 #[expect(
     clippy::disallowed_types,
     reason = "crates/phase/src/engine/keeper/spawn.rs holds the keeper it started (PROC-1)"
