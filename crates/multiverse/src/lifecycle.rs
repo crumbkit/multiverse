@@ -378,7 +378,9 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// the archive that `asked` did not name. Then it deletes those volumes,
     /// the pins and the record, in that order, so the record that holds the
     /// volumes' stable id stays until they are gone, and a failure can be
-    /// tried again.
+    /// tried again. An archive that holds the mark of a restore that died,
+    /// with no workspace of the name, has what that restore made deleted
+    /// before its record goes, because the mark goes with the record.
     ///
     /// # Errors
     ///
@@ -424,6 +426,14 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
             }
         }
         (self.workspaces.checkpoint)("volumes")?;
+        // A restore that died leaves what its mark lists, and the mark goes
+        // with the record, so it is undone first. A workspace that holds the
+        // name means the restore finished, and the mark is stale.
+        let mut archive = archive;
+        if archive.restoring.is_some() && self.workspaces.store.read(&archive.name)?.is_none() {
+            self.workspaces
+                .undo_stopped_restore(self.archives, &mut archive)?;
+        }
         let removed = self
             .workspaces
             .remove_archive(self.archives, archive, Mode::Change)?;
@@ -795,7 +805,12 @@ fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
         (Repaired::Deleted(asked), Repaired::Deleted(deleted)) => {
             asked.archive.id == deleted.archive.id
         }
-        (Repaired::Undone(asked), Repaired::Undone(undone)) => asked.id == undone.id,
+        (
+            Repaired::Undone { archive: asked, .. },
+            Repaired::Undone {
+                archive: undone, ..
+            },
+        ) => asked.id == undone.id,
         _ => false,
     }
 }

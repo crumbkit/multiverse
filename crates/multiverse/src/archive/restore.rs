@@ -458,13 +458,15 @@ impl<B: Backend> Workspaces<B> {
         let ports = match built {
             Ok(Ok(ports)) => ports,
             Ok(Err(refusal)) => {
-                self.unmake(&archive, &workspace, &made);
-                self.clear_mark(archives, &archive.name);
+                if self.unmake(&archive, &workspace, &made) {
+                    self.clear_mark(archives, &archive.name);
+                }
                 return Ok(RestoreOutcome::Refused(refusal));
             }
             Err(error) => {
-                self.unmake(&archive, &workspace, &made);
-                self.clear_mark(archives, &archive.name);
+                if self.unmake(&archive, &workspace, &made) {
+                    self.clear_mark(archives, &archive.name);
+                }
                 return Err(error);
             }
         };
@@ -500,11 +502,12 @@ impl<B: Backend> Workspaces<B> {
 
     /// Deletes what a failed restore made, as `made` records it, and the
     /// root files that it wrote back.
-    fn unmake(&self, archive: &Archive, workspace: &Workspace, made: &MadeSoFar) {
+    /// Returns whether every step succeeded.
+    fn unmake(&self, archive: &Archive, workspace: &Workspace, made: &MadeSoFar) -> bool {
         if made.directory {
             let _ = root::delete_entries(&archive.root, &archive.path);
         }
-        self.undo(workspace, made);
+        self.undo(workspace, made)
     }
 
     /// Undoes what a restore of `archive` that died made, as the mark in the
@@ -529,13 +532,25 @@ impl<B: Backend> Workspaces<B> {
         };
         made.record_not_ours = true;
         let workspace = archive.workspace().finished();
-        self.unmake(archive, &workspace, &made);
+        let mut clean = self.unmake(archive, &workspace, &made);
         if made.directory {
             // What the run wrote that the mark does not list, such as a
-            // half-written file, goes with the directory it made.
+            // half-written file, goes with the directory it made, and the
+            // directory is then empty for a second pass.
             delete_directory(&archive.path)?;
+            if !clean {
+                clean = self.unmake(archive, &workspace, &made);
+            }
         } else {
             let _ = std::fs::remove_dir(&archive.path);
+        }
+        if !clean {
+            return Err(Error::Unwritable {
+                path: archive.path.clone(),
+                source: std::io::Error::other(
+                    "mxv could not delete everything that the stopped restore made, so the archive keeps its mark and the next restore or repair tries again",
+                ),
+            });
         }
         archive.restoring = None;
         archives.write(archive)
@@ -1001,16 +1016,22 @@ impl<B: Backend> Workspaces<B> {
             // death in between leaves nothing unlisted. A reference that the
             // repository holds already stays, as it may belong to another
             // source.
-            if kind == WorkspaceKind::Worktree
+            let journaled = kind == WorkspaceKind::Worktree
                 && self
                     .backend
                     .resolve_commit(RefHolder::Repository(&checkout.source), &reference)?
-                    .is_none()
-            {
+                    .is_none();
+            if journaled {
                 made.refs.push((checkout.source.clone(), reference.clone()));
                 journal(made)?;
             }
-            self.backend.create_ref(path, &reference, commit)?;
+            let created = self.backend.create_ref(path, &reference, commit)?;
+            if journaled && !created {
+                // Another restore made the reference between the check and
+                // the creation, so it is not this run's to delete.
+                made.refs.pop();
+                journal(made)?;
+            }
             put_back.kept.push(reference);
         }
         put_back.submodules = self.backend.submodule_paths(path)?;

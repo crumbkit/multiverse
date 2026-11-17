@@ -472,7 +472,7 @@
           ]
         },
         "directory": {
-          "description": "The directory that undoing a stopped restore deleted, or would\ndelete, or null.",
+          "description": "The workspace's directory that undoing a stopped restore deleted, or\nwould delete, or null when it deletes no directory.",
           "type": [
             "string",
             "null"

@@ -1821,7 +1821,12 @@ files of the workspace's directory. When a restore dies, the archive stays
 whole and keeps the mark, and `mxv list` names `mxv repair NAME`. The next
 `mxv restore NAME` deletes what the mark lists and restores again, and
 `mxv repair NAME` deletes it without restoring and reports the state `undone`
-with the directory. mxv deletes a directory at the workspace's path, with
+with the directory, when it deleted one. `mxv remove --archived NAME` deletes
+what the mark lists before it deletes the archive. A restore, a repair or a
+removal that cannot delete something the mark lists fails and keeps the mark,
+so the next one tries again. When the archive holds a mark, the question and
+the dry run of `mxv restore` say that the run first deletes what the stopped
+restore left. mxv deletes a directory at the workspace's path, with
 everything in it, only when the mark says the restore made it. When the mark
 was written before the restore made the directory, only an empty directory at
 the path is deleted. A directory that you made refuses the restore with

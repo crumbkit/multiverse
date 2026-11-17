@@ -417,7 +417,7 @@ fn repaired_text(repaired: Result<Repaired, Error>, old: &str) -> String {
             "rename to the dated name".to_owned()
         }
         Ok(Repaired::Deleted(_)) => "delete".to_owned(),
-        Ok(Repaired::Undone(_)) => "undo the restore".to_owned(),
+        Ok(Repaired::Undone { .. }) => "undo the restore".to_owned(),
     }
 }
 

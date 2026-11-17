@@ -1395,6 +1395,16 @@ fn stale_volumes(
     }
 }
 
+/// Returns the sentence that tells a dry run of `mxv restore` that the run
+/// first deletes what a stopped restore of `archive` left, or `None` when
+/// the archive holds no mark.
+fn stopped_restore_note(archive: &multiverse::Archive) -> Option<String> {
+    archive.restoring.as_ref().map(|_| {
+        "a restore of this workspace stopped, so mxv first deletes what that restore left"
+            .to_owned()
+    })
+}
+
 /// Returns the result of a restore of `name`, which a workspace already
 /// holds. When an earlier restore stopped before it deleted the archive
 /// `stale`, which has the workspace's stable id, the run asks and then
@@ -1555,15 +1565,20 @@ pub(crate) fn restore(
             lost_pins: Vec::new(),
             ports: port_rows(ports),
             missing_mirrors: plan.missing_mirrors,
-            warnings: Vec::new(),
+            warnings: stopped_restore_note(&plan.archive).into_iter().collect(),
             planned: true,
         }));
     }
     output.confirm(
         args.yes,
         &format!(
-            "Restore the workspace {name} at {}?",
-            plan.archive.path.display()
+            "Restore the workspace {name} at {}?{}",
+            plan.archive.path.display(),
+            if plan.archive.restoring.is_some() {
+                " A restore of it stopped, so mxv first deletes what that restore left."
+            } else {
+                ""
+            }
         ),
     )?;
     // The library takes the lock after the question, so a prompt holds up

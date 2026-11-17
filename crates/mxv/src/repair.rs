@@ -120,8 +120,8 @@ pub(crate) struct RepairResult {
     /// The command that repairs what is broken when `mxv repair` does not,
     /// such as `mxv archive -w docs`, or null.
     repair: Option<String>,
-    /// The directory that undoing a stopped restore deleted, or would
-    /// delete, or null.
+    /// The workspace's directory that undoing a stopped restore deleted, or
+    /// would delete, or null when it deletes no directory.
     directory: Option<String>,
     /// The references of the pins that the deletion deleted, or would
     /// delete.
@@ -389,7 +389,10 @@ impl fmt::Display for RepairResult {
                 "mxv would delete the archive of {name}, which the restore had already rebuilt."
             ),
             RepairState::Undone | RepairState::WouldUndo => {
-                let directory = self.directory.as_deref().unwrap_or_default();
+                let made = self.directory.as_deref().map_or_else(
+                    || "what the restore had made".to_owned(),
+                    |directory| format!("what the restore had made, such as {directory}"),
+                );
                 let done = if self.state == RepairState::Undone {
                     "undid"
                 } else {
@@ -397,7 +400,7 @@ impl fmt::Display for RepairResult {
                 };
                 write!(
                     formatter,
-                    "mxv {done} the restore of {name} that stopped: it deleted what the restore had made, such as {directory}. The archive stays whole, and `mxv restore {name}` brings the workspace back."
+                    "mxv {done} the restore of {name} that stopped: it deleted {made}. The archive stays whole, and `mxv restore {name}` brings the workspace back."
                 )
             }
         }
@@ -419,9 +422,15 @@ fn question(name: &WorkspaceName, planned: &Repaired) -> Option<String> {
         Repaired::Deleted(_) => Some(format!(
             "Delete the archive of {name} and its pins? The workspace {name} that the restore rebuilt stays."
         )),
-        Repaired::Undone(archive) => Some(format!(
+        Repaired::Undone {
+            archive,
+            directory: true,
+        } => Some(format!(
             "Delete what the restore of {name} that stopped made, including {}? The archive stays.",
             archive.path.display()
+        )),
+        Repaired::Undone { .. } => Some(format!(
+            "Delete what the restore of {name} that stopped made? The archive stays."
         )),
         _ => None,
     }
@@ -525,8 +534,8 @@ pub(crate) fn repair(
                 },
             )
         },
-        Repaired::Undone(archive) => RepairResult {
-            directory: Some(archive.path.display().to_string()),
+        Repaired::Undone { archive, directory } => RepairResult {
+            directory: directory.then(|| archive.path.display().to_string()),
             ..RepairResult::new(
                 &name,
                 if dry {

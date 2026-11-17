@@ -155,13 +155,13 @@ fn a_killed_restore_is_undone_by_a_repair(kind: Kind) {
         let stopped = made.marked();
         let planned = made.repair(Mode::DryRun);
         assert!(
-            matches!(&planned, Repaired::Undone(archive) if archive.id == stopped.id),
+            matches!(&planned, Repaired::Undone { archive, .. } if archive.id == stopped.id),
             "{kind:?} {step}: {planned:?}"
         );
         assert_eq!(made.marked(), stopped, "{kind:?} {step}: a dry run wrote");
         assert!(made.setup.root.join("triage").exists(), "{kind:?} {step}");
         let done = made.repair(Mode::Change);
-        assert!(matches!(done, Repaired::Undone(_)), "{kind:?} {step}");
+        assert!(matches!(done, Repaired::Undone { .. }), "{kind:?} {step}");
         assert_eq!(made.marked(), made.archive, "{kind:?} {step}: the archive");
         assert!(!made.setup.root.join("triage").exists(), "{kind:?} {step}");
         assert_eq!(made.kept_in_source(), None, "{kind:?} {step}");
@@ -199,7 +199,7 @@ fn a_repair_that_stopped_after_it_deleted_the_work_runs_again() {
         // A kill between the undo and the write that clears the mark leaves
         // the mark over what is already gone.
         made.setup.archives.write(&stopped).unwrap();
-        assert!(matches!(made.repair(Mode::Change), Repaired::Undone(_)));
+        assert!(matches!(made.repair(Mode::Change), Repaired::Undone { .. }));
         assert_eq!(made.marked(), made.archive, "{kind:?}");
         assert_eq!(made.worktrees(), 1, "{kind:?}");
         made.setup.restore();
@@ -305,4 +305,69 @@ fn a_record_without_a_mark_has_no_restoring_key_and_a_mark_round_trips() {
     archive.restoring = Some(mark);
     setup.archives.write(&archive).unwrap();
     assert_eq!(setup.record(), Some(archive));
+}
+
+#[test]
+fn a_removed_archive_that_holds_a_mark_has_what_the_dead_restore_made_deleted() {
+    use crate::lifecycle::{ArchiveDeleted, Lifecycle, VolumesAsked};
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let made = archived(kind);
+        made.kill_at("kept");
+        assert!(made.marked().restoring.is_some());
+        let outcome = Lifecycle::new(
+            &made.setup.workspaces,
+            &made.setup.archives,
+            &made.setup.runs,
+        )
+        .delete_archive(&made.marked(), &VolumesAsked::default())
+        .unwrap();
+        assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{kind:?}");
+        assert!(made.setup.record().is_none(), "{kind:?}");
+        assert!(!made.setup.root.join("triage").exists(), "{kind:?}");
+        assert_eq!(made.kept_in_source(), None, "{kind:?}");
+        assert_eq!(made.worktrees(), 1, "{kind:?}");
+    }
+}
+
+#[test]
+fn a_killed_restore_deletes_the_branch_it_created_while_it_is_at_the_archived_commit() {
+    let made = archived(Kind::Worktree);
+    let source = made.setup.fixture.clone.clone();
+    git(&source, &["branch", "-D", "triage"]);
+    made.kill_at("apply");
+    let RestoreMark(mark) = made.marked().restoring.unwrap();
+    assert_eq!(mark.branches.len(), 1, "{mark:?}");
+    assert!(
+        Git.branch_tip(&source, "triage").unwrap().is_some(),
+        "the killed restore made the branch"
+    );
+    made.repair(Mode::Change);
+    assert_eq!(Git.branch_tip(&source, "triage").unwrap(), None);
+    assert_eq!(made.worktrees(), 1);
+    made.setup.restore();
+    assert_eq!(branch(&made.setup.checkout()), "triage");
+}
+
+#[test]
+fn a_killed_restore_keeps_a_branch_that_has_moved_since_it_was_created() {
+    let made = archived(Kind::Worktree);
+    let source = made.setup.fixture.clone.clone();
+    git(&source, &["branch", "-D", "triage"]);
+    made.kill_at("apply");
+    git(
+        &made.setup.checkout(),
+        &[
+            "-c",
+            "user.name=a",
+            "-c",
+            "user.email=a@b.c",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "later",
+        ],
+    );
+    let moved = Git.branch_tip(&source, "triage").unwrap();
+    made.repair(Mode::Change);
+    assert_eq!(Git.branch_tip(&source, "triage").unwrap(), moved);
 }
