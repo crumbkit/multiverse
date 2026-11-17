@@ -48,6 +48,20 @@ workspace may need to act on.
 
 ### Changed
 
+- mxv builds on crumbkit 0.6.0 and deadband 0.4.0, which read and print
+  durations with jiff in place of humantime, so RUSTSEC-2026-0542 no longer
+  applies to mxv. `mxv self usage --since` now reads `3mo` and `1y` as
+  calendar months and years, and refuses a capital `M`, `0`, a fraction such
+  as `1.5d` and a negative age such as `-1h`. `mxv self runs list` and
+  `mxv self figures list` take `--context`, and `mxv self runs list --long`
+  adds the `lock_ms` and `context` columns. The `mxv skills` commands name
+  mxv in their help and examples. A command line that names a group without
+  its subcommand, such as `mxv skills`, prints the group's help and exits 0.
+  The help of a listing that shows only problem rows by default says it also
+  shows warning rows. The failure object in every JSON document schema gains
+  the optional `sentence` and `causes` members and the recovery step kinds
+  `program` and `after`; it drops nothing.
+
 - `mxv list` names a workspace that a killed `mxv new` left in the `creating`
   state, with the repair `mxv remove NAME`, and `mxv new` of that name fails
   with `mxv::workspace::creating` instead of `mxv::workspace::exists`.

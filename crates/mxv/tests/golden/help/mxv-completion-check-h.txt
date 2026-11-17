@@ -10,6 +10,6 @@ Examples:
   mxv completion check --shell zsh
 
 Effects: read-only, closed-world.
-Rows: the default text lists only the rows that report a problem, and --long, --fields or --json lists every row.
+Rows: the default text lists only the rows that report a problem or a warning, and --long, --fields or --json lists every row.
 Global flags: --json, --fields <FIELD>, --long, --full, --no-input. `mxv completion check --help` describes them.
 Next: mxv completion check --help explains each column.

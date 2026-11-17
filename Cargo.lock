@@ -266,15 +266,16 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crumbkit"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6947c2b73fe52c95c21aa67ab38f641c8fb8e5c49765f7829b8690bf9da9ed18"
+checksum = "b71ce9d40bdf7fe4e04521e05c33642b61fd967ef4cfc1ff115d1eed2b7e5313"
 dependencies = [
  "clap",
  "clap_complete",
  "crumbkit-derive",
- "humantime",
+ "crumbkit-durable",
  "is-ai-agent",
+ "jiff 1.0.0",
  "rustix",
  "schemars 1.2.3",
  "serde",
@@ -283,9 +284,9 @@ dependencies = [
 
 [[package]]
 name = "crumbkit-derive"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f3ea7b7c0fc0bfe15f6e6390ec8ea418b04ebfd405edbbf64cc66d9851fafd7"
+checksum = "9b628234d56544dc3e900a19591b05e0a746b501b991f32158b028f6d894474a"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -293,10 +294,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "crumbkit-markdown"
-version = "0.5.0"
+name = "crumbkit-durable"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6783b904e7f7ae69e8933247a6ce3ef507de764e707660f9ed4b2f7d113588ec"
+checksum = "2d80551b03aac1261b394355c02cded2bdb2ccc51ff338a735b74c67c74c8bdc"
+dependencies = [
+ "rustix",
+]
+
+[[package]]
+name = "crumbkit-markdown"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "155895de507fc0780b81b58074330ed8ddf2e251ab5c6c09fe36196aff123b81"
 dependencies = [
  "crumbkit",
  "serde",
@@ -305,24 +315,26 @@ dependencies = [
 
 [[package]]
 name = "crumbkit-skills"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "010c79043dad27e48eef440d4ae587f30207c091737d454dd8d7537e1f8469ac"
+checksum = "c20b2b253f2b1d73a084084bae7bce94dba83862deb4f5dcef27bb62f28a0113"
 dependencies = [
  "clap",
  "crumbkit",
+ "crumbkit-durable",
  "schemars 1.2.3",
  "serde",
 ]
 
 [[package]]
 name = "crumbkit-test"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dc1794eaf90f76d7825eb5527170e8115e6033e5561c444315f064a099f4c76"
+checksum = "f5abeb4104155100f352cd0610bc3779d3b2cfea67d2054c72b9e6c66136ffa8"
 dependencies = [
  "clap",
  "crumbkit",
+ "crumbkit-durable",
  "crumbkit-markdown",
  "serde",
  "serde_json",
@@ -331,20 +343,21 @@ dependencies = [
 
 [[package]]
 name = "crumbkit-usage"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c72c2efcffa3e91ef0d6285a399168f6a79d0a3489af08faad88ec0d0a4132e7"
+checksum = "6a5eaa36545c8f1ba1039e5f749a9e60cc17f93cf520fe1f3accdc21df3d35ad"
 dependencies = [
  "clap",
  "crumbkit",
+ "crumbkit-durable",
  "etcetera",
  "getrandom 0.4.3",
- "humantime",
  "is-ai-agent",
+ "jiff 1.0.0",
  "schemars 1.2.3",
  "serde",
  "serde_json",
- "signal-hook 0.4.6",
+ "signal-hook",
  "siphasher",
 ]
 
@@ -368,20 +381,21 @@ dependencies = [
 
 [[package]]
 name = "deadband"
-version = "0.4.0-alpha.1"
-source = "git+https://github.com/crumbkit/deadband?tag=v0.4.0-alpha.1#b0c8e18e98e6d81e13ac41fa07101c0ac4f4dd20"
+version = "0.4.0"
+source = "git+https://github.com/crumbkit/deadband?tag=v0.4.0#7b5e4a93e0aa76dd7088506da1fd9497de1df793"
 dependencies = [
  "clap",
  "crumbkit",
+ "crumbkit-durable",
  "crumbkit-skills",
- "humantime",
+ "jiff 1.0.0",
  "libc",
  "regex-lite",
  "rustix",
  "schemars 1.2.3",
  "serde",
  "serde_json",
- "signal-hook 0.3.18",
+ "signal-hook",
  "toml",
 ]
 
@@ -641,12 +655,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "humantime"
-version = "2.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -819,14 +827,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ac703058abac89e5c39b0b879dce2b6b14a4ba36600c7e7e3d0c60a6883ef3c"
 dependencies = [
  "defmt",
- "jiff-core",
- "jiff-static",
+ "jiff-core 0.1.2",
+ "jiff-static 0.2.39",
  "jiff-tzdb-platform",
  "log",
  "portable-atomic",
  "portable-atomic-util",
  "serde_core",
  "windows-link",
+]
+
+[[package]]
+name = "jiff"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cc767b5763de45e810109520123bb2829a653f3a7ed9be40b2bc4f81158f595"
+dependencies = [
+ "jiff-core 1.0.0",
+ "jiff-static 1.0.0",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
 ]
 
 [[package]]
@@ -840,15 +862,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "jiff-core"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "894f7ac42105f584100691b3bf6e6b92dd12fcfa225f6c397f95c8a94b47b68f"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "jiff-static"
 version = "0.2.39"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6dc32470c67eb7d0e9ccb74303fa925313dc04cecb1aa048beaa6f391e36a93d"
 dependencies = [
- "jiff-core",
+ "jiff-core 0.1.2",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "955491488dc99b572ea6d67b172dcd98787d00744b1fb44a5689b4e6413695a6"
+dependencies = [
+ "jiff-core 1.0.0",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -940,7 +983,7 @@ dependencies = [
  "schemars 1.2.3",
  "serde",
  "serde_json",
- "signal-hook 0.4.6",
+ "signal-hook",
  "snapbox",
  "tempfile",
  "toml",
@@ -959,7 +1002,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "signal-hook 0.4.6",
+ "signal-hook",
  "tempfile",
  "wait-timeout",
 ]
@@ -1477,16 +1520,6 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-hook"
-version = "0.3.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
-name = "signal-hook"
 version = "0.4.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "49f7447afd772ca79ad17ae0a3972a6b0df0cb4b80990fd82707593e9e012a74"
@@ -1511,7 +1544,7 @@ version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "442bc4f672eef040397e65d4ae34ca1b1dc8140b1a35b1246e0b219ce5f4e571"
 dependencies = [
- "jiff",
+ "jiff 0.2.39",
  "sigstore-types",
  "thiserror",
 ]
@@ -1525,7 +1558,7 @@ dependencies = [
  "const-oid 0.9.6",
  "der 0.7.10",
  "futures-io",
- "jiff",
+ "jiff 0.2.39",
  "rustls-pki-types",
  "sigstore-types",
  "spki 0.7.3",
@@ -1552,7 +1585,7 @@ checksum = "a46ca1954e5e92b8a35eeefb745f55a1eff2d82c6b80f946e733671b33508540"
 dependencies = [
  "base64",
  "hex",
- "jiff",
+ "jiff 0.2.39",
  "serde",
  "serde_json",
  "sigstore-merkle",
@@ -1566,7 +1599,7 @@ version = "0.15.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d9a49e390a5f52e0b05f1a17820be5ac747a3890bb9f54156d8a1147508420a7"
 dependencies = [
- "jiff",
+ "jiff 0.2.39",
  "serde",
  "serde_json",
  "sigstore-crypto",
@@ -1584,7 +1617,7 @@ dependencies = [
  "const-oid 0.9.6",
  "der 0.7.10",
  "hex",
- "jiff",
+ "jiff 0.2.39",
  "rustls-pki-types",
  "rustls-webpki",
  "sigstore-crypto",
@@ -1602,7 +1635,7 @@ checksum = "eec330f1cdb4c7ec6628ef43165c42978480d4213af70567e67e2891ec9072d8"
 dependencies = [
  "base64",
  "hex",
- "jiff",
+ "jiff 0.2.39",
  "pem",
  "serde",
  "serde_json",
@@ -1619,7 +1652,7 @@ dependencies = [
  "const-oid 0.9.6",
  "futures-io",
  "hex",
- "jiff",
+ "jiff 0.2.39",
  "rustls-pki-types",
  "rustls-webpki",
  "serde",

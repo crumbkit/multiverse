@@ -1,4 +1,4 @@
-Print this tool's skill
+Print mxv's skill
 
 Usage: mxv skills print [OPTIONS]
 
@@ -14,6 +14,6 @@ Options:
 
 Examples:
   mxv skills print
-          Print the skill
+          Print mxv's skill
 
 Effects: read-only, closed-world.
