@@ -786,6 +786,21 @@ fn add_and_clean_refuse_a_workspace_that_mxv_new_did_not_finish() {
 }
 
 #[test]
+fn new_of_a_name_that_mxv_new_did_not_finish_fails_with_creating_and_list_names_the_removal() {
+    let setup = Setup::new();
+    setup.created("triage", &["api"]);
+    set_state(&setup, "triage", "creating");
+    let (exit, document) = setup.json(&["new", "triage", "--repo", "api"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::creating", "{document}");
+    let (exit, listed) = setup.json(&["list"]);
+    assert_eq!(exit, 1, "{listed}");
+    let text = listed.to_string();
+    assert!(text.contains("mxv new did not finish it"), "{text}");
+    assert!(text.contains("mxv remove triage"), "{text}");
+}
+
+#[test]
 fn add_and_clean_run_on_a_live_workspace() {
     let setup = Setup::new();
     let workspace = setup.created("triage", &["api"]);

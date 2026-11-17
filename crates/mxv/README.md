@@ -1323,7 +1323,11 @@ as `creating` before it makes the checkouts, and writes it as `live` with
 its last write; `mxv restore` writes it as `live`. A record that an older
 mxv wrote has no state, and reads as `creating` when it is a workspace of
 clones whose checkouts all lack a commit, and as `live` otherwise. When
-`mxv new` is killed partway, the record stays `creating`, and `up`,
+`mxv new` is killed partway, the record stays `creating`, `mxv list` names
+it with the problem "mxv new did not finish it" and the repair
+`mxv remove NAME`, `mxv new` of the same name fails with
+`mxv::workspace::creating` where it fails with `mxv::workspace::exists` for
+a finished workspace, and `up`,
 `restart`, `ports reset`, `run`, `exec`, `pin`, `unpin`, `add`, `archive`
 and `clean` fail with `mxv::workspace::creating`, whose hint is
 `mxv remove NAME` and then `mxv new` again. `mxv reclaim` keeps such a

@@ -302,6 +302,7 @@ fn problem_text(broken: &Broken) -> String {
             "the restore stopped before it deleted the archive".to_owned()
         }
         Problem::CheckoutsGone => "every checkout directory is gone".to_owned(),
+        Problem::CreateUnfinished => "mxv new did not finish it".to_owned(),
     }
 }
 
