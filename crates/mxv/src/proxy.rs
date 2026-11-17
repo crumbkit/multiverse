@@ -31,26 +31,28 @@ mod tests;
 
 /// The code of a proxy that cannot listen, because another process holds
 /// the address.
-pub const PROXY_PORT_HELD: Code = Code::new("mxv", "proxy", "port_held");
+pub const PROXY_PORT_HELD: Code = Code::from_spelling("mxv::proxy::port_held");
 /// The code of a proxy that the system does not let the person listen
 /// with on the address.
-pub const PROXY_PORT_DENIED: Code = Code::new("mxv", "proxy", "port_denied");
+pub const PROXY_PORT_DENIED: Code = Code::from_spelling("mxv::proxy::port_denied");
 /// The code of a machine without a working `caddy` program.
-pub const PROXY_CADDY_MISSING: Code = Code::new("mxv", "proxy", "caddy_missing");
+pub const PROXY_CADDY_MISSING: Code = Code::from_spelling("mxv::proxy::caddy_missing");
 /// The code of a `caddy` program older than mxv drives.
-pub const PROXY_CADDY_TOO_OLD: Code = Code::new("mxv", "proxy", "caddy_too_old");
+pub const PROXY_CADDY_TOO_OLD: Code = Code::from_spelling("mxv::proxy::caddy_too_old");
 /// The code of a Caddy that did not start.
-pub const PROXY_START_FAILED: Code = Code::new("mxv", "proxy", "start_failed");
+pub const PROXY_START_FAILED: Code = Code::from_spelling("mxv::proxy::start_failed");
 /// The code of a Caddy that refused the configuration.
-pub const PROXY_LOAD_FAILED: Code = Code::new("mxv", "proxy", "load_failed");
+pub const PROXY_LOAD_FAILED: Code = Code::from_spelling("mxv::proxy::load_failed");
 /// The code of a state directory whose admin socket path is too long.
-pub const PROXY_SOCKET_PATH_TOO_LONG: Code = Code::new("mxv", "proxy", "socket_path_too_long");
+pub const PROXY_SOCKET_PATH_TOO_LONG: Code =
+    Code::from_spelling("mxv::proxy::socket_path_too_long");
 /// The code of `mxv proxy trust` run without a terminal.
-pub const PROXY_TRUST_NEEDS_TERMINAL: Code = Code::new("mxv", "proxy", "trust_needs_terminal");
+pub const PROXY_TRUST_NEEDS_TERMINAL: Code =
+    Code::from_spelling("mxv::proxy::trust_needs_terminal");
 /// The code of a `caddy trust` that ended with a failure.
-pub const PROXY_TRUST_FAILED: Code = Code::new("mxv", "proxy", "trust_failed");
+pub const PROXY_TRUST_FAILED: Code = Code::from_spelling("mxv::proxy::trust_failed");
 /// The code of `mxv proxy check` when a row is missing or failed.
-pub const PROXY_CHECK_FAILED: Code = Code::new("mxv", "proxy", "check_failed");
+pub const PROXY_CHECK_FAILED: Code = Code::from_spelling("mxv::proxy::check_failed");
 
 /// Every code that a [`ProxyFailure`] returns.
 pub(crate) const CODES: &[Code<'static>] = &[
@@ -647,7 +649,12 @@ fn summary(status: &ProxyStatus) -> ProxySummary {
                 None => AuthorityState::Unknown,
             }),
         routes: status.routes.served.len(),
-        problems: status.routes.problems.clone(),
+        problems: status
+            .routes
+            .problems
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
     }
 }
 

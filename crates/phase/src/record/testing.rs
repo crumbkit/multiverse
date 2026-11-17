@@ -12,7 +12,7 @@ use rustix::process::Signal;
 
 use crate::engine::container::{ContainerState, Identity as WorkspaceIdentity};
 use crate::engine::host::{Holder, HostRunner, HostStop, HostStopped};
-use crate::engine::keeper::{Kept, Launch};
+use crate::engine::keeper::{BeforeGo, Failed, Kept, Launch};
 use crate::engine::probe::LogLines;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
@@ -311,12 +311,13 @@ impl Processes for FakeProcesses {
 /// The fake process table stops and identifies processes as the system
 /// runner does, and starts, follows and finds nothing.
 impl HostRunner for FakeProcesses {
-    fn launch(&self, launch: &Launch<'_>) -> Result<Kept, PhaseError> {
+    fn launch(&self, launch: &Launch<'_>, _before_go: BeforeGo<'_>) -> Result<Kept, Failed> {
         Err(PhaseError::KeeperUnstartable {
             app: launch.args.app().clone(),
             process: launch.args.process().clone(),
             reason: "the fake process table starts nothing".to_owned(),
-        })
+        }
+        .into())
     }
 
     fn stop(

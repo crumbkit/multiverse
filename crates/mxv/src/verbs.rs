@@ -8,7 +8,8 @@ use multiverse::health::{self, Problem};
 use multiverse::{
     AddOutcome, Allow, ArchiveState, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined,
     Lifecycle, Manifest, ManifestProblem, Mode, NewOutcome, PathGlob, RemovalPlan, RemoveAsked,
-    Removed, Repo, Store, Workspace, WorkspaceName, Workspaces, checkout_prefix, prefixed,
+    Removed, Repo, Store, Workspace, WorkspaceName, WorkspaceState, Workspaces, checkout_prefix,
+    prefixed,
 };
 
 use crate::cli::{AddArgs, CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
@@ -311,11 +312,8 @@ pub(crate) fn new(
     // are made. A name that a workspace already holds is reported before
     // the lock, so it does not wait for another command that holds it.
     let _lock = if mode == Mode::Change {
-        if workspaces.find(&name).map_err(MxvFailure::from)?.is_some() {
-            return Err(MxvFailure::Exists {
-                name: name.to_string(),
-            }
-            .into());
+        if let Some(found) = workspaces.find(&name).map_err(MxvFailure::from)? {
+            return Err(taken(&name, &found).into());
         }
         Some(processes::lock(environment, &name)?)
     } else {
@@ -342,10 +340,7 @@ pub(crate) fn new(
             let from = copied.as_ref().map(|copied| copied.from.as_path());
             Ok(NewRow::new(&workspace, &root, cloned, from).with_warnings(&warnings))
         }
-        NewOutcome::NameTaken(_) => Err(MxvFailure::Exists {
-            name: name.to_string(),
-        }
-        .into()),
+        NewOutcome::NameTaken(found) => Err(taken(&name, &found).into()),
         NewOutcome::PathTaken(path) => Err(MxvFailure::DirectoryTaken { path }.into()),
         NewOutcome::BranchTaken { repository, branch } => {
             Err(MxvFailure::BranchExists { repository, branch }.into())
@@ -357,6 +352,21 @@ pub(crate) fn new(
             Err(MxvFailure::BadFolder { folder, reason }.into())
         }
         NewOutcome::ManifestRefused(error) => Err(RunFailure::Manifest(error).into()),
+    }
+}
+
+/// Returns the failure of `mxv new` for a name that the workspace `found`
+/// holds: `creating` when an earlier `mxv new` did not finish it, so the
+/// hint names `mxv remove`, and `exists` otherwise.
+fn taken(name: &WorkspaceName, found: &Workspace) -> MxvFailure {
+    if found.state() == WorkspaceState::Creating {
+        MxvFailure::Creating {
+            name: name.to_string(),
+        }
+    } else {
+        MxvFailure::Exists {
+            name: name.to_string(),
+        }
     }
 }
 

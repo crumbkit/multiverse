@@ -1,4 +1,4 @@
-Install this tool's skills into each agent skills directory that exists
+Install mxv's skills into each agent skills directory that exists
 
 Usage: mxv skills install [OPTIONS]
 

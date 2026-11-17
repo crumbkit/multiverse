@@ -12,66 +12,66 @@ use crate::failures::remove_volumes_line;
 
 /// The code of a process verb that names no workspace, run outside every
 /// workspace.
-pub const WORKSPACE_NOT_CURRENT: Code = Code::new("mxv", "workspace", "not_current");
+pub const WORKSPACE_NOT_CURRENT: Code = Code::from_spelling("mxv::workspace::not_current");
 /// The code of a removal that running processes stop.
-pub const WORKSPACE_RUNNING: Code = Code::new("mxv", "workspace", "running");
+pub const WORKSPACE_RUNNING: Code = Code::from_spelling("mxv::workspace::running");
 /// The code of `mxv add` to a workspace of one checkout whose containers'
 /// volumes hold data under the names that adding a checkout prefixes.
-pub const VOLUME_RENAMED: Code = Code::new("mxv", "volume", "renamed");
+pub const VOLUME_RENAMED: Code = Code::from_spelling("mxv::volume::renamed");
 /// The code of a unit name that phase cannot run, such as one with an
 /// uppercase letter.
-pub const MANIFEST_UNIT_NAME: Code = Code::new("mxv", "manifest", "unit_name");
+pub const MANIFEST_UNIT_NAME: Code = Code::from_spelling("mxv::manifest::unit_name");
 /// The code of a manifest that phase cannot run, such as one whose process
 /// sets `PATH`.
-pub const MANIFEST_UNRUNNABLE: Code = Code::new("mxv", "manifest", "unrunnable");
+pub const MANIFEST_UNRUNNABLE: Code = Code::from_spelling("mxv::manifest::unrunnable");
 /// The code of a removal that the workspace's docker volumes stop.
-pub const WORKSPACE_VOLUMES: Code = Code::new("mxv", "workspace", "volumes");
+pub const WORKSPACE_VOLUMES: Code = Code::from_spelling("mxv::workspace::volumes");
 /// The code of a checkout without an `mxv.toml`.
-pub const MANIFEST_NOT_FOUND: Code = Code::new("mxv", "manifest", "not_found");
+pub const MANIFEST_NOT_FOUND: Code = Code::from_spelling("mxv::manifest::not_found");
 /// The code of a manifest key that the schema does not declare.
-pub const MANIFEST_UNKNOWN_KEY: Code = Code::new("mxv", "manifest", "unknown_key");
+pub const MANIFEST_UNKNOWN_KEY: Code = Code::from_spelling("mxv::manifest::unknown_key");
 /// The code of a manifest whose `version` a later version of mxv reads.
-pub const MANIFEST_NEWER: Code = Code::new("mxv", "manifest", "newer");
+pub const MANIFEST_NEWER: Code = Code::from_spelling("mxv::manifest::newer");
 /// The code of a manifest section that a later version of mxv reads.
-pub const MANIFEST_RESERVED: Code = Code::new("mxv", "manifest", "reserved");
+pub const MANIFEST_RESERVED: Code = Code::from_spelling("mxv::manifest::reserved");
 /// The code of a manifest that is not valid TOML of the schema.
-pub const MANIFEST_INVALID: Code = Code::new("mxv", "manifest", "invalid");
+pub const MANIFEST_INVALID: Code = Code::from_spelling("mxv::manifest::invalid");
 /// The code of a manifest that exists and cannot be read.
-pub const MANIFEST_UNREADABLE: Code = Code::new("mxv", "manifest", "unreadable");
+pub const MANIFEST_UNREADABLE: Code = Code::from_spelling("mxv::manifest::unreadable");
 /// The code of two manifests of a workspace with several checkouts that
 /// declare the same merged name.
-pub const MANIFEST_NAME_CLASH: Code = Code::new("mxv", "manifest", "name_clash");
+pub const MANIFEST_NAME_CLASH: Code = Code::from_spelling("mxv::manifest::name_clash");
 /// The code of a process name that the workspace does not know.
-pub const PROCESS_NOT_FOUND: Code = Code::new("mxv", "process", "not_found");
+pub const PROCESS_NOT_FOUND: Code = Code::from_spelling("mxv::process::not_found");
 /// The code of a process that exited before it was ready.
-pub const PROCESS_EXITED: Code = Code::new("mxv", "process", "exited");
+pub const PROCESS_EXITED: Code = Code::from_spelling("mxv::process::exited");
 /// The code of a process that missed its readiness timeout.
-pub const PROCESS_NOT_READY: Code = Code::new("mxv", "process", "not_ready");
+pub const PROCESS_NOT_READY: Code = Code::from_spelling("mxv::process::not_ready");
 /// The code of a process whose readiness port another program answered.
-pub const PROCESS_FOREIGN_LISTENER: Code = Code::new("mxv", "process", "foreign_listener");
+pub const PROCESS_FOREIGN_LISTENER: Code = Code::from_spelling("mxv::process::foreign_listener");
 /// The code of a listen port that a descendant of a process holds from
 /// outside the process's group.
-pub const PROCESS_DETACHED_LISTENER: Code = Code::new("mxv", "process", "detached_listener");
+pub const PROCESS_DETACHED_LISTENER: Code = Code::from_spelling("mxv::process::detached_listener");
 /// The code of a process group that outlived SIGKILL.
-pub const PROCESS_UNSTOPPABLE: Code = Code::new("mxv", "process", "unstoppable");
+pub const PROCESS_UNSTOPPABLE: Code = Code::from_spelling("mxv::process::unstoppable");
 /// The code of a `build` that ended with a status other than 0.
-pub const BUILD_FAILED: Code = Code::new("mxv", "build", "failed");
+pub const BUILD_FAILED: Code = Code::from_spelling("mxv::build::failed");
 /// The code of a `build` that could not start.
-pub const BUILD_UNSTARTABLE: Code = Code::new("mxv", "build", "unstartable");
+pub const BUILD_UNSTARTABLE: Code = Code::from_spelling("mxv::build::unstartable");
 /// The code of a `build` that outlived its deadline.
-pub const BUILD_TIMED_OUT: Code = Code::new("mxv", "build", "timed_out");
+pub const BUILD_TIMED_OUT: Code = Code::from_spelling("mxv::build::timed_out");
 /// The code of a task name that no manifest and no mise listing holds.
-pub const TASK_UNKNOWN: Code = Code::new("mxv", "task", "unknown");
+pub const TASK_UNKNOWN: Code = Code::from_spelling("mxv::task::unknown");
 /// The code of a task name that several checkouts hold.
-pub const TASK_AMBIGUOUS: Code = Code::new("mxv", "task", "ambiguous");
+pub const TASK_AMBIGUOUS: Code = Code::from_spelling("mxv::task::ambiguous");
 /// The code of a stored port that something outside the workspace holds.
-pub const PORT_TAKEN: Code = Code::new("mxv", "port", "taken");
+pub const PORT_TAKEN: Code = Code::from_spelling("mxv::port::taken");
 /// The code of a port name that the manifest does not declare.
-pub const PORT_NOT_FOUND: Code = Code::new("mxv", "port", "not_found");
+pub const PORT_NOT_FOUND: Code = Code::from_spelling("mxv::port::not_found");
 /// The code of a unit whose permissions no person granted.
-pub const PERMISSIONS_NOT_GRANTED: Code = Code::new("mxv", "permissions", "not_granted");
+pub const PERMISSIONS_NOT_GRANTED: Code = Code::from_spelling("mxv::permissions::not_granted");
 /// The code of a unit that `mxv down` kept, because running units need it.
-pub const PROCESS_STILL_NEEDED: Code = Code::new("mxv", "process", "still_needed");
+pub const PROCESS_STILL_NEEDED: Code = Code::from_spelling("mxv::process::still_needed");
 
 /// Every code that a [`RunFailure`] or a `mxv run` failure returns.
 pub(crate) const CODES: &[Code<'static>] = &[

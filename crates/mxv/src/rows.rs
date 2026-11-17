@@ -64,8 +64,8 @@ pub(crate) struct WorkspaceRow {
     /// beside a newer workspace of the same name, which only the archive
     /// listing shows, a restore that stopped before it deleted the archive,
     /// a restore that stopped before it finished the workspace,
-    /// a workspace whose checkout directories are all gone, or a size that
-    /// mxv cannot measure. A row of a record that mxv cannot read
+    /// a workspace whose checkout directories are all gone, a workspace that
+    /// mxv new did not finish, or a size that mxv cannot measure. A row of a record that mxv cannot read
     /// names the record in `name`, a workspace record without `.json` and
     /// an archive record by its directory, and leaves the other fields
     /// empty.
@@ -306,6 +306,7 @@ fn problem_text(broken: &Broken) -> String {
             "the restore stopped before it finished, and left what it made".to_owned()
         }
         Problem::CheckoutsGone => "every checkout directory is gone".to_owned(),
+        Problem::CreateUnfinished => "mxv new did not finish it".to_owned(),
     }
 }
 

@@ -42,4 +42,4 @@ Columns:
   reason  Why the file differs, cannot be read or is linked, such as `linked to /path/to/target.fish`, or null.
 
 Effects: read-only, closed-world.
-Rows: the default text lists only the rows that report a problem, and --long, --fields or --json lists every row.
+Rows: the default text lists only the rows that report a problem or a warning, and --long, --fields or --json lists every row.

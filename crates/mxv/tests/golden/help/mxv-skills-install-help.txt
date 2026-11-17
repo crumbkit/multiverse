@@ -1,4 +1,4 @@
-Install this tool's skills into each agent skills directory that exists
+Install mxv's skills into each agent skills directory that exists
 
 Usage: mxv skills install [OPTIONS]
 
@@ -29,10 +29,10 @@ Options:
 
 Examples:
   mxv skills install
-          Install the skills into each agent skills directory that exists
+          Install mxv's skills into each agent skills directory that exists
 
   mxv skills install --force
-          Install them, replacing a file or a link that install did not write
+          Install mxv's skills, replacing a file or a link that install did not write
 
 Columns:
   state   What install did: failed, skipped, written or unchanged.

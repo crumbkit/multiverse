@@ -30,11 +30,50 @@ fn is_executable(path: &Path) -> bool {
         .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
 }
 
-/// What `caddy version` said, or why it said nothing.
+/// A Caddy version that has a numeric major and minor, such as `2.10.0`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CaddyVersion {
+    /// The major number.
+    pub(super) major: u32,
+    /// The minor number.
+    pub(super) minor: u32,
+    /// The version as Caddy printed it, without the `v` and the hash.
+    text: String,
+}
+
+impl CaddyVersion {
+    /// Parses `word`, such as `2.10.0` or `2.8.0-beta.1`, or returns `None`
+    /// when it has no numeric major and minor.
+    pub(super) fn parse(word: &str) -> Option<Self> {
+        let mut parts = word.split(['.', '-', '+']);
+        let major = parts.next()?.parse().ok()?;
+        let minor = parts.next()?.parse().ok()?;
+        Some(Self {
+            major,
+            minor,
+            text: word.to_owned(),
+        })
+    }
+
+    /// Returns the major and minor numbers.
+    pub(super) fn major_minor(&self) -> (u32, u32) {
+        (self.major, self.minor)
+    }
+}
+
+impl std::fmt::Display for CaddyVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+/// What `caddy version` said, or why it said nothing usable.
+#[derive(Debug)]
 pub(super) enum Version {
-    /// The program printed a version, such as `2.10.0`.
-    Found(String),
-    /// The program could not run, or printed nothing.
+    /// The program printed a version with a major and minor number.
+    Found(CaddyVersion),
+    /// The program could not run, printed nothing, or printed a version
+    /// without a major and minor number.
     Unusable(String),
 }
 
@@ -75,23 +114,22 @@ pub(super) fn version(caddy: &Path) -> Version {
     if let Some(mut stdout) = child.stdout.take() {
         let _ = stdout.read_to_string(&mut out);
     }
-    out.split_whitespace()
+    let Some(word) = out
+        .split_whitespace()
         .next()
-        .map(|word| word.trim_start_matches('v').to_owned())
+        .map(|word| word.trim_start_matches('v'))
         .filter(|word| !word.is_empty())
-        .map_or_else(
-            || Version::Unusable("it did not print a version".to_owned()),
-            Version::Found,
-        )
-}
-
-/// Returns the major and minor numbers of the version `text`, such as
-/// `2.10.0`, or `None` when it has none.
-pub(super) fn major_minor(text: &str) -> Option<(u32, u32)> {
-    let mut parts = text.split(['.', '-', '+']);
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    Some((major, minor))
+    else {
+        return Version::Unusable("it did not print a version".to_owned());
+    };
+    CaddyVersion::parse(word).map_or_else(
+        || {
+            Version::Unusable(format!(
+                "it printed `{word}`, which has no major and minor version"
+            ))
+        },
+        Version::Found,
+    )
 }
 
 /// Runs `caddy trust --address unix//<socket>` with the terminal of the

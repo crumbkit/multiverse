@@ -14,6 +14,9 @@ Options:
       --exclude-program <NAME>
           Leave out the runs that a program with this name marked, such as flightdeck
 
+      --context <LABEL>
+          Keep only the runs that reported this context, such as project
+
       --limit <N>
           Print at most this many rows
           

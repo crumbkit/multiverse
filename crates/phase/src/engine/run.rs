@@ -57,7 +57,7 @@ use crate::engine::containers::{
     Before, ContainerRewrite, ContainerRunner, ContainerStart, Rewritten,
 };
 use crate::engine::host::{Holder, HostRunner, is_gone};
-use crate::engine::keeper::{AppEnd, KeeperArgs, KeeperCommand, KeeperSpec, Launch};
+use crate::engine::keeper::{AppEnd, Failed, KeeperArgs, KeeperCommand, KeeperSpec, Launch};
 use crate::engine::probe::{self, Check, Goal, HostExec, LogLines, LogWatch, Outcome};
 use crate::env::{AppliedEnvironment, EnvironmentSource};
 use crate::error::{NotRunnable, PhaseError};
@@ -275,6 +275,20 @@ enum AppStep {
     Done(AppOutcome, Vec<Note>),
     /// The caller cancelled the operation while the app started.
     Cancelled(Vec<Note>),
+}
+
+/// What [`Op::launch`] returns: the keeper, the started process, the reader
+/// of how it ended and the follower of its log.
+type Launched = (HostProcess, HostProcess, AppEnd, Box<dyn LogLines + Send>);
+
+/// What became of the app of a keeper that failed to start its process.
+enum Abandoned {
+    /// The keeper reported no app.
+    None,
+    /// phase stopped the app.
+    Stopped,
+    /// phase could not stop the app, and the record keeps it.
+    Left,
 }
 
 /// How one process's start ended.
@@ -761,10 +775,11 @@ impl Op<'_, '_> {
                 oneshot: self.oneshot_launch(app, process),
             },
         )?;
-        let (keeper, started, end, lines) = match self.launch(app, process, environment.as_ref()) {
-            Ok(launched) => launched,
-            Err(step) => return Ok(step),
-        };
+        let (keeper, started, end, lines) =
+            match self.launch(app, process, environment.as_ref(), notes)? {
+                Ok(launched) => launched,
+                Err(step) => return Ok(step),
+            };
         let target = Target {
             app: app.name.clone(),
             process: process.name.clone(),
@@ -774,10 +789,6 @@ impl Op<'_, '_> {
             listen: listen.clone(),
         };
         self.started.push(Begun::Host(target.clone()));
-        self.journal.started(
-            &ObjectKey::Keeper(app.name.clone(), process.name.clone()),
-            Started::Host(keeper),
-        )?;
         self.journal.started(
             &ObjectKey::Process(app.name.clone(), process.name.clone()),
             Started::Host(started.clone()),
@@ -1005,12 +1016,22 @@ impl Op<'_, '_> {
     /// opening a follower of its log, and returns the keeper, the started
     /// process, the reader of how it ended and the follower, or the step
     /// that ends the start.
+    ///
+    /// The run record names the keeper as running before the keeper starts
+    /// the app, so no app exists that the record does not lead back to. A
+    /// keeper that reported its app and then missed the handshake deadline
+    /// leaves that app, which this stops by its identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of writing the record.
     fn launch(
-        &self,
+        &mut self,
         app: &AppPlan,
         process: &ProcessPlan,
         environment: &dyn AppliedEnvironment,
-    ) -> Result<(HostProcess, HostProcess, AppEnd, Box<dyn LogLines + Send>), Step> {
+        notes: &mut Vec<Note>,
+    ) -> Result<Result<Launched, Step>, PhaseError> {
         let engine = self.engine;
         let unstartable = |reason: String| {
             Step::Errored(PhaseError::KeeperUnstartable {
@@ -1020,7 +1041,7 @@ impl Op<'_, '_> {
             })
         };
         let Some(command) = engine.settings.keeper else {
-            return Err(unstartable(NO_KEEPER.to_owned()));
+            return Ok(Err(unstartable(NO_KEEPER.to_owned())));
         };
         let log = engine.log_path(&self.workspace, &app.name, &process.name);
         let spec = KeeperSpec::new(
@@ -1038,34 +1059,125 @@ impl Op<'_, '_> {
         .expiring(environment.expires_at())
         .requiring(process.required_env().cloned().collect())
         .inheriting(engine.settings.inherited.clone())
-        .map_err(|error| unstartable(error.to_string()))?;
+        .map_err(|error| unstartable(error.to_string()));
+        let spec = match spec {
+            Ok(spec) => spec,
+            Err(step) => return Ok(Err(step)),
+        };
         let spec = match self.sandbox(app, process, command) {
             Ok(Some(sandbox)) => spec.sandboxed(sandbox),
             Ok(None) => spec,
-            Err(error) => return Err(unstartable(error.to_string())),
+            Err(error) => return Ok(Err(unstartable(error.to_string()))),
         };
-        let lines = engine.host.follow_log(&log).map_err(Step::Errored)?;
+        let lines = match engine.host.follow_log(&log) {
+            Ok(lines) => lines,
+            Err(error) => return Ok(Err(Step::Errored(error))),
+        };
         let args = KeeperArgs::new(
             self.workspace.clone(),
             app.name.clone(),
             process.name.clone(),
             engine.settings.state_dir.to_path_buf(),
         );
-        let launched = engine.host.launch(&Launch {
-            command,
-            args: &args,
-            spec: &spec,
-            environment,
-            deadline: self.deadlines.ready,
-        });
+        let key = ObjectKey::Keeper(app.name.clone(), process.name.clone());
+        let mut recorded = None;
+        let journal = &mut self.journal;
+        let launched = engine.host.launch(
+            &Launch {
+                command,
+                args: &args,
+                spec: &spec,
+                environment,
+                deadline: self.deadlines.ready,
+            },
+            &mut |keeper| {
+                journal.started(&key, Started::Host(keeper.clone()))?;
+                recorded = Some(keeper.clone());
+                Ok(())
+            },
+        );
         match launched {
             Ok(kept) => {
                 let (keeper, app, end) = kept.detach();
-                Ok((keeper, app, end, lines))
+                Ok(Ok((keeper, app, end, lines)))
             }
-            Err(_) if now() >= self.deadlines.ready => Err(Step::Uncertain),
-            Err(error) => Err(Step::Errored(error)),
+            Err(Failed::Recording(error)) => Err(*error),
+            Err(Failed::Keeper { error, abandoned }) => {
+                let stopped = self.end_abandoned(app, process, recorded, abandoned, notes)?;
+                Ok(Err(match (stopped, *error) {
+                    (Abandoned::Left, _) => Step::Uncertain,
+                    (
+                        Abandoned::Stopped,
+                        PhaseError::KeeperUnstartable {
+                            app,
+                            process,
+                            reason,
+                        },
+                    ) => Step::Errored(PhaseError::KeeperUnstartable {
+                        app,
+                        process,
+                        reason: format!(
+                            "{reason}; phase stopped the app that the keeper had started"
+                        ),
+                    }),
+                    (_, _) if now() >= self.deadlines.ready => Step::Uncertain,
+                    (_, error) => Step::Errored(error),
+                }))
+            }
         }
+    }
+
+    /// Records the keeper that failed to start `process` of `app` as
+    /// stopped, and stops the `abandoned` app that it reported before it
+    /// was ended, by its identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of writing the record and of reading the process
+    /// table.
+    fn end_abandoned(
+        &mut self,
+        app: &AppPlan,
+        process: &ProcessPlan,
+        keeper: Option<HostProcess>,
+        abandoned: Option<HostProcess>,
+        notes: &mut Vec<Note>,
+    ) -> Result<Abandoned, PhaseError> {
+        let Some(abandoned) = abandoned else {
+            // No app exists that the keeper reported, and the keeper is
+            // gone, so only its own entry needs the end.
+            if keeper.is_some() {
+                self.journal
+                    .stopped(&ObjectKey::Keeper(app.name.clone(), process.name.clone()))?;
+            }
+            return Ok(Abandoned::None);
+        };
+        // The record names the app before the stop begins, so that `down`
+        // and a sweep still find it when the stop does not finish.
+        self.journal.started(
+            &ObjectKey::Process(app.name.clone(), process.name.clone()),
+            Started::Host(abandoned.clone()),
+        )?;
+        let target = Target {
+            app: app.name.clone(),
+            process: process.name.clone(),
+            keeper,
+            host: Some(abandoned),
+            stop: process.stop,
+            listen: None,
+        };
+        let deadline = deadline_in(
+            process
+                .stop
+                .grace
+                .saturating_add(self.engine.settings.kill_wait),
+        );
+        Ok(
+            match stop::stop_target(self.engine, &mut self.journal, &target, deadline, notes)? {
+                Stopped::Stopped => Abandoned::Stopped,
+                Stopped::Left => Abandoned::Left,
+            },
+        )
     }
 
     /// Returns the hash of what `process` of `app` is launched from, which

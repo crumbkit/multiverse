@@ -78,6 +78,7 @@ pub(super) fn workspace(root: &Path, text: &str, digit: char, folders: &[&str]) 
         .collect();
     let mut workspace = Workspace::new(name(text), path, checkouts);
     workspace.id = Some(id(digit));
+    workspace.set_state(WorkspaceState::Live);
     workspace
 }
 
@@ -484,6 +485,33 @@ fn a_workspace_whose_checkout_directories_are_all_gone_is_repaired_by_removing_i
             repair: Some(Repair::Remove(name("triage"))),
         }]
     );
+}
+
+#[test]
+fn a_workspace_that_mxv_new_left_creating_is_repaired_by_removing_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut triage = workspace(dir.path(), "triage", '1', &["api"]);
+    triage.set_state(WorkspaceState::Creating);
+    let health = classify(&records(vec![triage], vec![]), &archives(vec![], vec![]));
+    assert_eq!(
+        health.workspaces,
+        [Broken {
+            name: "triage".to_owned(),
+            problem: Problem::CreateUnfinished,
+            repair: Some(Repair::Remove(name("triage"))),
+        }]
+    );
+}
+
+#[test]
+fn a_creating_workspace_whose_checkouts_are_gone_is_named_once_as_unfinished() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut triage = workspace(dir.path(), "triage", '1', &["api"]);
+    triage.set_state(WorkspaceState::Creating);
+    fs::remove_dir_all(dir.path().join("triage")).unwrap();
+    let health = classify(&records(vec![triage], vec![]), &archives(vec![], vec![]));
+    assert_eq!(health.workspaces.len(), 1, "{health:?}");
+    assert_eq!(health.workspaces[0].problem, Problem::CreateUnfinished);
 }
 
 #[test]

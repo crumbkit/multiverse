@@ -48,12 +48,12 @@ mod tests;
 pub use check::{Check, CheckRow, CheckState};
 pub use hosts::{Resolution, Resolver, SystemResolver, line_for, missing};
 use routes::declared;
-pub use routes::{DOMAIN, Declared, Derived, Route, Shadowed, ShadowedHost, derive};
+pub use routes::{DOMAIN, Declared, Derived, ProxyProblem, Route, Shadowed, ShadowedHost, derive};
 
 /// Returns the routes that the proxy serves for the workspaces of `store`,
-/// and a sentence for each record or manifest that is left out, or for the
+/// and a problem for each record or manifest that is left out, or for the
 /// store that cannot be read, in which case there are no routes.
-pub(crate) fn served(store: &Store) -> (Vec<Route>, Vec<String>) {
+pub(crate) fn served(store: &Store) -> (Vec<Route>, Vec<ProxyProblem>) {
     match declared(store) {
         Ok((found, mut problems)) => {
             let derived = derive(found);
@@ -62,7 +62,9 @@ pub(crate) fn served(store: &Store) -> (Vec<Route>, Vec<String>) {
         }
         Err(error) => (
             Vec::new(),
-            vec![format!("the workspace records cannot be read: {error}")],
+            vec![ProxyProblem::RecordsUnreadable {
+                error: error.to_string(),
+            }],
         ),
     }
 }
@@ -370,22 +372,21 @@ pub struct Synced {
     /// The extra host names that are not served, because another workspace
     /// lists them first.
     pub shadowed_hosts: Vec<ShadowedHost>,
-    /// A sentence for each record or manifest that is left out of the
-    /// routes, and for each workspace name that makes no host label.
-    pub problems: Vec<String>,
+    /// Each record or manifest that is left out of the routes, and each
+    /// workspace name that makes no host label.
+    pub problems: Vec<ProxyProblem>,
 }
 
 impl Synced {
-    /// Returns the sentences of [`Synced::problems`] about `workspace`: its
+    /// Returns the problems of [`Synced::problems`] about `workspace`: its
     /// manifest that is left out, or its name that makes no host label. A
     /// record that cannot be read names no workspace, so `mxv proxy status`
     /// lists it and this does not.
     #[must_use]
-    pub fn problems_of(&self, workspace: &WorkspaceName) -> Vec<String> {
+    pub fn problems_of(&self, workspace: &WorkspaceName) -> Vec<&ProxyProblem> {
         self.problems
             .iter()
-            .filter(|problem| routes::is_about(problem, workspace))
-            .cloned()
+            .filter(|problem| problem.workspace() == Some(workspace))
             .collect()
     }
 
@@ -631,13 +632,7 @@ impl Proxy {
         let mut routes = derive(found);
         routes.problems.extend(problems);
         let running = self.answering();
-        let version = self
-            .program()
-            .ok()
-            .and_then(|(path, _)| match process::version(&path) {
-                process::Version::Found(version) => Some(version),
-                process::Version::Unusable(_) => None,
-            });
+        let version = self.program().ok().map(|(_, version)| version.to_string());
         let certificate = self.settings.root_certificate();
         let authority = certificate.exists().then(|| Authority {
             trusted: process::trusted(&certificate),
@@ -689,6 +684,7 @@ impl Proxy {
     /// Returns [`ProxyError::CaddyMissing`] or [`ProxyError::CaddyTooOld`].
     pub fn caddy(&self) -> Result<(PathBuf, String), ProxyError> {
         self.program()
+            .map(|(path, version)| (path, version.to_string()))
     }
 
     /// Reports whether Caddy answers on the admin socket.
@@ -724,7 +720,7 @@ impl Proxy {
     }
 
     /// Returns the Caddy program and its version, or why there is none.
-    fn program(&self) -> Result<(PathBuf, String), ProxyError> {
+    fn program(&self) -> Result<(PathBuf, process::CaddyVersion), ProxyError> {
         let path = match &self.settings.caddy {
             Some(path) => path.clone(),
             None => {
@@ -742,11 +738,10 @@ impl Proxy {
                 config: self.settings.config.clone(),
             }),
             process::Version::Found(found) => {
-                let old = process::major_minor(&found).is_some_and(|have| have < process::OLDEST);
-                if old {
+                if found.major_minor() < process::OLDEST {
                     Err(ProxyError::CaddyTooOld {
                         path,
-                        found,
+                        found: found.to_string(),
                         config: self.settings.config.clone(),
                     })
                 } else {

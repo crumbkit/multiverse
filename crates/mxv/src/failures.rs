@@ -37,188 +37,192 @@ pub(crate) fn rendered(failure: &dyn Failure) -> String {
 }
 
 /// The code of a name that no workspace has.
-pub const WORKSPACE_NOT_FOUND: Code = Code::new("mxv", "workspace", "not_found");
+pub const WORKSPACE_NOT_FOUND: Code = Code::from_spelling("mxv::workspace::not_found");
 /// The code of a new workspace whose name another workspace has.
-pub const WORKSPACE_EXISTS: Code = Code::new("mxv", "workspace", "exists");
+pub const WORKSPACE_EXISTS: Code = Code::from_spelling("mxv::workspace::exists");
 /// The code of a name that breaks the naming rules.
-pub const WORKSPACE_BAD_NAME: Code = Code::new("mxv", "workspace", "bad_name");
+pub const WORKSPACE_BAD_NAME: Code = Code::from_spelling("mxv::workspace::bad_name");
 /// The code of a removal that a checkout's uncommitted or untracked changes
 /// stop.
-pub const WORKSPACE_DIRTY: Code = Code::new("mxv", "workspace", "dirty");
+pub const WORKSPACE_DIRTY: Code = Code::from_spelling("mxv::workspace::dirty");
 /// The code of a removal that ignored files outside the disposable set,
 /// such as `.env`, stop.
-pub const WORKSPACE_IGNORED_FILES: Code = Code::new("mxv", "workspace", "ignored_files");
+pub const WORKSPACE_IGNORED_FILES: Code = Code::from_spelling("mxv::workspace::ignored_files");
 /// The code of a removal that stopped without removing anything, because
 /// the workspace changed while mxv waited for the confirmation, so the
 /// removal would lose more than mxv showed.
-pub const WORKSPACE_CHANGED: Code = Code::new("mxv", "workspace", "changed");
+pub const WORKSPACE_CHANGED: Code = Code::from_spelling("mxv::workspace::changed");
 /// The code of a removal that commits on no branch, such as commits on a
 /// detached `HEAD`, stop.
-pub const CHECKOUT_UNREACHABLE_COMMITS: Code = Code::new("mxv", "checkout", "unreachable_commits");
+pub const CHECKOUT_UNREACHABLE_COMMITS: Code =
+    Code::from_spelling("mxv::checkout::unreachable_commits");
 /// The code of a removal that a clone's commits stop, because no remote
 /// branch of its `origin` holds them.
-pub const CHECKOUT_UNPUSHED_COMMITS: Code = Code::new("mxv", "checkout", "unpushed_commits");
+pub const CHECKOUT_UNPUSHED_COMMITS: Code = Code::from_spelling("mxv::checkout::unpushed_commits");
 /// The code of a removal that a clone's stash entries stop.
-pub const CHECKOUT_STASHES: Code = Code::new("mxv", "checkout", "stashes");
+pub const CHECKOUT_STASHES: Code = Code::from_spelling("mxv::checkout::stashes");
 /// The code of a template of workspace manifests that mxv cannot use, such
 /// as one without a valid `[template]` table.
-pub const TEMPLATE_INVALID: Code = Code::new("mxv", "template", "invalid");
+pub const TEMPLATE_INVALID: Code = Code::from_spelling("mxv::template::invalid");
 /// The code of a `--manifest` file that a repository or an agent could
 /// have written, so mxv does not copy it as a workspace manifest.
-pub const MANIFEST_UNTRUSTED: Code = Code::new("mxv", "manifest", "untrusted");
+pub const MANIFEST_UNTRUSTED: Code = Code::from_spelling("mxv::manifest::untrusted");
 /// The code of a repository whose origin more than one template lists.
-pub const TEMPLATE_AMBIGUOUS: Code = Code::new("mxv", "template", "ambiguous");
+pub const TEMPLATE_AMBIGUOUS: Code = Code::from_spelling("mxv::template::ambiguous");
 /// The code of a mirror whose lock another mxv command holds for longer
 /// than mxv waits, such as a `mxv new` that still fetches it.
-pub const MIRROR_LOCKED: Code = Code::new("mxv", "mirror", "locked");
+pub const MIRROR_LOCKED: Code = Code::from_spelling("mxv::mirror::locked");
 /// The code of a mirror that mxv cannot fetch from its origin.
-pub const MIRROR_FETCH_FAILED: Code = Code::new("mxv", "mirror", "fetch_failed");
+pub const MIRROR_FETCH_FAILED: Code = Code::from_spelling("mxv::mirror::fetch_failed");
 /// The code of a fetch from an SSH origin whose host accepted none of the
 /// keys that ssh offered, such as when the key has a passphrase and no
 /// ssh-agent holds it.
-pub const SSH_AUTHENTICATION_FAILED: Code = Code::new("mxv", "ssh", "authentication_failed");
+pub const SSH_AUTHENTICATION_FAILED: Code = Code::from_spelling("mxv::ssh::authentication_failed");
 /// The code of a fetch from an SSH origin whose host key the known hosts
 /// file does not hold.
-pub const SSH_HOST_KEY_UNVERIFIED: Code = Code::new("mxv", "ssh", "host_key_unverified");
+pub const SSH_HOST_KEY_UNVERIFIED: Code = Code::from_spelling("mxv::ssh::host_key_unverified");
 /// The code of a fetch from an SSH origin whose host showed a key that
 /// differs from the one in the known hosts file.
-pub const SSH_HOST_KEY_CHANGED: Code = Code::new("mxv", "ssh", "host_key_changed");
+pub const SSH_HOST_KEY_CHANGED: Code = Code::from_spelling("mxv::ssh::host_key_changed");
 /// The code of a removal that a checkout locked for a reason other than
 /// `initializing` stops.
-pub const CHECKOUT_LOCKED: Code = Code::new("mxv", "checkout", "locked");
+pub const CHECKOUT_LOCKED: Code = Code::from_spelling("mxv::checkout::locked");
 /// The code of a path that mxv cannot inspect, such as one below a
 /// directory it cannot search.
-pub const PATH_INACCESSIBLE: Code = Code::new("mxv", "path", "inaccessible");
+pub const PATH_INACCESSIBLE: Code = Code::from_spelling("mxv::path::inaccessible");
 /// The code of a new workspace whose directory already exists.
-pub const DIRECTORY_TAKEN: Code = Code::new("mxv", "directory", "taken");
+pub const DIRECTORY_TAKEN: Code = Code::from_spelling("mxv::directory::taken");
 /// The code of a checkout directory that its repository does not list.
-pub const CHECKOUT_UNOWNED: Code = Code::new("mxv", "checkout", "unowned");
+pub const CHECKOUT_UNOWNED: Code = Code::from_spelling("mxv::checkout::unowned");
 /// The code of a new workspace whose branch already exists.
-pub const BRANCH_EXISTS: Code = Code::new("mxv", "branch", "exists");
+pub const BRANCH_EXISTS: Code = Code::from_spelling("mxv::branch::exists");
 /// The code of a checkout whose folder another checkout of the workspace
 /// has, compared without case, or that names a file mxv writes in the
 /// workspace's directory.
-pub const CHECKOUT_NAME_TAKEN: Code = Code::new("mxv", "checkout", "name_taken");
+pub const CHECKOUT_NAME_TAKEN: Code = Code::from_spelling("mxv::checkout::name_taken");
 /// The code of an `--as` folder name that breaks the naming rules.
-pub const CHECKOUT_INVALID_NAME: Code = Code::new("mxv", "checkout", "invalid_name");
+pub const CHECKOUT_INVALID_NAME: Code = Code::from_spelling("mxv::checkout::invalid_name");
 /// The code of a checkout folder that the workspace does not have.
-pub const CHECKOUT_NOT_FOUND: Code = Code::new("mxv", "checkout", "not_found");
+pub const CHECKOUT_NOT_FOUND: Code = Code::from_spelling("mxv::checkout::not_found");
 /// The code of `mxv add` on a workspace of git worktrees, which mxv made
 /// before clones.
-pub const WORKSPACE_WORKTREE_KIND: Code = Code::new("mxv", "workspace", "worktree_kind");
+pub const WORKSPACE_WORKTREE_KIND: Code = Code::from_spelling("mxv::workspace::worktree_kind");
 /// The code of `mxv add` without `--manifest` on a workspace with one
 /// checkout and a workspace manifest, whose paths are relative to that
 /// checkout and would name other places once the workspace has two
 /// checkouts.
-pub const MANIFEST_NEEDED: Code = Code::new("mxv", "manifest", "needed");
+pub const MANIFEST_NEEDED: Code = Code::from_spelling("mxv::manifest::needed");
 /// The code of `mxv add` while an earlier `mxv add` to the workspace left
 /// another checkout unfinished.
-pub const CHECKOUT_INCOMPLETE: Code = Code::new("mxv", "checkout", "incomplete");
+pub const CHECKOUT_INCOMPLETE: Code = Code::from_spelling("mxv::checkout::incomplete");
 /// The code of `mxv add` that resumes an unfinished checkout whose
 /// directory holds something that mxv does not delete.
-pub const CHECKOUT_RESUME_BLOCKED: Code = Code::new("mxv", "checkout", "resume_blocked");
+pub const CHECKOUT_RESUME_BLOCKED: Code = Code::from_spelling("mxv::checkout::resume_blocked");
 /// The code of a `--repo` that is not a git repository.
-pub const REPOSITORY_NOT_FOUND: Code = Code::new("mxv", "repository", "not_found");
+pub const REPOSITORY_NOT_FOUND: Code = Code::from_spelling("mxv::repository::not_found");
 /// The code of a repository without a remote named `origin`.
-pub const REPOSITORY_NO_ORIGIN: Code = Code::new("mxv", "repository", "no_origin");
+pub const REPOSITORY_NO_ORIGIN: Code = Code::from_spelling("mxv::repository::no_origin");
 /// The code of a repository whose `origin` has no commits yet.
-pub const REPOSITORY_EMPTY_ORIGIN: Code = Code::new("mxv", "repository", "empty_origin");
+pub const REPOSITORY_EMPTY_ORIGIN: Code = Code::from_spelling("mxv::repository::empty_origin");
 /// The code of a repository that knows no default branch of `origin`.
-pub const REPOSITORY_NO_DEFAULT_BRANCH: Code = Code::new("mxv", "repository", "no_default_branch");
+pub const REPOSITORY_NO_DEFAULT_BRANCH: Code =
+    Code::from_spelling("mxv::repository::no_default_branch");
 /// The code of a `git` program that cannot start.
-pub const GIT_NOT_FOUND: Code = Code::new("mxv", "git", "not_found");
+pub const GIT_NOT_FOUND: Code = Code::from_spelling("mxv::git::not_found");
 /// The code of a git command that failed.
-pub const GIT_FAILED: Code = Code::new("mxv", "git", "failed");
+pub const GIT_FAILED: Code = Code::from_spelling("mxv::git::failed");
 /// The code of a git command that missed its deadline.
-pub const GIT_TIMED_OUT: Code = Code::new("mxv", "git", "timed_out");
+pub const GIT_TIMED_OUT: Code = Code::from_spelling("mxv::git::timed_out");
 /// The code of a workspace record or record directory that cannot be read.
-pub const RECORD_UNREADABLE: Code = Code::new("mxv", "record", "unreadable");
+pub const RECORD_UNREADABLE: Code = Code::from_spelling("mxv::record::unreadable");
 /// The code of a workspace record that is not a record.
-pub const RECORD_CORRUPT: Code = Code::new("mxv", "record", "corrupt");
+pub const RECORD_CORRUPT: Code = Code::from_spelling("mxv::record::corrupt");
 /// The code of a workspace record that a newer mxv wrote.
-pub const RECORD_NEWER: Code = Code::new("mxv", "record", "newer");
+pub const RECORD_NEWER: Code = Code::from_spelling("mxv::record::newer");
 /// The code of a workspace record that holds another name than its file.
-pub const RECORD_MISMATCHED: Code = Code::new("mxv", "record", "mismatched");
+pub const RECORD_MISMATCHED: Code = Code::from_spelling("mxv::record::mismatched");
 /// The code of a file or directory that cannot be written or removed.
-pub const FILE_UNWRITABLE: Code = Code::new("mxv", "file", "unwritable");
+pub const FILE_UNWRITABLE: Code = Code::from_spelling("mxv::file::unwritable");
 /// The code of an app's process that cannot start, such as when its `cwd`
 /// does not exist.
-pub const PROCESS_UNSTARTABLE: Code = Code::new("mxv", "process", "unstartable");
+pub const PROCESS_UNSTARTABLE: Code = Code::from_spelling("mxv::process::unstartable");
 /// The code of a process table that `ps` cannot read.
-pub const PROCESS_TABLE_UNREADABLE: Code = Code::new("mxv", "process", "table_unreadable");
+pub const PROCESS_TABLE_UNREADABLE: Code = Code::from_spelling("mxv::process::table_unreadable");
 /// The code of an operating system whose process-table structs differ
 /// from the ones mxv reads.
-pub const PROCESS_UNSUPPORTED_OS: Code = Code::new("mxv", "process", "unsupported_os");
+pub const PROCESS_UNSUPPORTED_OS: Code = Code::from_spelling("mxv::process::unsupported_os");
 /// The code of a port range whose every port is held by a workspace or taken.
-pub const PORT_EXHAUSTED: Code = Code::new("mxv", "port", "exhausted");
+pub const PORT_EXHAUSTED: Code = Code::from_spelling("mxv::port::exhausted");
 /// The code of a workspace whose lock another mxv command holds, such as an
 /// `mxv up` that still waits for a unit to be ready.
-pub const WORKSPACE_BUSY: Code = Code::new("mxv", "workspace", "busy");
+pub const WORKSPACE_BUSY: Code = Code::from_spelling("mxv::workspace::busy");
 /// The code of a workspace that `mxv new` did not finish, for a command
 /// that needs a finished one.
-pub const WORKSPACE_CREATING: Code = Code::new("mxv", "workspace", "creating");
+pub const WORKSPACE_CREATING: Code = Code::from_spelling("mxv::workspace::creating");
 /// The code of a write that found the workspace's record in another state
 /// than the one the command read.
-pub const WORKSPACE_STATE_CHANGED: Code = Code::new("mxv", "workspace", "state_changed");
+pub const WORKSPACE_STATE_CHANGED: Code = Code::from_spelling("mxv::workspace::state_changed");
 /// The code of a move between two workspace states that no workspace
 /// makes, which is a defect of mxv.
-pub const WORKSPACE_TRANSITION_REFUSED: Code = Code::new("mxv", "workspace", "transition_refused");
+pub const WORKSPACE_TRANSITION_REFUSED: Code =
+    Code::from_spelling("mxv::workspace::transition_refused");
 /// The code of a record write that the store refused because a checkout is
 /// not made the way the workspace's kind says, which is a defect of mxv.
 pub const WORKSPACE_MISMATCHED_CHECKOUT: Code =
-    Code::new("mxv", "workspace", "mismatched_checkout");
+    Code::from_spelling("mxv::workspace::mismatched_checkout");
 /// The code of a method that acts on one workspace and was given the lock of
 /// another, which is a defect of mxv.
-pub const WORKSPACE_WRONG_LOCK: Code = Code::new("mxv", "workspace", "wrong_lock");
+pub const WORKSPACE_WRONG_LOCK: Code = Code::from_spelling("mxv::workspace::wrong_lock");
 /// The code of a workspace without a stable id beside an archive record of
 /// its name that an older mxv did not finish, or that cannot be read, so
 /// mxv cannot name its containers.
-pub const WORKSPACE_ARCHIVE_UNFINISHED: Code = Code::new("mxv", "workspace", "archive_unfinished");
+pub const WORKSPACE_ARCHIVE_UNFINISHED: Code =
+    Code::from_spelling("mxv::workspace::archive_unfinished");
 /// The code of an older archive for which `mxv repair` finds every dated
 /// name taken.
-pub const REPAIR_NAMES_TAKEN: Code = Code::new("mxv", "repair", "names_taken");
+pub const REPAIR_NAMES_TAKEN: Code = Code::from_spelling("mxv::repair::names_taken");
 /// The code of a repair whose records changed between the question and
 /// the repair.
-pub const REPAIR_CHANGED: Code = Code::new("mxv", "repair", "changed");
+pub const REPAIR_CHANGED: Code = Code::from_spelling("mxv::repair::changed");
 /// The code of a restore whose records changed between the question that
 /// offered to delete a left-over archive and the deletion.
-pub const RESTORE_CHANGED: Code = Code::new("mxv", "restore", "changed");
+pub const RESTORE_CHANGED: Code = Code::from_spelling("mxv::restore::changed");
 /// The code of a manifest that declares containers on a machine without a
 /// `docker` program on `PATH`.
-pub const DOCKER_NOT_FOUND: Code = Code::new("mxv", "docker", "not_found");
+pub const DOCKER_NOT_FOUND: Code = Code::from_spelling("mxv::docker::not_found");
 /// The code of a docker without its `compose` plugin, which mxv needs to
 /// start containers.
-pub const DOCKER_COMPOSE_MISSING: Code = Code::new("mxv", "docker", "compose_missing");
+pub const DOCKER_COMPOSE_MISSING: Code = Code::from_spelling("mxv::docker::compose_missing");
 /// The code of a docker daemon with no free address pool for a network,
 /// such as one that holds hundreds of networks.
 pub const DOCKER_ADDRESS_POOLS_EXHAUSTED: Code =
-    Code::new("mxv", "docker", "address_pools_exhausted");
+    Code::from_spelling("mxv::docker::address_pools_exhausted");
 /// The code of a docker daemon that does not answer.
-pub const DOCKER_UNAVAILABLE: Code = Code::new("mxv", "docker", "unavailable");
+pub const DOCKER_UNAVAILABLE: Code = Code::from_spelling("mxv::docker::unavailable");
 /// The code of a docker command that failed or missed its deadline, such as
 /// a `docker compose up` whose image cannot be pulled.
-pub const DOCKER_FAILED: Code = Code::new("mxv", "docker", "failed");
+pub const DOCKER_FAILED: Code = Code::from_spelling("mxv::docker::failed");
 /// The code of a docker container or volume that has a name of mxv's and
 /// lacks the labels of this state directory and workspace, which mxv
 /// leaves alone.
-pub const DOCKER_FOREIGN_OBJECT: Code = Code::new("mxv", "docker", "foreign_object");
+pub const DOCKER_FOREIGN_OBJECT: Code = Code::from_spelling("mxv::docker::foreign_object");
 /// The code of a failure that phase, which runs a workspace's apps,
 /// reports and mxv has no code of its own for. The `phase_code` field
 /// holds phase's code.
-pub const PHASE_FAILED: Code = Code::new("mxv", "phase", "failed");
+pub const PHASE_FAILED: Code = Code::from_spelling("mxv::phase::failed");
 /// The code of an environment in which mxv finds no home directory, so it
 /// has no directory for the records, the config file or the default root.
-pub const ENVIRONMENT_NO_DIRECTORY: Code = Code::new("mxv", "environment", "no_directory");
+pub const ENVIRONMENT_NO_DIRECTORY: Code = Code::from_spelling("mxv::environment::no_directory");
 /// The code of an `MXV_ROOT` that is a relative path.
-pub const ENVIRONMENT_RELATIVE_ROOT: Code = Code::new("mxv", "environment", "relative_root");
+pub const ENVIRONMENT_RELATIVE_ROOT: Code = Code::from_spelling("mxv::environment::relative_root");
 /// The code of a config file that mxv cannot parse or that sets something
 /// it does not accept.
-pub const CONFIG_INVALID: Code = Code::new("mxv", "config", "invalid");
+pub const CONFIG_INVALID: Code = Code::from_spelling("mxv::config::invalid");
 /// The code of a config file that is there but cannot be read.
-pub const CONFIG_UNREADABLE: Code = Code::new("mxv", "config", "unreadable");
+pub const CONFIG_UNREADABLE: Code = Code::from_spelling("mxv::config::unreadable");
 /// The code of `mxv clean --over-limit` when the config file sets no
 /// `max_disposable`.
-pub const CONFIG_NO_LIMIT: Code = Code::new("mxv", "config", "no_limit");
+pub const CONFIG_NO_LIMIT: Code = Code::from_spelling("mxv::config::no_limit");
 
 /// A failure of a workspace verb.
 #[derive(Debug)]

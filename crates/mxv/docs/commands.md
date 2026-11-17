@@ -52,7 +52,7 @@ Each --repo adds one clone, in the folder \<ROOT\>/\<NAME\>/\<FOLDER\>, where th
 
 The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it is set, or else the `root` that the config file $XDG\_CONFIG\_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG\_DATA\_HOME/mxv/workspaces, which is \~/.local/share/mxv/workspaces when XDG\_DATA\_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
 
-New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock. A dry run takes no lock.
+New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock, or with mxv::workspace::creating when an earlier mxv new left that workspace unfinished. A dry run takes no lock.
 
 ### Arguments
 
@@ -175,7 +175,7 @@ mxv list
 - `ignored`: The number of ignored files and links, such as `.env`, that the archive keeps in its private tar, or null in a row of a workspace that is not archived.
 - `ignored_bytes`: The bytes that the ignored files and links in the archive's private tar take, or null in a row of a workspace that is not archived.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
-- `problem`: What is wrong with the workspace or its archive, or empty when nothing is: a record that mxv cannot read, such as one that is not JSON or that a newer mxv wrote, an archive that stopped before it finished, one that stopped and whose pins are gone, an older archive beside a newer workspace of the same name, which only the archive listing shows, a restore that stopped before it deleted the archive, a restore that stopped before it finished the workspace, a workspace whose checkout directories are all gone, or a size that mxv cannot measure. A row of a record that mxv cannot read names the record in `name`, a workspace record without `.json` and an archive record by its directory, and leaves the other fields empty.
+- `problem`: What is wrong with the workspace or its archive, or empty when nothing is: a record that mxv cannot read, such as one that is not JSON or that a newer mxv wrote, an archive that stopped before it finished, one that stopped and whose pins are gone, an older archive beside a newer workspace of the same name, which only the archive listing shows, a restore that stopped before it deleted the archive, a restore that stopped before it finished the workspace, a workspace whose checkout directories are all gone, a workspace that mxv new did not finish, or a size that mxv cannot measure. A row of a record that mxv cannot read names the record in `name`, a workspace record without `.json` and an archive record by its directory, and leaves the other fields empty.
 - `repair`: The command that repairs the problem, such as `mxv archive -w old-api` or `mxv repair old-api`, what the person does by hand when no command can, or empty when no repair is known.
 
 ### Columns that `--long` adds
@@ -1058,6 +1058,7 @@ List the figures of each command in mxv's usage log
 - `--since <DURATION>`: How far back to read the usage log, such as 12h, 7d or 2w. Default: `7d`.
 - `--log <FILE>`: Read this usage log instead of the tool's own
 - `--exclude-program <NAME>`: Leave out the runs that a program with this name marked, such as flightdeck. Takes more than one value.
+- `--context <LABEL>`: Keep only the runs that reported this context, such as project. Takes more than one value.
 - `--limit <N>`: Print at most this many rows. Default: `25`.
 - `--all`: Print every row
 
@@ -1108,6 +1109,7 @@ List each run in mxv's usage log, grouped by session
 - `--since <DURATION>`: How far back to read the usage log, such as 12h, 7d or 2w. Default: `7d`.
 - `--log <FILE>`: Read this usage log instead of the tool's own
 - `--exclude-program <NAME>`: Leave out the runs that a program with this name marked, such as flightdeck. Takes more than one value.
+- `--context <LABEL>`: Keep only the runs that reported this context, such as project. Takes more than one value.
 - `--limit <N>`: Print at most this many rows. Default: `25`.
 - `--all`: Print every row
 
@@ -1139,6 +1141,8 @@ mxv self runs list
 - `trace`: The id of the W3C trace that the run belongs to, as 32 lowercase hex digits.
 - `run`: The run's own span id, as 16 lowercase hex digits, which its child runs name as their parent.
 - `parent`: The span id of the run's caller, as 16 lowercase hex digits, or null when the run started a new trace.
+- `lock_ms`: The milliseconds that the run spent waiting to take locks, or 0 when the tool reported none.
+- `context`: The label of the place where the run took place, or null when the tool reported none.
 
 Effects: read-only, closed-world.
 
@@ -1148,13 +1152,13 @@ Give coding agents mxv's skill
 
 ### Commands
 
-- [`mxv skills install`](#mxv-skills-install): Install this tool's skills into each agent skills directory that exists
-- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of this tool's skills matches this build
-- [`mxv skills print`](#mxv-skills-print): Print this tool's skill
+- [`mxv skills install`](#mxv-skills-install): Install mxv's skills into each agent skills directory that exists
+- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of mxv's skills matches this mxv
+- [`mxv skills print`](#mxv-skills-print): Print mxv's skill
 
 ## `mxv skills install`
 
-Install this tool's skills into each agent skills directory that exists
+Install mxv's skills into each agent skills directory that exists
 
 ### Arguments
 
@@ -1163,13 +1167,13 @@ Install this tool's skills into each agent skills directory that exists
 
 ### Examples
 
-Install the skills into each agent skills directory that exists.
+Install mxv's skills into each agent skills directory that exists.
 
 ```sh
 mxv skills install
 ```
 
-Install them, replacing a file or a link that install did not write.
+Install mxv's skills, replacing a file or a link that install did not write.
 
 ```sh
 mxv skills install --force
@@ -1190,7 +1194,7 @@ Effects: additive, idempotent, closed-world.
 
 ## `mxv skills check`
 
-Check that each installed copy of this tool's skills matches this build
+Check that each installed copy of mxv's skills matches this mxv
 
 ### Arguments
 
@@ -1198,7 +1202,7 @@ Check that each installed copy of this tool's skills matches this build
 
 ### Examples
 
-Report each agent skills directory whose copy is missing or differs.
+Report each agent skills directory where mxv's skills are missing or differ.
 
 ```sh
 mxv skills check
@@ -1219,11 +1223,11 @@ Effects: read-only, closed-world.
 
 ## `mxv skills print`
 
-Print this tool's skill
+Print mxv's skill
 
 ### Examples
 
-Print the skill.
+Print mxv's skill.
 
 ```sh
 mxv skills print

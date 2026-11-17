@@ -30,6 +30,9 @@ workspace may need to act on.
   The check marks `caddy runs` failed when Caddy holds other routes than the
   records give, and every row and recovery that tells a person to edit the
   config file names the file mxv reads, including under `XDG_CONFIG_HOME`.
+  mxv refuses a Caddy whose version has no numeric major and minor, such as a
+  development build that prints `devel`, with `mxv::proxy::caddy_missing`,
+  and the check marks the `caddy` row `missing`.
   `mxv proxy check` reads what the proxy needs, prints a row for each and
   exits with `mxv::proxy::check_failed` when one is missing or failed. The
   library gains `Proxy::check`, `Proxy::ensure_running`, `Proxy::caddy`,
@@ -45,6 +48,25 @@ workspace may need to act on.
 
 ### Changed
 
+- mxv builds on crumbkit 0.6.0 and deadband 0.4.0, which read and print
+  durations with jiff in place of humantime, so RUSTSEC-2026-0542 no longer
+  applies to mxv. `mxv self usage --since` now reads `3mo` and `1y` as
+  calendar months and years, and refuses a capital `M`, `0`, a fraction such
+  as `1.5d` and a negative age such as `-1h`. `mxv self runs list` and
+  `mxv self figures list` take `--context`, and `mxv self runs list --long`
+  adds the `lock_ms` and `context` columns. The `mxv skills` commands name
+  mxv in their help and examples. A command line that names a group without
+  its subcommand, such as `mxv skills`, prints the group's help and exits 0.
+  The help of a listing that shows only problem rows by default says it also
+  shows warning rows. The failure object in every JSON document schema gains
+  the optional `sentence` and `causes` members and the recovery step kinds
+  `program` and `after`; it drops nothing. deadband 0.4.0 asks its daemon for
+  beats, so when a deadband 0.4 daemon queues an mxv build and then sends no
+  line for 16 seconds, mxv stops waiting and starts the build; before, it
+  waited with no deadline.
+- `mxv list` names a workspace that a killed `mxv new` left in the `creating`
+  state, with the repair `mxv remove NAME`, and `mxv new` of that name fails
+  with `mxv::workspace::creating` instead of `mxv::workspace::exists`.
 - `mxv restore` writes a mark into the archive's record, in the optional
   field `restoring`, before each step that creates something. When a restore
   dies, the next `mxv restore` of the name deletes what the mark lists and
@@ -415,6 +437,17 @@ workspace may need to act on.
   without a commit on the branch.
 
 ### Fixed
+
+- An `mxv` command that is killed while it starts a process no longer leaves
+  a keeper and an app that the run record does not name. The engine records
+  the keeper before it tells the keeper to start the app, and a keeper that
+  never hears that the engine recorded it starts nothing. An `up` whose keeper
+  misses its handshake deadline now stops the app that the keeper had started,
+  and reports `AppOutcome::StartUncertain` when it cannot stop it, with the
+  app named in the record so that `down` finds it. While an old and a new
+  `mxv` binary run side by side during an upgrade, one start can fail,
+  because a keeper and an engine of different versions do not speak the same
+  protocol; the next `up` starts the process.
 
 - A command that waited for a workspace's lock while another command
   archived the workspace no longer writes the workspace's record back.
