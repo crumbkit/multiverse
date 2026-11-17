@@ -20,6 +20,8 @@ on:
       - "crates/mxv/src/proxy.rs"
       - "crates/mxv/src/proxy/**"
       - "crates/mxv/tests/proxy.rs"
+      - "crates/mxv/tests/support/listen.rs"
+      - "crates/mxv/examples/listen.rs"
       - ".github/workflows/proxy.yml"
   push:
     branches: [main]
@@ -71,6 +73,10 @@ jobs:
           mkdir "$RUNNER_TEMP/caddy"
           tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/caddy" caddy
           echo "MXV_CADDY_BIN=$RUNNER_TEMP/caddy/caddy" >> "$GITHUB_ENV"
+      # The tests run the `listen` example as a workspace's unit, and a run
+      # with `--test` builds only that test's target.
+      - name: listen example
+        run: cargo build --locked -p mxv --example listen
       - name: proxy tests
         env:
           MXV_CADDY_TESTS: "1"

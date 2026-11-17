@@ -10,6 +10,8 @@
 
 #[path = "support/grants.rs"]
 mod grants;
+#[path = "support/listen.rs"]
+mod listen;
 #[path = "support/git.rs"]
 mod support;
 #[path = "support/ports.rs"]
@@ -24,6 +26,7 @@ use serde_json::Value;
 use snapbox::cmd::Command;
 use tempfile::TempDir;
 
+use crate::listen::listen;
 use crate::support::{GIT_ENV, PATH, repository};
 use crate::test_ports::PortBlock;
 
@@ -207,19 +210,22 @@ impl Drop for Setup {
 }
 
 /// Returns a manifest whose `web` unit serves HTTP on the port `web` and
-/// whose route `web` points at it, and whose unit `api` listens on the port
-/// `api`, which has no route.
+/// whose route `web` points at it, and which declares the port `api`, which
+/// has no route. The unit is the `listen` example, which answers every
+/// request with the body `hello-from-web`.
 fn site() -> String {
-    r#"ports = ["web", "api"]
+    format!(
+        r#"ports = ["web", "api"]
 routes = ["web"]
 
 [processes.web]
-argv = ["sh", "-c", "mkdir -p /tmp/mxv-proxy-site-$PORT && echo hello-from-web > /tmp/mxv-proxy-site-$PORT/index.html && cd /tmp/mxv-proxy-site-$PORT && exec python3 -m http.server --bind 127.0.0.1 $PORT"]
-ports = { PORT = "web" }
+argv = ["{listen}", "hello-from-web"]
+ports = {{ PORT = "web" }}
 listen = "web"
-ready = { timeout_seconds = 20 }
-"#
-    .to_owned()
+ready = {{ timeout_seconds = 20 }}
+"#,
+        listen = listen()
+    )
 }
 
 /// Returns a manifest with a route and no unit that listens on its port.

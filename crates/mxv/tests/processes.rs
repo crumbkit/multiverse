@@ -12,6 +12,8 @@
 mod grants;
 #[path = "support/held_lock.rs"]
 mod held_lock;
+#[path = "support/listen.rs"]
+mod listen;
 #[path = "support/git.rs"]
 mod support;
 #[path = "support/ports.rs"]
@@ -28,6 +30,7 @@ use serde_json::Value;
 use snapbox::cmd::Command;
 use tempfile::TempDir;
 
+use crate::listen::listen;
 use crate::support::{GIT_ENV, PATH, repository};
 use crate::test_ports::PortBlock;
 
@@ -56,18 +59,6 @@ fn write(path: &Path, text: &str) {
         reason = "the test writes a file that a person would write in a checkout"
     )]
     fs::write(path, text).unwrap();
-}
-
-/// Returns the path of the `listen` example that cargo built beside the
-/// `mxv` binary.
-fn listen() -> String {
-    let mxv = Path::new(env!("CARGO_BIN_EXE_mxv"));
-    let mut path = mxv.parent().unwrap().join("examples").join("listen");
-    if !path.exists() {
-        path = mxv.parent().unwrap().join("examples").join("listen.exe");
-    }
-    assert!(path.exists(), "cargo did not build {}", path.display());
-    path.display().to_string()
 }
 
 /// Reports whether the process `pid` exists, by asking `kill -0` to
