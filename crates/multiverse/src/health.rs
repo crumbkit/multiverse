@@ -18,7 +18,7 @@ use crate::archive::{Archive, ArchiveRecords, ArchiveState};
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::name::WorkspaceName;
-use crate::record::Workspace;
+use crate::record::{Workspace, WorkspaceState};
 use crate::store::Records;
 
 mod orphans;
@@ -101,6 +101,12 @@ pub enum Problem {
     /// The workspace has checkouts, and every checkout's directory is gone,
     /// while the directory that holds the workspace's directory is there.
     CheckoutsGone,
+    /// The workspace record is [`WorkspaceState::Creating`], which `mxv new`
+    /// leaves when it stops before it finishes the checkouts. The record
+    /// comes before any directory, so removing the workspace deletes what
+    /// is left. A creating workspace whose checkouts are all gone is named
+    /// with this problem.
+    CreateUnfinished,
 }
 
 /// What brings a [`Broken`] record back. The enum is exhaustive, so a
@@ -165,8 +171,10 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
         }
     }
     // A workspace whose archive has not finished is the archive's to
-    // repair, even when the archive already deleted every checkout.
-    let gone: Vec<Broken> = records
+    // repair, even when the archive already deleted every checkout. Each
+    // other workspace is named when `mxv new` did not finish it or every
+    // checkout is gone.
+    let own: Vec<Broken> = records
         .workspaces
         .iter()
         .filter(|workspace| {
@@ -174,14 +182,22 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
                 .iter()
                 .any(|broken| broken.name == workspace.name.as_str())
         })
-        .filter(|workspace| checkouts_gone(workspace))
-        .map(|workspace| Broken {
-            name: workspace.name.to_string(),
-            problem: Problem::CheckoutsGone,
-            repair: Some(Repair::Remove(workspace.name.clone())),
+        .filter_map(|workspace| {
+            let problem = if workspace.state() == WorkspaceState::Creating {
+                Problem::CreateUnfinished
+            } else if checkouts_gone(workspace) {
+                Problem::CheckoutsGone
+            } else {
+                return None;
+            };
+            Some(Broken {
+                name: workspace.name.to_string(),
+                repair: Some(repair_of(&problem, &workspace.name)),
+                problem,
+            })
         })
         .collect();
-    named.extend(gone);
+    named.extend(own);
     named.sort_by(|left, right| left.name.cmp(&right.name));
     health.workspaces.extend(named);
     health
@@ -383,7 +399,7 @@ pub fn rebuilt(archive: &Archive, workspace: &Workspace) -> Rebuilt {
 fn repair_of(problem: &Problem, name: &WorkspaceName) -> Repair {
     match problem {
         Problem::ArchiveUnfinished => Repair::Archive(name.clone()),
-        Problem::CheckoutsGone => Repair::Remove(name.clone()),
+        Problem::CheckoutsGone | Problem::CreateUnfinished => Repair::Remove(name.clone()),
         Problem::Unreadable { .. }
         | Problem::ArchiveWorkspaceRemoved
         | Problem::ArchivePinsGone

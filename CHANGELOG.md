@@ -48,6 +48,10 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv list` names a workspace that a killed `mxv new` left in the `creating`
+  state, with the repair `mxv remove NAME`, and `mxv new` of that name fails
+  with `mxv::workspace::creating` instead of `mxv::workspace::exists`.
+
 - `mxv up` and every other verb that reads the manifest refuse `ready = { log = "" }`
   with `mxv::manifest::invalid` and the line of the `log` key. Before, phase
   refused the empty pattern only when it checked the plan, with no line.

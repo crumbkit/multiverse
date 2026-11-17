@@ -341,6 +341,7 @@ fn listed(found: &[Broken], name: &WorkspaceName, old: &str) -> String {
         Problem::RenameUnfinished => "rename unfinished",
         Problem::RestoreUnfinished => "restore unfinished",
         Problem::CheckoutsGone => "checkouts gone",
+        Problem::CreateUnfinished => "create unfinished",
     };
     format!("{problem}, {}", repair_text(broken.repair.as_ref(), old))
 }

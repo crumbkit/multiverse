@@ -52,7 +52,7 @@ Each --repo adds one clone, in the folder \<ROOT\>/\<NAME\>/\<FOLDER\>, where th
 
 The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it is set, or else the `root` that the config file $XDG\_CONFIG\_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG\_DATA\_HOME/mxv/workspaces, which is \~/.local/share/mxv/workspaces when XDG\_DATA\_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
 
-New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock. A dry run takes no lock.
+New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock, or with mxv::workspace::creating when an earlier mxv new left that workspace unfinished. A dry run takes no lock.
 
 ### Arguments
 
@@ -175,7 +175,7 @@ mxv list
 - `ignored`: The number of ignored files and links, such as `.env`, that the archive keeps in its private tar, or null in a row of a workspace that is not archived.
 - `ignored_bytes`: The bytes that the ignored files and links in the archive's private tar take, or null in a row of a workspace that is not archived.
 - `ports`: The host port that the workspace holds for each named port of its manifest, which the first `mxv up` allocates.
-- `problem`: What is wrong with the workspace or its archive, or empty when nothing is: a record that mxv cannot read, such as one that is not JSON or that a newer mxv wrote, an archive that stopped before it finished, one that stopped and whose pins are gone, an older archive beside a newer workspace of the same name, which only the archive listing shows, a restore that stopped before it deleted the archive, a workspace whose checkout directories are all gone, or a size that mxv cannot measure. A row of a record that mxv cannot read names the record in `name`, a workspace record without `.json` and an archive record by its directory, and leaves the other fields empty.
+- `problem`: What is wrong with the workspace or its archive, or empty when nothing is: a record that mxv cannot read, such as one that is not JSON or that a newer mxv wrote, an archive that stopped before it finished, one that stopped and whose pins are gone, an older archive beside a newer workspace of the same name, which only the archive listing shows, a restore that stopped before it deleted the archive, a workspace whose checkout directories are all gone, a workspace that mxv new did not finish, or a size that mxv cannot measure. A row of a record that mxv cannot read names the record in `name`, a workspace record without `.json` and an archive record by its directory, and leaves the other fields empty.
 - `repair`: The command that repairs the problem, such as `mxv archive -w old-api` or `mxv repair old-api`, what the person does by hand when no command can, or empty when no repair is known.
 
 ### Columns that `--long` adds
