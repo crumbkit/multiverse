@@ -175,7 +175,7 @@ impl ProbeCheck {
 /// A regular expression that a log probe matches against each new line.
 /// A line matches when the expression matches any part of it.
 #[derive(Clone, Debug)]
-pub(crate) struct LogPattern(Regex);
+pub struct LogPattern(Regex);
 
 impl LogPattern {
     /// Compiles `pattern`.
@@ -185,7 +185,7 @@ impl LogPattern {
     /// Returns [`BadLogPattern::Empty`] when `pattern` is empty, and
     /// [`BadLogPattern::Invalid`] with the compiler's one-line reason when
     /// it is not a regular expression.
-    pub(crate) fn new(pattern: &str) -> Result<Self, BadLogPattern> {
+    pub fn new(pattern: &str) -> Result<Self, BadLogPattern> {
         if pattern.is_empty() {
             return Err(BadLogPattern::Empty);
         }
@@ -195,12 +195,14 @@ impl LogPattern {
     }
 
     /// Returns the pattern as the plan writes it.
-    pub(crate) fn as_str(&self) -> &str {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
 
     /// Reports whether `line` matches the pattern.
-    pub(crate) fn is_match(&self, line: &str) -> bool {
+    #[must_use]
+    pub fn is_match(&self, line: &str) -> bool {
         self.0.is_match(line)
     }
 }
@@ -215,7 +217,7 @@ impl Eq for LogPattern {}
 
 /// The reason a log probe's pattern cannot be used.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum BadLogPattern {
+pub enum BadLogPattern {
     /// The pattern is empty, so every line would match it.
     Empty,
     /// The pattern is not a regular expression, for the reason given.

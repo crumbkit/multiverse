@@ -914,7 +914,6 @@ dependencies = [
  "libc",
  "mxv-phase",
  "reflink-copy",
- "regex",
  "rustix",
  "serde",
  "serde_json",

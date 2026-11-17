@@ -937,6 +937,20 @@ fn an_unknown_key_in_the_manifest_fails_with_the_key_and_its_line() {
 }
 
 #[test]
+fn an_empty_log_pattern_fails_up_as_an_invalid_manifest_with_the_line_of_the_key() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "ports = []\n\n[processes.a]\nargv = [\"true\"]\nready = { log = \"\" }\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::manifest::invalid");
+    assert_eq!(document["fields"]["line"], 5);
+    assert!(!setup.started("a"), "{document}");
+}
+
+#[test]
 fn a_reserved_section_in_the_manifest_fails_with_the_reserved_code() {
     let setup = Setup::new();
     setup.workspace("triage", "[secrets.db]\nsource = \"file\"\n");
