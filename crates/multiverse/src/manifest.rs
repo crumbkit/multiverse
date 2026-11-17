@@ -82,7 +82,8 @@ use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
-use regex::Regex;
+use phase::BadLogPattern;
+pub use phase::LogPattern;
 use serde::Deserialize;
 use serde::de::IgnoredAny;
 use toml::Spanned;
@@ -446,33 +447,6 @@ pub enum ReadyCheck {
     /// worker that reads a queue, uses it.
     Log(LogPattern),
 }
-
-/// A regular expression that a readiness check matches against each new
-/// log line.
-#[derive(Clone, Debug)]
-pub struct LogPattern(Regex);
-
-impl LogPattern {
-    /// Returns the pattern as the manifest writes it.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
-    }
-
-    /// Reports whether `line` matches the pattern.
-    #[must_use]
-    pub fn is_match(&self, line: &str) -> bool {
-        self.0.is_match(line)
-    }
-}
-
-impl PartialEq for LogPattern {
-    fn eq(&self, other: &Self) -> bool {
-        self.as_str() == other.as_str()
-    }
-}
-
-impl Eq for LogPattern {}
 
 /// The value of an `env` variable, which may name host ports as
 /// `{port.<name>}` and writes a literal brace as `{{` or `}}`. Its
@@ -2645,16 +2619,18 @@ fn check_ready(
                     ));
                 }
                 (None, Some(log)) => {
-                    let pattern = Regex::new(log.get_ref()).map_err(|error| {
-                        errors.invalid(
-                            &log.span(),
-                            format!(
-                                "the `log` pattern of `{process}` is not a regular expression: {}",
-                                regex_problem(&error)
+                    let pattern = LogPattern::new(log.get_ref()).map_err(|bad| {
+                        let message = match &bad {
+                            BadLogPattern::Empty => {
+                                format!("the `log` pattern of `{process}` is empty")
+                            }
+                            BadLogPattern::Invalid(problem) => format!(
+                                "the `log` pattern of `{process}` is not a regular expression: {problem}"
                             ),
-                        )
+                        };
+                        errors.invalid(&log.span(), message)
                     })?;
-                    ReadyCheck::Log(LogPattern(pattern))
+                    ReadyCheck::Log(pattern)
                 }
                 (Some(port), None) => {
                     let port_name = declared(port)?;
@@ -2684,19 +2660,6 @@ fn check_ready(
             timeout: DEFAULT_READY_TIMEOUT,
         }),
     })
-}
-
-/// Returns what is wrong with a pattern that `error` rejected, on one
-/// line. A syntax error prints the pattern with a caret under the problem
-/// and then a line `error: <problem>`, and only that problem is kept.
-fn regex_problem(error: &regex::Error) -> String {
-    let text = error.to_string();
-    text.lines()
-        .find_map(|line| line.trim().strip_prefix("error: "))
-        .map_or_else(
-            || text.split_whitespace().collect::<Vec<_>>().join(" "),
-            str::to_owned,
-        )
 }
 
 /// Checks that `variable` is a valid environment variable name.

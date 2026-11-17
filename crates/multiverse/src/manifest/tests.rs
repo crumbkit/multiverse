@@ -829,6 +829,16 @@ fn a_log_pattern_that_is_not_a_regular_expression_fails_with_its_line() {
 }
 
 #[test]
+fn an_empty_log_pattern_fails_with_its_line_and_names_the_process() {
+    let (line, problem) = problem("[processes.a]\nargv = [\"true\"]\nready = { log = \"\" }\n");
+    assert_eq!(line, Some(3));
+    assert!(
+        matches!(&problem, ManifestProblem::Invalid { message } if message.contains("`a`") && message.contains("is empty")),
+        "{problem:?}"
+    );
+}
+
+#[test]
 fn the_env_values_of_processes_and_containers_print_as_redacted_and_render_for_the_environment() {
     let manifest = parse(
         "ports = [\"api\"]\n[processes.a]\nargv = [\"true\"]\nenv = { TOKEN = \"s3cret-{port.api}\" }\n[containers.db]\nimage = \"busybox:1.37.0\"\nenv = { PASSWORD = \"hunter2-secret\" }\n",
