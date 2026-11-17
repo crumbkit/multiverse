@@ -19,7 +19,7 @@ use multiverse::{
     ARCHIVE_MAX_FILE, Archive, ArchiveDeleted, ArchiveOptions, ArchivePlan, ArchivePlanned,
     ArchiveRecords, ArchiveState, Archived, ArchivedCheckout, Archives, DisposablePath, FinishDone,
     Finished, Git, IgnoredEntry, IgnoredKind, KEPT_NAMESPACE, Lifecycle, Mode, PutBack,
-    RestoreOutcome, RestorePlanned, Uncommitted, Volumes, VolumesAsked, Workspace, WorkspaceName,
+    Restoration, RestorePlanned, Uncommitted, Volumes, VolumesAsked, Workspace, WorkspaceName,
     Workspaces,
 };
 use schemars::JsonSchema;
@@ -1566,20 +1566,41 @@ pub(crate) fn restore(
             plan.archive.path.display()
         ),
     )?;
-    // The lock comes after the question, so a prompt holds up nobody, and
-    // the library reads the archive again under it.
-    let lock = processes::lock(environment, &name)?;
+    // The library takes the lock after the question, so a prompt holds up
+    // nobody, plans the restore again under it and holds it to the last
+    // write.
     let archive = plan.archive.clone();
     let missing_mirrors = plan.missing_mirrors.clone();
-    let restored = match workspaces
-        .restore(&records, plan, &runs)
+    let restored = match Lifecycle::new(&workspaces, &records, &runs)
+        .restore(&plan)
         .map_err(MxvFailure::from)?
     {
-        RestoreOutcome::Restored(restored) => *restored,
-        RestoreOutcome::Refused(refusal) => {
+        Restoration::Done(restored) => *restored,
+        // Another run restored the workspace after the question, so the
+        // result is the one of a restore that finds nothing to do.
+        Restoration::Unchanged => {
+            return restored_already(
+                output,
+                environment,
+                &workspaces,
+                &records,
+                &name,
+                args,
+                None,
+            );
+        }
+        Restoration::Changed => {
+            return Err(MxvFailure::RestoreChanged {
+                name: name.to_string(),
+            }
+            .into());
+        }
+        Restoration::Refused(refusal) => {
             return Err(restore_refusal(&name, refusal, || finisher(environment, &name)).into());
         }
     };
+    // The sync runs after the library released the lock, which is harmless
+    // because it reads every record again under the proxy's own lock.
     if let Some(workspace) = store.read(&name).map_err(MxvFailure::from)? {
         crate::proxy::sync(
             environment,
@@ -1589,7 +1610,6 @@ pub(crate) fn restore(
             served,
         );
     }
-    drop(lock);
     let lost_pins = restored.lost_pins.clone();
     // A restore from origin may start a checkout at another commit than
     // the archived one.

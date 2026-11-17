@@ -882,7 +882,10 @@ container has no such file, and `mxv logs` reads its log from Docker.
 on `$XDG_STATE_HOME/mxv/locks/<name>.lock` while they start or stop the
 workspace's processes. `mxv remove` holds it from before it stops the units
 until after it deletes the last docker volume, `mxv archive` holds it from
-its second plan, after the question, until its last write, and `mxv new` holds it from
+its second plan, after the question, until its last write, `mxv restore`
+holds it from its second plan, after the question, until it deletes the
+archive, `mxv repair NAME` holds the lock of each name that it changes from
+its second plan until its last write, and `mxv new` holds it from
 before it writes the record until it has copied the ignored directories, so
 a second command of the same name fails with `mxv::workspace::busy` after
 the lock wait instead of deleting or changing what the first one makes. No
@@ -1817,7 +1820,7 @@ A restore refuses, and builds nothing, with these codes:
 | --- | --- |
 | `mxv::restore::not_found` | No archive and no workspace has the name. |
 | `mxv::restore::name_taken` | A workspace of another stable id holds the name, a workspace of the archive's stable id has lost its directory or a checkout's directory, or something exists at the recorded path. |
-| `mxv::restore::changed` | The records of the name changed after mxv asked to delete the archive that an earlier restore left, so mxv deleted nothing. `mxv restore NAME --dry-run` shows the records as they now stand. |
+| `mxv::restore::changed` | The records of the name changed after mxv asked to restore the archive or to delete the archive that an earlier restore left, so mxv built and deleted nothing. `mxv restore NAME --dry-run` shows the records as they now stand. |
 | `mxv::restore::branch_moved` | A worktree's branch points at another commit than the archive pinned. |
 | `mxv::restore::commit_missing` | No repository that mxv can read holds the pinned commit. |
 | `mxv::restore::unfinished` | The archive stopped partway, and `mxv archive -w NAME` finishes it. |

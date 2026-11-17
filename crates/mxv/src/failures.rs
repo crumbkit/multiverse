@@ -291,8 +291,10 @@ pub(crate) enum MxvFailure {
         name: String,
     },
     /// The records of the name changed between the question of `mxv
-    /// restore`, which offered to delete the archive that an earlier
-    /// restore left, and the deletion, so mxv deleted nothing.
+    /// restore` and the act: another archive of the name replaced the one
+    /// that the restore asked about, so mxv built nothing, or the archive
+    /// that an earlier restore left changed before its deletion, so mxv
+    /// deleted nothing.
     RestoreChanged {
         /// The name.
         name: String,
@@ -1387,7 +1389,7 @@ impl fmt::Display for MxvFailure {
             ),
             Self::RestoreChanged { name } => write!(
                 formatter,
-                "the records of {name} changed after mxv asked, so mxv deleted nothing"
+                "the records of {name} changed after mxv asked, so mxv changed nothing"
             ),
             Self::Locked {
                 name, path, reason, ..
