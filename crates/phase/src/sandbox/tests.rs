@@ -2442,8 +2442,14 @@ mod landlock {
             return;
         }
         let fixture = Fixture::new();
-        std::fs::create_dir_all(fixture.outside()).unwrap();
-        let socket = fixture.outside().join("agent.sock");
+        // The socket lives in the system temporary directory, outside every
+        // path the sandbox grants, because a path under the fixture, which
+        // sits beside the test binary, can pass the 108-byte socket limit.
+        let agent_dir = tempfile::Builder::new()
+            .prefix("phase-agent-")
+            .tempdir()
+            .unwrap();
+        let socket = agent_dir.path().join("agent.sock");
         let _agent = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let script = format!(
             "if perl -MIO::Socket::UNIX -e 'IO::Socket::UNIX->new(Peer => shift) or exit 1' '{}'; then echo unix-socket=allowed; else echo unix-socket=denied; fi",
