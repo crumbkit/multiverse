@@ -45,6 +45,11 @@ workspace may need to act on.
 
 ### Changed
 
+- A Caddy whose version has no numeric major and minor, such as a
+  development build that prints `devel`, is now refused with
+  `mxv::proxy::caddy_missing`, and `mxv proxy check` marks the `caddy` row
+  `missing`. It used to pass the 2.8 minimum. Set the `caddy` config key to a
+  release build.
 - `mxv repair NAME` deletes an archive that a restore already rebuilt only
   when it is the archive the person confirmed. When another archive of the
   name needs that repair by the time the lock is held, the repair reports

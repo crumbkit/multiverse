@@ -2,6 +2,7 @@
 //! on every sync. Nothing remembers a route between two syncs.
 
 use std::collections::BTreeMap;
+use std::fmt;
 use std::net::SocketAddr;
 
 use crate::error::Error;
@@ -133,32 +134,72 @@ pub struct Derived {
     /// The extra host names of served routes that the proxy does not
     /// serve.
     pub shadowed_hosts: Vec<ShadowedHost>,
-    /// A sentence for each record or manifest that mxv could not read and
-    /// each workspace name that makes no host label.
-    pub problems: Vec<String>,
+    /// Each record or manifest that mxv could not read and each workspace
+    /// name that makes no host label.
+    pub problems: Vec<ProxyProblem>,
 }
 
-/// How a problem about the manifest of a workspace begins.
-const MANIFEST_PROBLEM_START: &str = "the manifest of ";
+/// A record, manifest or workspace name that the proxy leaves out of its
+/// routes. `Display` writes the sentence that a person reads.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ProxyProblem {
+    /// The manifest of `workspace` cannot be read.
+    ManifestLeftOut {
+        /// The workspace whose manifest is left out.
+        workspace: WorkspaceName,
+        /// Why the manifest cannot be read.
+        error: String,
+    },
+    /// The name of `workspace` makes a host label that is too long.
+    LabelTooLong {
+        /// The workspace whose name is too long.
+        workspace: WorkspaceName,
+        /// The length of the label in bytes.
+        bytes: usize,
+    },
+    /// A workspace record cannot be read, so its workspace is unknown.
+    RecordLeftOut {
+        /// Why the record cannot be read.
+        error: String,
+    },
+    /// The directory of workspace records cannot be listed.
+    RecordsUnreadable {
+        /// Why the directory cannot be listed.
+        error: String,
+    },
+}
 
-/// How a problem about the host label of a workspace begins.
-const LABEL_PROBLEM_START: &str = "the workspace ";
+impl ProxyProblem {
+    /// Returns the workspace this problem is about, or `None` when it
+    /// names none.
+    #[must_use]
+    pub fn workspace(&self) -> Option<&WorkspaceName> {
+        match self {
+            Self::ManifestLeftOut { workspace, .. } | Self::LabelTooLong { workspace, .. } => {
+                Some(workspace)
+            }
+            Self::RecordLeftOut { .. } | Self::RecordsUnreadable { .. } => None,
+        }
+    }
+}
 
-/// Reports whether `problem`, a sentence of [`derive`] or [`declared`],
-/// is about the workspace `name`.
-pub(super) fn is_about(problem: &str, name: &WorkspaceName) -> bool {
-    problem
-        .strip_prefix(MANIFEST_PROBLEM_START)
-        .is_some_and(|rest| {
-            rest.strip_prefix(name.as_str())
-                .is_some_and(|rest| rest.starts_with(" is left out"))
-        })
-        || problem
-            .strip_prefix(LABEL_PROBLEM_START)
-            .is_some_and(|rest| {
-                rest.strip_prefix(name.as_str())
-                    .is_some_and(|rest| rest.starts_with(" makes a host label"))
-            })
+impl fmt::Display for ProxyProblem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ManifestLeftOut { workspace, error } => {
+                write!(f, "the manifest of {workspace} is left out: {error}")
+            }
+            Self::LabelTooLong { workspace, bytes } => write!(
+                f,
+                "the workspace {workspace} makes a host label of {bytes} bytes, and a label holds at most {MOST_LABEL_BYTES}"
+            ),
+            Self::RecordLeftOut { error } => write!(f, "a workspace record is left out: {error}"),
+            Self::RecordsUnreadable { error } => {
+                write!(f, "the workspace records cannot be read: {error}")
+            }
+        }
+    }
 }
 
 /// Derives the routes of `declared`. A route whose port the ledger lacks is
@@ -175,11 +216,10 @@ pub fn derive(mut declared: Vec<Declared>) -> Derived {
         let label = host_label(item.workspace.as_str());
         if label.len() > MOST_LABEL_BYTES {
             if !item.routes.is_empty() {
-                derived.problems.push(format!(
-                    "{LABEL_PROBLEM_START}{} makes a host label of {} bytes, and a label holds at most {MOST_LABEL_BYTES}",
-                    item.workspace,
-                    label.len()
-                ));
+                derived.problems.push(ProxyProblem::LabelTooLong {
+                    workspace: item.workspace.clone(),
+                    bytes: label.len(),
+                });
             }
             continue;
         }
@@ -236,12 +276,14 @@ pub fn derive(mut declared: Vec<Declared>) -> Derived {
 /// # Errors
 ///
 /// Returns the error of listing the store's directory.
-pub(super) fn declared(store: &Store) -> Result<(Vec<Declared>, Vec<String>), Error> {
+pub(super) fn declared(store: &Store) -> Result<(Vec<Declared>, Vec<ProxyProblem>), Error> {
     let records = store.list()?;
-    let mut problems: Vec<String> = records
+    let mut problems: Vec<ProxyProblem> = records
         .problems
         .iter()
-        .map(|error| format!("a workspace record is left out: {error}"))
+        .map(|error| ProxyProblem::RecordLeftOut {
+            error: error.to_string(),
+        })
         .collect();
     let mut found = Vec::new();
     for workspace in records.workspaces {
@@ -268,10 +310,10 @@ pub(super) fn declared(store: &Store) -> Result<(Vec<Declared>, Vec<String>), Er
                 ));
             }
             Ok(_) => {}
-            Err(error) => problems.push(format!(
-                "{MANIFEST_PROBLEM_START}{} is left out: {error}",
-                workspace.name
-            )),
+            Err(error) => problems.push(ProxyProblem::ManifestLeftOut {
+                workspace: workspace.name.clone(),
+                error: error.to_string(),
+            }),
         }
     }
     Ok((found, problems))

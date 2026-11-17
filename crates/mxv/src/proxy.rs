@@ -647,7 +647,12 @@ fn summary(status: &ProxyStatus) -> ProxySummary {
                 None => AuthorityState::Unknown,
             }),
         routes: status.routes.served.len(),
-        problems: status.routes.problems.clone(),
+        problems: status
+            .routes
+            .problems
+            .iter()
+            .map(ToString::to_string)
+            .collect(),
     }
 }
 
