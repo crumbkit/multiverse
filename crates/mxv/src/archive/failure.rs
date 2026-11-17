@@ -10,62 +10,63 @@ use multiverse::{
 };
 
 /// The code of a name that no workspace or archive has.
-pub const ARCHIVE_NOT_FOUND: Code = Code::new("mxv", "archive", "not_found");
+pub const ARCHIVE_NOT_FOUND: Code = Code::from_spelling("mxv::archive::not_found");
 /// The code of an archive whose name another archive holds.
-pub const ARCHIVE_NAME_TAKEN: Code = Code::new("mxv", "archive", "name_taken");
+pub const ARCHIVE_NAME_TAKEN: Code = Code::from_spelling("mxv::archive::name_taken");
 /// The code of a checkout that differs from what the archive admitted.
-pub const ARCHIVE_SOURCE_CHANGED: Code = Code::new("mxv", "archive", "source_changed");
+pub const ARCHIVE_SOURCE_CHANGED: Code = Code::from_spelling("mxv::archive::source_changed");
 /// The code of a clone whose mirror is gone, so nothing could hold its pin.
-pub const ARCHIVE_MIRROR_MISSING: Code = Code::new("mxv", "archive", "mirror_missing");
+pub const ARCHIVE_MIRROR_MISSING: Code = Code::from_spelling("mxv::archive::mirror_missing");
 /// The code of a workspace with work that an archive cannot keep.
-pub const ARCHIVE_UNKEEPABLE: Code = Code::new("mxv", "archive", "unkeepable");
+pub const ARCHIVE_UNKEEPABLE: Code = Code::from_spelling("mxv::archive::unkeepable");
 /// The code of a workspace that a process outside phase works in.
-pub const ARCHIVE_IN_USE: Code = Code::new("mxv", "archive", "in_use");
+pub const ARCHIVE_IN_USE: Code = Code::from_spelling("mxv::archive::in_use");
 /// The code of a checkout that an archive cannot read.
-pub const ARCHIVE_CHECKOUT_UNUSABLE: Code = Code::new("mxv", "archive", "checkout_unusable");
+pub const ARCHIVE_CHECKOUT_UNUSABLE: Code = Code::from_spelling("mxv::archive::checkout_unusable");
 /// The code of an archive that has not finished, for a command that needs
 /// a finished one.
-pub const ARCHIVE_UNFINISHED: Code = Code::new("mxv", "archive", "unfinished");
+pub const ARCHIVE_UNFINISHED: Code = Code::from_spelling("mxv::archive::unfinished");
 /// The code of an archive that has not finished and whose pins are gone,
 /// so it cannot be finished.
-pub const ARCHIVE_PINS_GONE: Code = Code::new("mxv", "archive", "pins_gone");
+pub const ARCHIVE_PINS_GONE: Code = Code::from_spelling("mxv::archive::pins_gone");
 /// The code of an archive that stopped before it retired every checkout and
 /// whose workspace was removed, so it cannot be finished.
-pub const ARCHIVE_WORKSPACE_REMOVED: Code = Code::new("mxv", "archive", "workspace_removed");
+pub const ARCHIVE_WORKSPACE_REMOVED: Code = Code::from_spelling("mxv::archive::workspace_removed");
 /// The code of an archive whose move to a dated name a repair started and
 /// did not finish.
-pub const ARCHIVE_RENAME_UNFINISHED: Code = Code::new("mxv", "archive", "rename_unfinished");
+pub const ARCHIVE_RENAME_UNFINISHED: Code = Code::from_spelling("mxv::archive::rename_unfinished");
 /// The code of `--yes` with paths that only a repository's own `mxv.toml`
 /// declares disposable.
-pub const ARCHIVE_MANIFEST_DISPOSABLE: Code = Code::new("mxv", "archive", "manifest_disposable");
+pub const ARCHIVE_MANIFEST_DISPOSABLE: Code =
+    Code::from_spelling("mxv::archive::manifest_disposable");
 /// The code of an archive whose record would be larger than a record may be.
-pub const ARCHIVE_RECORD_TOO_LARGE: Code = Code::new("mxv", "archive", "record_too_large");
+pub const ARCHIVE_RECORD_TOO_LARGE: Code = Code::from_spelling("mxv::archive::record_too_large");
 /// The code of `--delete-volumes` for volumes that a live workspace uses.
-pub const ARCHIVE_VOLUMES_IN_USE: Code = Code::new("mxv", "archive", "volumes_in_use");
+pub const ARCHIVE_VOLUMES_IN_USE: Code = Code::from_spelling("mxv::archive::volumes_in_use");
 /// The code of an archive or workspace that another command replaced or
 /// changed after the question of `mxv remove --archived` or `mxv archive`.
-pub const ARCHIVE_CHANGED: Code = Code::new("mxv", "archive", "changed");
+pub const ARCHIVE_CHANGED: Code = Code::from_spelling("mxv::archive::changed");
 /// The code of a restore of a name that no archive has.
-pub const RESTORE_NOT_FOUND: Code = Code::new("mxv", "restore", "not_found");
+pub const RESTORE_NOT_FOUND: Code = Code::from_spelling("mxv::restore::not_found");
 /// The code of a restore whose name or directory something else holds.
-pub const RESTORE_NAME_TAKEN: Code = Code::new("mxv", "restore", "name_taken");
+pub const RESTORE_NAME_TAKEN: Code = Code::from_spelling("mxv::restore::name_taken");
 /// The code of a worktree's branch that moved after the archive.
-pub const RESTORE_BRANCH_MOVED: Code = Code::new("mxv", "restore", "branch_moved");
+pub const RESTORE_BRANCH_MOVED: Code = Code::from_spelling("mxv::restore::branch_moved");
 /// The code of an archived commit that nothing holds any more.
-pub const RESTORE_COMMIT_MISSING: Code = Code::new("mxv", "restore", "commit_missing");
+pub const RESTORE_COMMIT_MISSING: Code = Code::from_spelling("mxv::restore::commit_missing");
 /// The code of a restore of an archive that has not finished.
-pub const RESTORE_UNFINISHED: Code = Code::new("mxv", "restore", "unfinished");
+pub const RESTORE_UNFINISHED: Code = Code::from_spelling("mxv::restore::unfinished");
 /// The code of a file of an archive that differs from its digest.
-pub const RESTORE_ROOT_FILE_CHANGED: Code = Code::new("mxv", "restore", "root_file_changed");
+pub const RESTORE_ROOT_FILE_CHANGED: Code = Code::from_spelling("mxv::restore::root_file_changed");
 /// The code of an ignored file whose copy in the archive is missing or
 /// differs from its digest.
-pub const RESTORE_IGNORED_DAMAGED: Code = Code::new("mxv", "restore", "ignored_damaged");
+pub const RESTORE_IGNORED_DAMAGED: Code = Code::from_spelling("mxv::restore::ignored_damaged");
 /// The code of a restore of a clone whose mirror is gone, which only
 /// `--from-origin` rebuilds.
-pub const RESTORE_MIRROR_MISSING: Code = Code::new("mxv", "restore", "mirror_missing");
+pub const RESTORE_MIRROR_MISSING: Code = Code::from_spelling("mxv::restore::mirror_missing");
 /// The code of an ignored file whose path the rebuilt workspace already
 /// holds.
-pub const RESTORE_IGNORED_TAKEN: Code = Code::new("mxv", "restore", "ignored_taken");
+pub const RESTORE_IGNORED_TAKEN: Code = Code::from_spelling("mxv::restore::ignored_taken");
 
 /// How far the archive that holds a name got, which decides what a
 /// refusal of the name names as the way out.

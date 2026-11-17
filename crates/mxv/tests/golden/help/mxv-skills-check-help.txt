@@ -1,4 +1,4 @@
-Check that each installed copy of this tool's skills matches this build
+Check that each installed copy of mxv's skills matches this mxv
 
 Usage: mxv skills check [OPTIONS]
 
@@ -26,7 +26,7 @@ Options:
 
 Examples:
   mxv skills check
-          Report each agent skills directory whose copy is missing or differs
+          Report each agent skills directory where mxv's skills are missing or differ
 
 Columns:
   state   Whether the copy is the binary's: missing, differs, unreadable, linked or current.
@@ -38,4 +38,4 @@ Columns that --long adds:
   path  The SKILL.md file that was checked, at its real path.
 
 Effects: read-only, closed-world.
-Rows: the default text lists only the rows that report a problem, and --long, --fields or --json lists every row.
+Rows: the default text lists only the rows that report a problem or a warning, and --long, --fields or --json lists every row.

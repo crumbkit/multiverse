@@ -310,9 +310,9 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::read_only())
             .document(SELF_RUNS_LIST),
-        crumbkit_skills::install_leaf(&["skills", "install"]),
-        crumbkit_skills::check_leaf(&["skills", "check"]),
-        crumbkit_skills::print_leaf(&["skills", "print"]),
+        SkillsCommand::install_leaf(&["skills", "install"]),
+        SkillsCommand::check_leaf(&["skills", "check"]),
+        SkillsCommand::print_leaf(&["skills", "print"]),
         Leaf::new(&["completion", "install"])
             .examples(&[
                 Example::new(&["--shell", "fish"], "Install mxv's completion for fish"),
@@ -474,7 +474,7 @@ pub(crate) enum Verb {
     Skills {
         /// What to do with the skill.
         #[command(subcommand)]
-        command: crumbkit_skills::SkillsCommand,
+        command: SkillsCommand,
     },
     /// Set up mxv's completion in a shell.
     Completion {
@@ -561,6 +561,12 @@ pub(crate) enum FiguresCommand {
     /// List the figures of each command in mxv's usage log.
     List(SelfFigures),
 }
+
+crumbkit_skills::skills_command!(
+    /// The commands for mxv's agent skill.
+    pub(crate) SkillsCommand,
+    "mxv"
+);
 
 /// The commands for mxv's shell completion.
 #[derive(Debug, Subcommand)]

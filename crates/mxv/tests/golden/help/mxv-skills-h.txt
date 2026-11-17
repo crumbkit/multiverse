@@ -3,9 +3,9 @@ Give coding agents mxv's skill
 Usage: mxv skills [OPTIONS] <COMMAND>
 
 Commands:
-  install  Install this tool's skills into each agent skills directory that exists
-  check    Check that each installed copy of this tool's skills matches this build
-  print    Print this tool's skill
+  install  Install mxv's skills into each agent skills directory that exists
+  check    Check that each installed copy of mxv's skills matches this mxv
+  print    Print mxv's skill
 
 Options:
   -h, --help  Print help (see more with '--help')

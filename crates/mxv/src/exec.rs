@@ -33,12 +33,12 @@ use crate::run_failures::RunFailure;
 mod tests;
 
 /// The code of a command for a process or container that does not run.
-pub const PROCESS_NOT_RUNNING: Code = Code::new("mxv", "process", "not_running");
+pub const PROCESS_NOT_RUNNING: Code = Code::from_spelling("mxv::process::not_running");
 /// The code of a command that could not start in a process's context.
-pub const EXEC_UNSTARTABLE: Code = Code::new("mxv", "exec", "unstartable");
+pub const EXEC_UNSTARTABLE: Code = Code::from_spelling("mxv::exec::unstartable");
 /// The code of a command for a sandboxed process whose standard input,
 /// output or error is a terminal.
-pub const EXEC_SANDBOXED_TERMINAL: Code = Code::new("mxv", "exec", "sandboxed_terminal");
+pub const EXEC_SANDBOXED_TERMINAL: Code = Code::from_spelling("mxv::exec::sandboxed_terminal");
 
 /// Why `--json` and `--fields` are refused, which ends each refusal's
 /// message.

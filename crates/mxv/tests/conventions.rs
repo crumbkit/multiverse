@@ -1007,10 +1007,10 @@ impl Fixtures {
     /// Returns the suite of the `mxv` command.
     fn suite(&self) -> Suite<'_> {
         let examples = examples(&self.repositories.path);
-        let recoveries = Recoveries::new(examples, ALL_CODES)
+        let recoveries = Recoveries::lists(examples, ALL_CODES)
             .starts(&self.starts)
             .unprovoked(UNPROVOKED);
-        let twins = Twins::new(examples, ALL_CODES)
+        let twins = Twins::lists(examples, ALL_CODES)
             .pairs(&self.pairs)
             .unprovoked(UNPROVOKED);
         Suite::new(|| (Cli::command(), TOOL))

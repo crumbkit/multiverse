@@ -273,7 +273,7 @@ where
                 crumbkit::finish(output, crumbkit_usage::SELF_RUNS_LIST, result)
             }
         },
-        Verb::Skills { command } => crumbkit_skills::run(output, &[SKILL], &command),
+        Verb::Skills { command } => crumbkit_skills::run(output, &[SKILL], command),
         Verb::Completion { command } => match command {
             CompletionCommand::Install(args) => {
                 let result = crumbkit::completion::install(Cli::command, &args);

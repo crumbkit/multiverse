@@ -2183,6 +2183,7 @@ fn holder() -> deadband::protocol::Job {
         workspace: None,
         short: None,
         id: None,
+        beats: false,
     }
 }
 

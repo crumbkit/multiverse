@@ -1058,6 +1058,7 @@ List the figures of each command in mxv's usage log
 - `--since <DURATION>`: How far back to read the usage log, such as 12h, 7d or 2w. Default: `7d`.
 - `--log <FILE>`: Read this usage log instead of the tool's own
 - `--exclude-program <NAME>`: Leave out the runs that a program with this name marked, such as flightdeck. Takes more than one value.
+- `--context <LABEL>`: Keep only the runs that reported this context, such as project. Takes more than one value.
 - `--limit <N>`: Print at most this many rows. Default: `25`.
 - `--all`: Print every row
 
@@ -1108,6 +1109,7 @@ List each run in mxv's usage log, grouped by session
 - `--since <DURATION>`: How far back to read the usage log, such as 12h, 7d or 2w. Default: `7d`.
 - `--log <FILE>`: Read this usage log instead of the tool's own
 - `--exclude-program <NAME>`: Leave out the runs that a program with this name marked, such as flightdeck. Takes more than one value.
+- `--context <LABEL>`: Keep only the runs that reported this context, such as project. Takes more than one value.
 - `--limit <N>`: Print at most this many rows. Default: `25`.
 - `--all`: Print every row
 
@@ -1139,6 +1141,8 @@ mxv self runs list
 - `trace`: The id of the W3C trace that the run belongs to, as 32 lowercase hex digits.
 - `run`: The run's own span id, as 16 lowercase hex digits, which its child runs name as their parent.
 - `parent`: The span id of the run's caller, as 16 lowercase hex digits, or null when the run started a new trace.
+- `lock_ms`: The milliseconds that the run spent waiting to take locks, or 0 when the tool reported none.
+- `context`: The label of the place where the run took place, or null when the tool reported none.
 
 Effects: read-only, closed-world.
 
@@ -1148,13 +1152,13 @@ Give coding agents mxv's skill
 
 ### Commands
 
-- [`mxv skills install`](#mxv-skills-install): Install this tool's skills into each agent skills directory that exists
-- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of this tool's skills matches this build
-- [`mxv skills print`](#mxv-skills-print): Print this tool's skill
+- [`mxv skills install`](#mxv-skills-install): Install mxv's skills into each agent skills directory that exists
+- [`mxv skills check`](#mxv-skills-check): Check that each installed copy of mxv's skills matches this mxv
+- [`mxv skills print`](#mxv-skills-print): Print mxv's skill
 
 ## `mxv skills install`
 
-Install this tool's skills into each agent skills directory that exists
+Install mxv's skills into each agent skills directory that exists
 
 ### Arguments
 
@@ -1163,13 +1167,13 @@ Install this tool's skills into each agent skills directory that exists
 
 ### Examples
 
-Install the skills into each agent skills directory that exists.
+Install mxv's skills into each agent skills directory that exists.
 
 ```sh
 mxv skills install
 ```
 
-Install them, replacing a file or a link that install did not write.
+Install mxv's skills, replacing a file or a link that install did not write.
 
 ```sh
 mxv skills install --force
@@ -1190,7 +1194,7 @@ Effects: additive, idempotent, closed-world.
 
 ## `mxv skills check`
 
-Check that each installed copy of this tool's skills matches this build
+Check that each installed copy of mxv's skills matches this mxv
 
 ### Arguments
 
@@ -1198,7 +1202,7 @@ Check that each installed copy of this tool's skills matches this build
 
 ### Examples
 
-Report each agent skills directory whose copy is missing or differs.
+Report each agent skills directory where mxv's skills are missing or differ.
 
 ```sh
 mxv skills check
@@ -1219,11 +1223,11 @@ Effects: read-only, closed-world.
 
 ## `mxv skills print`
 
-Print this tool's skill
+Print mxv's skill
 
 ### Examples
 
-Print the skill.
+Print mxv's skill.
 
 ```sh
 mxv skills print
