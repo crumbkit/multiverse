@@ -320,9 +320,13 @@ build = ["cargo", "build", "--bin", "api"]
 Before the first build, mxv asks [deadband](https://github.com/crumbkit/deadband),
 the machine's limiter of heavy jobs, for one place, and prints deadband's line
 while it waits. All the builds of one command run in that place, one after
-another, in start order. The wait for a place has no deadline. Ctrl-C during
-the wait ends mxv and takes the job out of deadband's queue. When no daemon
-answers, the builds start at once with a default share of the machine's cores.
+another, in start order. While the daemon answers, the wait for a place has
+no deadline. A deadband 0.4 daemon sends a beat every 5 seconds to a queued
+request, and when 16 seconds pass with no line from it, mxv stops waiting and
+starts the builds. A daemon of an earlier deadband release sends no beats, and
+mxv waits on it with no deadline. Ctrl-C during the wait ends mxv and takes the
+job out of deadband's queue. When no daemon answers, the builds start at once
+with a default share of the machine's cores.
 
 Each selected process with a `build` is built, whether or not it runs, because
 phase decides which running units `up` replaces only once `up` runs. `up` and

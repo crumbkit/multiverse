@@ -60,7 +60,10 @@ workspace may need to act on.
   The help of a listing that shows only problem rows by default says it also
   shows warning rows. The failure object in every JSON document schema gains
   the optional `sentence` and `causes` members and the recovery step kinds
-  `program` and `after`; it drops nothing.
+  `program` and `after`; it drops nothing. deadband 0.4.0 asks its daemon for
+  beats, so when a deadband 0.4 daemon queues an mxv build and then sends no
+  line for 16 seconds, mxv stops waiting and starts the build; before, it
+  waited with no deadline.
 
 - `mxv list` names a workspace that a killed `mxv new` left in the `creating`
   state, with the repair `mxv remove NAME`, and `mxv new` of that name fails
