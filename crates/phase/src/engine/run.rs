@@ -1152,6 +1152,12 @@ impl Op<'_, '_> {
             }
             return Ok(Abandoned::None);
         };
+        // The record names the app before the stop begins, so that `down`
+        // and a sweep still find it when the stop does not finish.
+        self.journal.started(
+            &ObjectKey::Process(app.name.clone(), process.name.clone()),
+            Started::Host(abandoned.clone()),
+        )?;
         let target = Target {
             app: app.name.clone(),
             process: process.name.clone(),

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use std::process::{ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use rustix::process::Signal;
 
@@ -269,6 +269,9 @@ enum Heard {
     Done(io::Result<Option<Handshake>>, KeeperOutput),
 }
 
+/// How long to wait for the end of a keeper's output once the keeper is gone.
+const DRAIN: Duration = Duration::from_secs(2);
+
 /// The engine's step between handing the keeper its specification and
 /// telling it to start the app, which records the keeper in the run
 /// record.
@@ -385,9 +388,17 @@ pub(crate) fn spawn(launch: &Launch<'_>, before_go: BeforeGo<'_>) -> Result<Kept
             Err(_) => break None,
         }
     };
-    let abandoned = |error: PhaseError| Failed::Keeper {
-        error: Box::new(error),
-        abandoned: app.clone(),
+    // A keeper may write its `Spawned` line while the engine ends it, so
+    // the line is read again once the keeper is gone and its output has
+    // ended. The app does not hold the keeper's output open.
+    let abandoned = |error: PhaseError, mut app: Option<HostProcess>| {
+        while let Ok(Heard::Spawned(spawned)) = receiver.recv_timeout(DRAIN) {
+            app = Some(spawned);
+        }
+        Failed::Keeper {
+            error: Box::new(error),
+            abandoned: app,
+        }
     };
     match heard {
         Some((Ok(Some(Handshake::Started(started))), output)) if started.keeper_group == pid => {
@@ -400,10 +411,13 @@ pub(crate) fn spawn(launch: &Launch<'_>, before_go: BeforeGo<'_>) -> Result<Kept
         }
         Some((Ok(Some(Handshake::Started(started))), _)) => {
             end(&mut child, launch.spec);
-            Err(abandoned(keeper_failed(format!(
-                "the keeper {pid} reports the group {}, which is not its own",
-                started.keeper_group
-            ))))
+            Err(abandoned(
+                keeper_failed(format!(
+                    "the keeper {pid} reports the group {}, which is not its own",
+                    started.keeper_group
+                )),
+                app,
+            ))
         }
         Some((Ok(Some(Handshake::Unstartable(reason))), _)) => {
             kill(&mut child);
@@ -420,21 +434,26 @@ pub(crate) fn spawn(launch: &Launch<'_>, before_go: BeforeGo<'_>) -> Result<Kept
         }
         Some((Ok(Some(Handshake::Spawned(_)) | None), _)) => {
             let status = kill(&mut child);
-            Err(abandoned(keeper_failed(format!(
-                "the keeper ended without a handshake, with {status}"
-            ))))
+            Err(abandoned(
+                keeper_failed(format!(
+                    "the keeper ended without a handshake, with {status}"
+                )),
+                app,
+            ))
         }
         Some((Err(error), _)) => {
             end(&mut child, launch.spec);
-            Err(abandoned(keeper_failed(format!(
-                "the keeper's handshake cannot be read: {error}"
-            ))))
+            Err(abandoned(
+                keeper_failed(format!("the keeper's handshake cannot be read: {error}")),
+                app,
+            ))
         }
         None => {
             end(&mut child, launch.spec);
-            Err(abandoned(keeper_failed(
-                "the keeper gave no handshake before the deadline".to_owned(),
-            )))
+            Err(abandoned(
+                keeper_failed("the keeper gave no handshake before the deadline".to_owned()),
+                app,
+            ))
         }
     }
 }

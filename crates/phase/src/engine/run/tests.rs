@@ -2206,7 +2206,12 @@ fn up_reports_the_start_uncertain_when_it_cannot_stop_the_app_of_an_abandoned_ke
     assert_eq!(world.host.running(), 1);
     let record = world.record().unwrap();
     let (_, process) = record.host_pair(&name("api"), &name("server"));
-    assert_eq!(process.unwrap().state, EntryState::Stopping);
+    let process = process.unwrap();
+    assert_eq!(process.state, EntryState::Stopping);
+    assert!(
+        process.host.is_some(),
+        "the record names the app that the engine could not stop"
+    );
 }
 
 #[test]

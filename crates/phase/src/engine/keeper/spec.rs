@@ -242,9 +242,13 @@ pub(crate) const GO: &str = "go";
 pub(crate) fn read_spec(input: &mut impl BufRead) -> Result<KeeperSpec, String> {
     let mut bytes = Vec::new();
     input
-        .take(MOST_SPEC_BYTES + 1)
+        .take(MOST_SPEC_BYTES + 2)
         .read_until(b'\n', &mut bytes)
         .map_err(|error| format!("the specification cannot be read: {error}"))?;
+    // The newline that ends the line does not count toward the limit.
+    if bytes.last() == Some(&b'\n') {
+        bytes.pop();
+    }
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MOST_SPEC_BYTES {
         return Err(format!(
             "the specification holds more than {MOST_SPEC_BYTES} bytes"

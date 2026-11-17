@@ -27,6 +27,7 @@ use super::{
 use crate::cancel::Cancel;
 use crate::clock::{POLL_INTERVAL, now, pause};
 use crate::engine::host::{HostRunner as _, HostStop, HostStopped};
+use crate::engine::keeper::MOST_SPEC_BYTES;
 use crate::engine::restart::RunEnd;
 use crate::env::{AppliedEnvironment, EnvironmentError, EnvironmentSource};
 use crate::error::PhaseError;
@@ -1461,7 +1462,7 @@ fn a_handshake_deadline_after_the_spawned_line_names_the_app_so_the_engine_can_s
 }
 
 #[test]
-fn a_handshake_deadline_before_the_spawned_line_names_no_app() {
+fn a_spawned_line_that_the_keeper_writes_while_the_engine_ends_it_still_names_the_app() {
     let fixture = Fixture::of("slow-handshake");
     let spec = fixture.spec("echo $$; exec sleep 30", Restart::No, Stop::default());
 
@@ -1475,20 +1476,37 @@ fn a_handshake_deadline_before_the_spawned_line_names_no_app() {
         .err()
         .unwrap();
 
-    assert!(matches!(
-        failed,
-        Failed::Keeper {
-            abandoned: None,
-            ..
-        }
-    ));
-    // The keeper's own stop of the app covers what the line would have
-    // named.
+    let Failed::Keeper { abandoned, .. } = failed else {
+        panic!("the failure is not the keeper's");
+    };
+    let app = abandoned.expect("the line written during the grace names the app");
+    let _cleanup = Killed(vec![app.clone()]);
     eventually("the app's pid in its log", || {
         fixture.log_text().ends_with('\n')
     });
     let pid: u32 = fixture.log_text().trim().parse().unwrap();
+    assert_eq!(app.pid, pid);
     eventually("the end of the app", || !exists(pid));
+}
+
+#[test]
+fn a_specification_of_exactly_the_most_bytes_is_read_and_one_byte_more_is_refused() {
+    let fixture = Fixture::new();
+    let spec = fixture.spec("true", Restart::No, Stop::default());
+    let mut bytes = serde_json::to_vec(&spec).unwrap();
+    // Spaces after the document are valid JSON.
+    bytes.resize(usize::try_from(MOST_SPEC_BYTES).unwrap(), b' ');
+    bytes.push(b'\n');
+    bytes.extend_from_slice(b"go\n");
+
+    let mut input = bytes.as_slice();
+    assert!(read_spec(&mut input).is_ok());
+    assert_eq!(input, b"go\n");
+
+    let mut longer = bytes.clone();
+    longer.insert(usize::try_from(MOST_SPEC_BYTES).unwrap(), b' ');
+    let refused = read_spec(&mut longer.as_slice()).unwrap_err();
+    assert!(refused.contains("more than"), "{refused}");
 }
 
 #[test]
