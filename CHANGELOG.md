@@ -45,6 +45,11 @@ workspace may need to act on.
 
 ### Changed
 
+- `mxv up` and every other verb that reads the manifest refuse `ready = { log = "" }`
+  with `mxv::manifest::invalid` and the line of the `log` key. Before, phase
+  refused the empty pattern only when it checked the plan, with no line.
+  `multiverse::LogPattern` is now `phase::LogPattern`, and phase exports
+  `LogPattern` and `BadLogPattern`. The `multiverse` crate no longer depends on `regex`.
 - `mxv repair NAME` deletes an archive that a restore already rebuilt only
   when it is the archive the person confirmed. When another archive of the
   name needs that repair by the time the lock is held, the repair reports
