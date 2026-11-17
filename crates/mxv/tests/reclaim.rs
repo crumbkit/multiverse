@@ -16,7 +16,7 @@ mod test_ports;
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use snapbox::cmd::Command;
@@ -24,6 +24,9 @@ use tempfile::TempDir;
 
 use crate::support::{GIT_ENV, PATH, repository};
 use crate::test_ports::PortBlock;
+
+/// The longest that a test waits for a child mxv to reach a step.
+const MOST_WAIT: Duration = Duration::from_secs(30);
 
 /// The manifest of each workspace: one process that sleeps.
 const SLEEPER: &str = "[processes.sleeper]\nargv = [\"sh\", \"-c\", \"exec sleep 600\"]\n";
@@ -116,9 +119,20 @@ impl Setup {
     }
 
     fn command(&self, args: &[&str]) -> Command {
+        Command::from_std(self.std_command(args))
+    }
+
+    /// Returns the command that runs `mxv` with `args` in the temporary
+    /// directory, which a test can also start as a child and kill.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs the built mxv binary, which it may start as a child so that it can kill it"
+    )]
+    fn std_command(&self, args: &[&str]) -> std::process::Command {
         let root = self.root();
         grants::before(&root.join("state/mxv"), args);
-        Command::new(env!("CARGO_BIN_EXE_mxv"))
+        let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_mxv"));
+        command
             .args(args)
             .current_dir(&root)
             .env_clear()
@@ -127,7 +141,8 @@ impl Setup {
             .env("HOME", &root)
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("state"))
-            .env("MXV_ROOT", root.join("workspaces"))
+            .env("MXV_ROOT", root.join("workspaces"));
+        command
     }
 
     /// Runs `mxv` with `args` and `--json`, and returns the exit code and
@@ -471,4 +486,141 @@ fn a_reclaim_keeps_a_running_workspace_whose_record_says_mxv_new_did_not_finish(
     let reason = triage["reason"].as_str().unwrap();
     assert!(reason.contains("mxv new"), "{reason}");
     assert_eq!(setup.state("triage"), "running");
+}
+
+/// Takes phase's lifecycle lock of the only workspace that has run, which
+/// `mxv down`, and the stop of `mxv reclaim`, wait for up to five seconds,
+/// and returns the file that holds it. The lock is released when the file
+/// drops.
+fn hold_phase_lock(setup: &Setup) -> fs::File {
+    let runs = setup.root().join("state/mxv/phase/runs");
+    let records: Vec<PathBuf> = fs::read_dir(&runs)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+        .collect();
+    let [record] = records.as_slice() else {
+        panic!("{runs:?} holds {records:?}, not one run record");
+    };
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test fixture opens the lock file that phase takes for the workspace"
+    )]
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(record.with_extension("lock"))
+        .unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test fixture holds phase's lock as another stop would"
+    )]
+    file.lock().unwrap();
+    file
+}
+
+/// Returns the reclaim mark of the workspace `name` as its record holds
+/// it, or `Value::Null`.
+fn mark(setup: &Setup, name: &str) -> Value {
+    let record = setup
+        .root()
+        .join(format!("state/mxv/workspaces/{name}.json"));
+    let record: Value = serde_json::from_str(&fs::read_to_string(record).unwrap()).unwrap();
+    record["reclaimed"].clone()
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test starts mxv as a child so that it can kill it"
+)]
+fn a_reclaim_that_dies_after_its_mark_leaves_the_units_running_and_marked_and_up_starts_the_marked_set()
+ {
+    let setup = Setup::new();
+    setup.idle_age("0s");
+    setup.running("triage");
+    let held = hold_phase_lock(&setup);
+    let mut reclaim = setup
+        .std_command(&["reclaim", "--need", "memory=1K", "--json"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // The stop waits for phase's lock, so a mark on disk means that reclaim
+    // wrote it before it stopped anything.
+    let started = Instant::now();
+    while mark(&setup, "triage").is_null() {
+        assert!(
+            reclaim.try_wait().unwrap().is_none(),
+            "reclaim ended without writing its mark"
+        );
+        assert!(started.elapsed() < MOST_WAIT, "reclaim wrote no mark");
+        std::thread::yield_now();
+    }
+    reclaim.kill().unwrap();
+    reclaim.wait().unwrap();
+    drop(held);
+
+    assert_eq!(
+        mark(&setup, "triage"),
+        serde_json::json!({ "processes": ["sleeper"] })
+    );
+    let (_, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(status["data"][0]["state"], "running", "{status}");
+    assert_eq!(
+        status["summary"]["reclaimed"]["processes"],
+        serde_json::json!(["sleeper"]),
+        "{status}"
+    );
+
+    // A second reclaim finishes the stop and keeps the same mark.
+    let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(row(&document, "triage")["state"], "stopped", "{document}");
+    assert_eq!(setup.state("triage"), "stopped");
+    assert_eq!(
+        mark(&setup, "triage"),
+        serde_json::json!({ "processes": ["sleeper"] })
+    );
+
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.state("triage"), "running");
+    assert_eq!(mark(&setup, "triage"), Value::Null);
+}
+
+#[test]
+fn a_reclaim_whose_stop_fails_after_its_mark_keeps_the_mark_and_the_running_unit() {
+    let setup = Setup::new();
+    setup.idle_age("0s");
+    setup.running("triage");
+    let held = hold_phase_lock(&setup);
+    // The stop waits five seconds for phase's lock, then fails as busy.
+    let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
+    drop(held);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["failures"][0]["key"], "triage", "{document}");
+    assert_eq!(
+        document["failures"][0]["code"], "mxv::workspace::busy",
+        "{document}"
+    );
+
+    let (_, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(status["data"][0]["state"], "running", "{status}");
+    assert_eq!(
+        status["summary"]["reclaimed"]["processes"],
+        serde_json::json!(["sleeper"]),
+        "{status}"
+    );
+
+    // `up` without names starts the marked set, which still runs, and
+    // removes the mark.
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.state("triage"), "running");
+    assert_eq!(mark(&setup, "triage"), Value::Null);
 }
