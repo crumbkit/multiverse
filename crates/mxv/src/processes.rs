@@ -13,9 +13,9 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Run, Stream};
 use multiverse::phase::Growth;
 use multiverse::{
-    BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Error, Git, Granting, Lock,
-    Manifest, ManifestError, Marker, Needed, Reclaimed, Runs, Store, SyncMode, UpOutcome, Volumes,
-    Workspace, WorkspaceName, WorkspaceState,
+    BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Error, Git, Granting, Manifest,
+    ManifestError, Marker, Needed, Reclaimed, Runs, Store, SyncMode, UpOutcome, Volumes, Workspace,
+    WorkspaceLock, WorkspaceName, WorkspaceState,
 };
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -123,7 +123,7 @@ impl Context {
     /// command holds the lock, such as when an `mxv archive` held the lock
     /// first and deleted it. The command then writes nothing and starts or
     /// stops nothing.
-    pub(crate) fn lock(&mut self) -> Result<Lock, MxvFailure> {
+    pub(crate) fn lock(&mut self) -> Result<WorkspaceLock, MxvFailure> {
         let lock = self.runs.lock(&self.workspace.name)?;
         self.workspace =
             self.store
@@ -144,7 +144,7 @@ impl Context {
     /// Returns the errors of [`Context::lock`], and
     /// [`MxvFailure::Creating`] when the record that it read under the lock
     /// is in the state `creating`.
-    pub(crate) fn lock_live(&mut self) -> Result<Lock, MxvFailure> {
+    pub(crate) fn lock_live(&mut self) -> Result<WorkspaceLock, MxvFailure> {
         let lock = self.lock()?;
         refuse_creating(&self.workspace)?;
         Ok(lock)
@@ -154,13 +154,19 @@ impl Context {
     /// when it is missing, so a job that a person runs by hand in the
     /// workspace shows its name in `deadband status`. `up`, `restart`,
     /// `run` and `exec` call it while they hold the workspace's lock
-    /// (`_lock`), so a workspace made before mxv wrote markers gains one.
+    /// (`lock`), so a workspace made before mxv wrote markers gains one.
     /// A marker that cannot be written, or an entry of its name that is not
     /// a file, gives a warning and the verb carries on, because mxv's own
     /// jobs name their workspace to deadband without the marker.
-    pub(crate) fn mark(&self, _lock: &Lock) {
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure for [`multiverse::Error::WrongLock`] when
+    /// `lock` is not the lock of the workspace.
+    pub(crate) fn mark(&self, lock: &WorkspaceLock) -> Result<(), MxvFailure> {
+        lock.check(&self.workspace.name)?;
         let warning = match multiverse::ensure_marker(&self.workspace.path) {
-            Ok(Marker::Written | Marker::Present) => return,
+            Ok(Marker::Written | Marker::Present) => return Ok(()),
             Ok(Marker::Blocked(path)) => format!(
                 "{} is not a file, so deadband cannot show the workspace of a job run by hand in it",
                 path.display()
@@ -170,6 +176,7 @@ impl Context {
             ),
         };
         crate::warn(&[warning]);
+        Ok(())
     }
 }
 
@@ -386,7 +393,7 @@ pub(crate) fn finish_interruptible(
 fn build<'lock>(
     environment: &Environment,
     context: &mut Context,
-    lock: &'lock Lock,
+    lock: &'lock WorkspaceLock,
     manifest: &Manifest,
 ) -> Result<Result<BuildsPassed<'lock>, Interrupted>, crumbkit::Error> {
     // The warnings come first, so a long or failing build cannot hide them.
@@ -533,7 +540,7 @@ pub(crate) fn up(
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     ask_first(output, &context)?;
     let lock = context.lock_live()?;
-    context.mark(&lock);
+    context.mark(&lock)?;
     if context.processes.is_empty()
         && let Some(reclaimed) = &context.workspace.reclaimed
         && let Ok(Some(manifest)) = context.workspace.manifest()
@@ -696,7 +703,7 @@ fn start(
 /// running unit outside the stopped set needs is kept.
 fn stop(
     context: &Context,
-    lock: &Lock,
+    lock: &WorkspaceLock,
     manifest: Option<&Manifest>,
     needed: Needed,
 ) -> Result<Vec<DownResult>, crumbkit::Error> {
@@ -724,7 +731,7 @@ fn stop(
 /// and fails with the first process group that outlived SIGKILL.
 fn stop_every(
     context: &Context,
-    lock: &Lock,
+    lock: &WorkspaceLock,
     manifest: Option<&Manifest>,
 ) -> Result<(), crumbkit::Error> {
     for result in stop(context, lock, manifest, Needed::Stop)? {
@@ -821,7 +828,7 @@ pub(crate) fn restart(
     }
     ask_first(output, &context)?;
     let lock = context.lock_live()?;
-    context.mark(&lock);
+    context.mark(&lock)?;
     let passed = match build(environment, &mut context, &lock, &manifest)? {
         Ok(passed) => passed,
         Err(interrupted) => return Ok(Err(interrupted)),
@@ -836,7 +843,7 @@ pub(crate) fn restart(
 /// cannot stop a process before the builds have passed.
 fn replace(
     context: &mut Context,
-    lock: &Lock,
+    lock: &WorkspaceLock,
     passed: BuildsPassed<'_>,
     manifest: &Manifest,
     named: &[String],
@@ -989,7 +996,10 @@ pub(crate) fn running(
 
 /// Takes the lock of the workspace `name`, which `up` and `down` also
 /// take, so `mxv clean` deletes nothing while they start or stop it.
-pub(crate) fn lock(environment: &Environment, name: &WorkspaceName) -> Result<Lock, MxvFailure> {
+pub(crate) fn lock(
+    environment: &Environment,
+    name: &WorkspaceName,
+) -> Result<WorkspaceLock, MxvFailure> {
     Ok(environment.runs()?.lock(name)?)
 }
 

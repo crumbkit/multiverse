@@ -162,6 +162,13 @@ workspace may need to act on.
   the store wrote such a record, and the next read refused it as corrupt.
   mxv reports the error as `mxv::workspace::mismatched_checkout`, a defect
   of mxv to report. No command builds such a record.
+- `Runs::lock` returns a `WorkspaceLock`, which keeps the name of the
+  workspace it locks, in place of `Lock`. `Runs::build`, `Runs::up`, `Runs::down`,
+  `Runs::reset_ports`, `Runs::prepare_task`, `Lifecycle::delete_archive_held`
+  and `Lifecycle::finish_held` refuse a lock of another name with the new
+  error `WrongLock` and do nothing. mxv reports it as
+  `mxv::workspace::wrong_lock`, a defect of mxv to report. No command
+  passes such a lock.
 - A workspace's record stores its state: `creating` from the first write
   of `mxv new` until its last write, then `live`. `mxv restore` writes
   `live`. A record without a state, which an older mxv wrote, reads as

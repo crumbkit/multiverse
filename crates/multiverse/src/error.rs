@@ -143,6 +143,15 @@ pub enum Error {
         /// The folder of the first checkout that does not match.
         folder: String,
     },
+    /// A method that acts on the workspace `acted_on` was given the lock of
+    /// the workspace `locked`. It did nothing. No command passes such a
+    /// lock, so this is a defect of mxv.
+    WrongLock {
+        /// The name of the workspace that the lock holds.
+        locked: crate::name::WorkspaceName,
+        /// The name of the workspace that the method acts on.
+        acted_on: crate::name::WorkspaceName,
+    },
     /// The workspace's record holds no stable id, and the archive record of
     /// its name is an unfinished archive of an older multiverse without
     /// one, or cannot be read, so mxv gives the workspace no id and cannot
@@ -615,6 +624,10 @@ impl fmt::Display for Error {
                 formatter,
                 "the checkout {folder} of the workspace {name} does not match the workspace's kind, so mxv wrote nothing"
             ),
+            Self::WrongLock { locked, acted_on } => write!(
+                formatter,
+                "the lock held is the lock of the workspace {locked}, not of {acted_on}, so mxv did nothing to {acted_on}"
+            ),
             Self::ArchiveUnfinished {
                 name,
                 readable: true,
@@ -888,6 +901,7 @@ impl std::error::Error for Error {
             | Self::StateChanged { .. }
             | Self::TransitionRefused { .. }
             | Self::MismatchedCheckout { .. }
+            | Self::WrongLock { .. }
             | Self::ArchiveUnfinished { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }

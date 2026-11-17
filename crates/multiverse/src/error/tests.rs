@@ -226,3 +226,15 @@ fn a_mismatched_checkout_names_its_folder_and_its_workspace_and_says_mxv_wrote_n
         "the checkout app of the workspace triage does not match the workspace's kind, so mxv wrote nothing"
     );
 }
+
+#[test]
+fn a_wrong_lock_names_both_workspaces_and_says_mxv_did_nothing() {
+    let error = Error::WrongLock {
+        locked: "other".parse().unwrap(),
+        acted_on: "triage".parse().unwrap(),
+    };
+    assert_eq!(
+        error.to_string(),
+        "the lock held is the lock of the workspace other, not of triage, so mxv did nothing to triage"
+    );
+}

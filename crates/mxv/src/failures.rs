@@ -167,6 +167,9 @@ pub const WORKSPACE_TRANSITION_REFUSED: Code = Code::new("mxv", "workspace", "tr
 /// not made the way the workspace's kind says, which is a defect of mxv.
 pub const WORKSPACE_MISMATCHED_CHECKOUT: Code =
     Code::new("mxv", "workspace", "mismatched_checkout");
+/// The code of a method that acts on one workspace and was given the lock of
+/// another, which is a defect of mxv.
+pub const WORKSPACE_WRONG_LOCK: Code = Code::new("mxv", "workspace", "wrong_lock");
 /// The code of a workspace without a stable id beside an archive record of
 /// its name that an older mxv did not finish, or that cannot be read, so
 /// mxv cannot name its containers.
@@ -558,6 +561,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     WORKSPACE_STATE_CHANGED,
     WORKSPACE_TRANSITION_REFUSED,
     WORKSPACE_MISMATCHED_CHECKOUT,
+    WORKSPACE_WRONG_LOCK,
     WORKSPACE_ARCHIVE_UNFINISHED,
     REPAIR_NAMES_TAKEN,
     REPAIR_CHANGED,
@@ -691,6 +695,7 @@ impl Failure for MxvFailure {
                 Error::StateChanged { .. } => WORKSPACE_STATE_CHANGED,
                 Error::TransitionRefused { .. } => WORKSPACE_TRANSITION_REFUSED,
                 Error::MismatchedCheckout { .. } => WORKSPACE_MISMATCHED_CHECKOUT,
+                Error::WrongLock { .. } => WORKSPACE_WRONG_LOCK,
                 Error::ArchiveUnfinished { .. } => WORKSPACE_ARCHIVE_UNFINISHED,
                 Error::DatedNamesTaken { .. } => REPAIR_NAMES_TAKEN,
                 Error::MirrorBusy { .. } => MIRROR_LOCKED,
@@ -1132,7 +1137,9 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::StateChanged { .. } => Recovery::hint(
             "another mxv command changed the workspace meanwhile; run the command again",
         ),
-        Error::TransitionRefused { .. } | Error::MismatchedCheckout { .. } => Recovery::hint(
+        Error::TransitionRefused { .. }
+        | Error::MismatchedCheckout { .. }
+        | Error::WrongLock { .. } => Recovery::hint(
             "this is a defect of mxv, and no command should reach it; report it with the command that you ran",
         ),
         Error::ArchiveUnfinished {
@@ -1198,6 +1205,10 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         Error::MismatchedCheckout { name, folder } => vec![
             Field::new("name", name.as_str()),
             Field::new("folder", folder),
+        ],
+        Error::WrongLock { locked, acted_on } => vec![
+            Field::new("locked", locked.as_str()),
+            Field::new("acted_on", acted_on.as_str()),
         ],
         Error::DatedNamesTaken { name, last } => {
             vec![Field::new("name", name.as_str()), Field::new("last", last)]
