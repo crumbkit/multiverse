@@ -52,7 +52,7 @@ pub use record::{
     Archive, ArchiveId, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Kept, KeptStash,
     KeptWip, OLDER_ARCHIVE_VERSION, RestoreMark,
 };
-pub(crate) use record::{MintHeld, mint_held};
+pub(crate) use record::{KeptRef, MintHeld, mint_held};
 pub(crate) use restore::refuse_other_files;
 pub use restore::{
     ArchivedRemoval, LostPin, MirrorLoss, PortChange, PutBack, RestoreOptions, RestoreOutcome,
