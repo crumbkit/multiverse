@@ -33,6 +33,9 @@ workspace that holds the current directory. Pass `-w NAME` from anywhere else.
 
 - `mxv list` names the workspaces, and `cd "$(mxv cd NAME)"` resumes one.
   `mxv cd NAME FOLDER` prints the directory of one checkout.
+- When `mxv list` shows a row with a `problem`, run the command in its
+  `repair` column, such as `mxv repair NAME`; `--dry-run` first shows what
+  it would change.
 - `mxv status` reports each unit's state and the ports it receives or
   publishes. `mxv show NAME` reports the host port for each named port.
 - `mxv logs UNIT` prints a unit's last 50 log lines, and
@@ -43,8 +46,8 @@ workspace that holds the current directory. Pass `-w NAME` from anywhere else.
 - `mxv archive -w NAME` puts a finished workspace away and keeps each
   checkout's commit, and `mxv restore NAME` rebuilds it at those commits.
   `mxv list --archived` lists the archives.
-- `mxv remove NAME` removes a workspace's checkouts, its merged branches, its
-  directory and its record. It refuses while a checkout holds unpushed or
+- `mxv remove NAME` removes a workspace's clones, with the branch that each
+  clone holds, its directory and its record. It refuses while a checkout holds unpushed or
   uncommitted work, so push that work first.
 
 ## Complete mxv's commands in a shell

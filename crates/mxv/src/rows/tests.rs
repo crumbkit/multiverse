@@ -1,6 +1,9 @@
-use multiverse::ProcessNote;
+use std::path::PathBuf;
 
-use super::{KindName, NoteRow, ProcessRow, StateName};
+use multiverse::ProcessNote;
+use multiverse::health::{Problem, Repair};
+
+use super::{KindName, NoteRow, ProcessRow, StateName, repair_text, text_of_problem};
 
 fn row(notes: &[ProcessNote]) -> ProcessRow {
     ProcessRow {
@@ -54,4 +57,88 @@ fn a_process_without_notes_prints_no_child_lines() {
 #[test]
 fn the_port_row_keeps_only_its_name_uncut() {
     assert_eq!(<super::PortRow as crumbkit::Row>::UNCUT_COLUMNS, &["name"]);
+}
+
+/// Returns one value of each [`Problem`]. The `match` fails to compile when
+/// a problem is added, until this list holds it.
+fn every_problem() -> Vec<Problem> {
+    let _ = |problem: &Problem| match problem {
+        Problem::Unreadable { .. }
+        | Problem::ArchiveUnfinished
+        | Problem::ArchiveNotStarted
+        | Problem::ArchiveWorkspaceRemoved
+        | Problem::ArchivePinsGone
+        | Problem::ArchiveBesideNewerWorkspace
+        | Problem::RenameUnfinished
+        | Problem::RestoreUnfinished
+        | Problem::RestoreStopped
+        | Problem::CheckoutsGone
+        | Problem::CreateUnfinished => {}
+    };
+    vec![
+        Problem::Unreadable {
+            reason: String::new(),
+        },
+        Problem::ArchiveUnfinished,
+        Problem::ArchiveNotStarted,
+        Problem::ArchiveWorkspaceRemoved,
+        Problem::ArchivePinsGone,
+        Problem::ArchiveBesideNewerWorkspace,
+        Problem::RenameUnfinished,
+        Problem::RestoreUnfinished,
+        Problem::RestoreStopped,
+        Problem::CheckoutsGone,
+        Problem::CreateUnfinished,
+    ]
+}
+
+#[test]
+fn the_readme_problem_table_has_a_row_for_every_problem() {
+    let readme = include_str!("../../README.md");
+    let start = readme
+        .find("\n### Problems and their repairs\n")
+        .expect("README.md has the problem table's heading");
+    let rows: Vec<&str> = readme[start..]
+        .lines()
+        .skip_while(|line| !line.starts_with('|'))
+        .take_while(|line| line.starts_with('|'))
+        .skip(2)
+        .collect();
+    // Each row's first two cells, the problem and the repair, trimmed. A
+    // problem matches only a whole cell, so a text that starts another
+    // problem's text does not stand in for it.
+    let cells: Vec<Vec<&str>> = rows
+        .iter()
+        .map(|row| {
+            row.split(" | ")
+                .map(|cell| cell.trim_matches(['|', ' ']))
+                .take(2)
+                .collect()
+        })
+        .collect();
+    let missing: Vec<String> = every_problem()
+        .iter()
+        .filter_map(|problem| {
+            let (column, text) = match problem {
+                // The problem of a record that cannot be read is the read
+                // error, so its row is found by its repair.
+                Problem::Unreadable { .. } => (
+                    1,
+                    format!(
+                        "`{}`",
+                        repair_text(&Repair::MoveAside(PathBuf::from("PATH")))
+                    ),
+                ),
+                problem => (0, text_of_problem(problem, "NAME")),
+            };
+            let found = cells
+                .iter()
+                .any(|row| row.get(column).is_some_and(|cell| *cell == text));
+            (!found).then_some(text)
+        })
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the table under ### Problems and their repairs in crates/mxv/README.md has no row for {missing:?}"
+    );
 }

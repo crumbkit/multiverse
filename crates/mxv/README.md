@@ -233,6 +233,97 @@ has no command, because mxv never deletes what it cannot read, so its
 `repair` says to move the file aside by hand. When any row has a problem,
 the run exits with 1.
 
+## Lifecycle
+
+A workspace and its archive each have a record, and each record has a
+state. The diagram shows the states and the command that moves each one.
+
+```text
+Workspace record ($XDG_STATE_HOME/mxv/workspaces/<name>.json)
+
+            new              new finishes
+   (none) -------> creating -------------> live <------------ (none)
+                      |                    |  ^      restore
+               remove |            archive |  | abandon
+                      v                    v  |
+                   removed              retiring
+                                           |
+                                           | archive retires every
+                                           | checkout, or remove
+                                           v
+                                        removed
+
+Archive record ($XDG_STATE_HOME/mxv/archives/<name>/archive.json)
+
+            archive            all retired           finish
+   (none) ---------> Retiring -----------> Retired ---------> Archived
+                        |                                      |    ^
+                abandon |                              restore |    | undo
+                        v                                      v    |
+                     deleted                         Archived, restoring
+                                                               |
+                                                               | restore finishes
+                                                               v
+                                                            deleted
+```
+
+`new`, `remove`, `archive` and `restore` are the mxv commands of those
+names. `mxv remove` also takes a `live` workspace to removed, and
+`mxv remove --archived NAME` deletes an `Archived` record.
+
+- `creating`: `mxv new` wrote the record and has not finished the
+  checkouts. The record comes before any directory, so `mxv remove NAME`
+  deletes whatever a stopped `mxv new` left.
+- `live`: the workspace is whole, and every command works on it.
+- `retiring`: `mxv archive` has started. The record names the archive.
+- `Retiring`: the archive is written and is retiring the checkouts. While
+  it has deleted no checkout, it can be abandoned: a refused `mxv archive`,
+  or `mxv repair NAME`, deletes the archive's record, pins and tar and moves
+  the workspace back to `live`.
+- `Retired`: every checkout is retired, and `mxv archive -w NAME` finishes
+  the archive.
+- `Archived`: the workspace is gone, and `mxv restore NAME` rebuilds it.
+- `restoring`: a mark that `mxv restore` writes into an `Archived` record
+  before each step that makes something. When a restore stops, the next
+  `mxv restore NAME`, `mxv repair NAME` or `mxv remove --archived NAME`
+  deletes what the mark lists, which is the undo in the diagram.
+
+Treat a workspace as ephemeral. `mxv repair`, `mxv restore` and
+`mxv remove` can delete what a workspace directory holds that is not
+committed or archived, such as a file that you put into a directory that a
+stopped restore made.
+
+### Problems and their repairs
+
+`mxv list` and `mxv list --archived` show a record that a stopped command
+left in the middle of the diagram as a row with a `problem` and a `repair`.
+Run the command in the `repair` column. `mxv repair NAME --dry-run` says
+what a repair would do before it does it.
+
+| `problem` | `repair` | What the repair does |
+| --- | --- | --- |
+| The error of a record that mxv cannot read, which names the file | `move PATH aside by hand; mxv never deletes a record it cannot read` | Nothing in mxv. Move the file aside by hand, or read the record with the newer mxv that wrote it. |
+| mxv new did not finish it | `mxv remove NAME` | Deletes what `mxv new` made and the record. |
+| every checkout directory is gone | `mxv remove NAME` | Deletes the record and what is left of the workspace. |
+| the archive stopped before it finished | `mxv archive -w NAME` | Carries the archive on from where it stopped, and finishes it. |
+| the archive stopped before it deleted any checkout; `mxv archive -w NAME` carries it on instead | `mxv repair NAME` | Abandons the archive: deletes its record, its pins and its tar of ignored files, and moves the workspace back to `live` with every checkout as it was. |
+| the archive stopped before it finished, and its workspace was removed | `mxv repair NAME` | Moves the archive aside to `.NAME.<ID>`, because nothing says that every checkout was retired. `mxv repair --orphans --delete-aside` deletes it later. |
+| the archive stopped before it finished, and its pins are gone | `mxv repair NAME` | Moves the archive aside, because a restore could not bring back the commits. |
+| an older archive beside a newer workspace NAME | `mxv repair NAME` | Moves the older archive to the name `NAME-YYYY-MM-DD` and finishes it, or moves it aside when it had not retired every checkout or its pins are gone. |
+| a repair stopped while it moved the archive to its dated name | `mxv repair NAME` of the older name | Finishes the move to the dated name. |
+| the restore stopped before it deleted the archive | `mxv repair NAME` | Deletes the archive and its pins, because the workspace holds every commit again. |
+| the restore stopped before it finished, and left what it made | `mxv repair NAME` | Deletes what the `restoring` mark lists and keeps the archive whole, so `mxv restore NAME` can run again. |
+
+A workspace that is `retiring` with no archive record has no row in
+`mxv list` unless it has checkouts and every checkout directory is gone, when
+its row is "every checkout directory is gone" with `mxv remove NAME`.
+An archive that stopped right after it moved the workspace to
+`retiring`, or an abandon that stopped after it deleted the archive record,
+leaves one. When the workspace has at least one checkout and every checkout
+is in place, `mxv repair NAME` moves it back to `live`. Otherwise
+`mxv repair NAME` changes nothing, and `mxv archive -w NAME` starts the
+archive again from the id that the record names.
+
 ## Running an app
 
 A repository declares its app in `mxv.toml` at its root, or a workspace
@@ -1687,7 +1778,10 @@ archive that it would finish is another one, it changes nothing and fails with
 `mxv::archive::changed`; run `mxv archive` again to be asked about the
 workspace as it now stands. An archive that stopped before it finished is
 finished by running `mxv archive -w NAME` again, and a finished archive
-reports `unchanged`.
+reports `unchanged`. An archive that stopped before it deleted any checkout
+can be abandoned instead: `mxv repair NAME` deletes its record, pins and tar
+and moves the workspace back to `live`. An archive that refuses abandons
+itself in the same way, as [Lifecycle](#lifecycle) shows.
 
 Archives have no expiry, and `mxv clean` never touches one. `mxv list
 --archived` lists them with each one's age and the number of commits that
@@ -1811,9 +1905,11 @@ A restore that fails deletes what it made and keeps the archive.
 A clone tracks the remote branch that it tracked when it was archived, and a
 clone that tracked none comes back tracking none. A clone with no `origin`
 comes back with no `origin`, from the commit that its mirror holds. A checkout
-that had a detached `HEAD` comes back detached. A mirror that has gone is
-cloned again from the recorded origin, and a clone that cannot reach the origin
-leaves no empty mirror behind. An `ssh://` origin keeps its user name, and an
+that had a detached `HEAD` comes back detached. A restore fetches nothing.
+When a clone's mirror is gone or has lost its pins, the restore refuses with
+`mxv::restore::mirror_missing`, and `mxv restore NAME --from-origin` fetches
+origin into a new mirror and restores what origin holds. A fetch that fails
+leaves no new mirror behind. An `ssh://` origin keeps its user name, and an
 archive removes any password from an origin URL.
 
 When a workspace already holds the name and no archive of it needs
@@ -1862,6 +1958,9 @@ A restore refuses, and builds nothing, with these codes:
 | `mxv::restore::commit_missing` | No repository that mxv can read holds the pinned commit. |
 | `mxv::restore::unfinished` | The archive stopped partway, and `mxv archive -w NAME` finishes it. |
 | `mxv::restore::root_file_changed` | A file of the archive differs from its recorded digest. |
+| `mxv::restore::ignored_damaged` | The archive's copy of an ignored file, such as `app/.env`, is missing or differs from its recorded digest. `mxv restore NAME --force` restores the workspace without those files and lists them as lost. |
+| `mxv::restore::ignored_taken` | The rebuilt workspace already holds something at the path of an ignored file. Find what wrote those paths, then restore again. |
+| `mxv::restore::mirror_missing` | A clone's mirror is gone or has lost its pins, and the result lists what only the mirror held. `mxv restore NAME --from-origin` fetches origin and restores only what origin holds, and `mxv remove --archived NAME` deletes the archive. |
 | `mxv::restore::stopped_holds_other_files` | A restore of the name stopped after it made the workspace's directory, and the directory holds entries that the restore's mark does not account for. mxv deleted nothing and kept the mark. `mxv repair NAME` and `mxv remove --archived NAME` fail with the same code. Move or delete the listed entries and run the command again. |
 
 ## Disk space
