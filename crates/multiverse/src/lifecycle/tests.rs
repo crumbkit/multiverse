@@ -1265,7 +1265,7 @@ fn a_repair_moves_aside_an_archive_whose_workspace_was_removed() {
 }
 
 #[test]
-fn a_repair_undoes_a_restore_that_stopped_after_it_made_the_directory() {
+fn a_repair_undoes_a_restore_that_was_killed_after_it_made_the_directory() {
     let setup = fresh();
     setup.create();
     let archive = setup.archive();
