@@ -214,7 +214,7 @@ fn a_mark_names_the_kept_reference_before_the_run_makes_it() {
     assert!(
         mark.refs
             .iter()
-            .any(|(_, reference)| *reference == made.kept),
+            .any(|(_, reference)| reference.as_str() == made.kept),
         "{mark:?}"
     );
 }
@@ -834,4 +834,52 @@ fn a_repair_keeps_the_archive_of_a_workspace_without_checkouts_that_deleted_its_
         fs::read_to_string(setup.root.join("triage/notes.md")).unwrap(),
         "keep me\n"
     );
+}
+
+/// Rewrites the first entry of the stopped restore's mark in the record on
+/// disk, which `edit` changes as JSON.
+fn edit_mark(made: &Archived, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = made.setup.archives.dir_of(&name()).join("archive.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut record["restoring"]["refs"][0]);
+    write(&path, serde_json::to_string(&record).unwrap());
+}
+
+#[test]
+fn a_mark_that_names_a_branch_is_refused_as_corrupt_and_the_branch_stays() {
+    let made = archived(Kind::Worktree);
+    let source = made.setup.fixture.clone.clone();
+    git(&source, &["branch", "precious"]);
+    made.kill_at("kept");
+    edit_mark(&made, |entry| entry[1] = "refs/heads/precious".into());
+    assert!(matches!(
+        made.setup.archives.read(&name()),
+        Err(Error::CorruptRecord { .. })
+    ));
+    assert!(git(&source, &["branch", "--list", "precious"]).contains("precious"));
+}
+
+#[test]
+fn a_mark_that_climbs_out_of_the_kept_namespace_is_refused_as_corrupt() {
+    let made = archived(Kind::Worktree);
+    made.kill_at("kept");
+    edit_mark(&made, |entry| {
+        entry[1] = "refs/mxv/kept/../../heads/main".into();
+    });
+    assert!(matches!(
+        made.setup.archives.read(&name()),
+        Err(Error::CorruptRecord { .. })
+    ));
+}
+
+#[test]
+fn a_mark_that_names_a_repository_that_is_no_checkouts_source_is_refused_as_corrupt() {
+    let made = archived(Kind::Worktree);
+    made.kill_at("kept");
+    edit_mark(&made, |entry| entry[0] = "/somewhere/else".into());
+    assert!(matches!(
+        made.setup.archives.read(&name()),
+        Err(Error::CorruptRecord { .. })
+    ));
 }

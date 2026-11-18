@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
+use crate::archive::KeptRef;
 use crate::backend::{Backend, INITIALIZING, RefHolder};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
@@ -893,7 +894,7 @@ pub(crate) struct MadeSoFar {
     /// Each reference that the run created in a repository that outlives
     /// the workspace, such as a worktree's source, with that repository.
     /// A reference inside a clone goes with the clone.
-    pub(crate) refs: Vec<(PathBuf, String)>,
+    pub(crate) refs: Vec<(PathBuf, KeptRef)>,
     /// Whether the record belongs to someone else, because the run did not
     /// write it. A restore writes the record last, so [`Workspaces::undo`]
     /// leaves whatever record has the name alone.
@@ -2062,7 +2063,7 @@ impl<B: Backend> Workspaces<B> {
         for (repository, reference) in &made.refs {
             clean &= self
                 .backend
-                .delete_ref(RefHolder::Repository(repository), reference)
+                .delete_ref(RefHolder::Repository(repository), reference.as_str())
                 .is_ok();
         }
         for checkout in workspace.checkouts.iter().take(made.clones) {

@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::ignored::{IGNORED_TAR, IgnoredEntry};
 use crate::archive::root::RootEntry;
-use crate::archive::{ARCHIVE_VERSION, HEAD_PIN, PIN_NAMESPACE, RECORD_FILE, WIP_INDEX};
+use crate::archive::{
+    ARCHIVE_VERSION, HEAD_PIN, KEPT_NAMESPACE, PIN_NAMESPACE, RECORD_FILE, WIP_INDEX,
+};
 use crate::backend::RefHolder;
 use crate::error::Error;
 use crate::name::WorkspaceName;
@@ -379,6 +381,45 @@ pub struct Archive {
     /// and a finished restore deletes the archive with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub restoring: Option<RestoreMark>,
+}
+
+/// A reference below [`KEPT_NAMESPACE`], the only kind of reference that a
+/// restore creates in a person's repository and so the only kind that
+/// undoing one deletes. A record's text is untrusted, so a name outside the
+/// namespace, or one that climbs out of it, is refused when the record is
+/// read.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub(crate) struct KeptRef(String);
+
+impl KeptRef {
+    /// Returns the reference below [`KEPT_NAMESPACE`] that keeps `commit`.
+    pub(crate) fn of_commit(commit: &str) -> Result<Self, String> {
+        Self::try_from(format!("{KEPT_NAMESPACE}{commit}"))
+    }
+
+    /// Returns the reference's full name.
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for KeptRef {
+    type Error = String;
+
+    fn try_from(name: String) -> Result<Self, String> {
+        if name.strip_prefix(KEPT_NAMESPACE).is_some_and(stays_inside) {
+            Ok(Self(name))
+        } else {
+            Err(format!("the reference {name} is not below {KEPT_NAMESPACE}"))
+        }
+    }
+}
+
+impl From<KeptRef> for String {
+    fn from(reference: KeptRef) -> Self {
+        reference.0
+    }
 }
 
 /// What a restore wrote ahead of making it, so that
@@ -862,10 +903,34 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
             entry.path
         ))));
     }
+    if let Some(mark) = &archive.restoring {
+        if let Some((repository, _)) = mark.0.refs.iter().find(|(repository, _)| {
+            !archive
+                .checkouts
+                .iter()
+                .any(|checkout| checkout.source == *repository)
+        }) {
+            return Err(corrupt(serde::de::Error::custom(format!(
+                "the restore mark names the repository {}, which is no checkout's source",
+                repository.display()
+            ))));
+        }
+    }
     for checkout in &archive.checkouts {
         if !inside_workspace(&archive.path, &checkout.path) {
             return Err(corrupt(serde::de::Error::custom(format!(
                 "the checkout {} leaves the workspace's directory",
+                checkout.folder
+            ))));
+        }
+        if let Some(commit) = checkout
+            .kept
+            .orphans
+            .iter()
+            .find(|commit| KeptRef::of_commit(commit).is_err())
+        {
+            return Err(corrupt(serde::de::Error::custom(format!(
+                "the orphan {commit} of the checkout {} does not name a kept reference",
                 checkout.folder
             ))));
         }

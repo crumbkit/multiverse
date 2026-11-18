@@ -5,6 +5,14 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Fixed
+
+- An archive whose restore mark names a reference outside `refs/mxv/kept/`,
+  or a repository that is not the source of one of its checkouts, is
+  reported as a corrupt archive. `mxv restore`, `mxv repair` and
+  `mxv remove --archived` no longer delete such a reference, such as a
+  branch of yours.
+
 ## [0.2.0] - 2026-11-18
 
 ### Added
