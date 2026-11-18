@@ -510,13 +510,17 @@ pub(crate) fn checkouts_gone(workspace: &Workspace) -> bool {
 }
 
 /// Reports whether an archive of `workspace` has deleted nothing of it:
-/// the workspace's directory and every checkout's directory are
-/// directories, and no checkout lies at, or has a directory at, its
-/// quarantine name. An archive deletes the root files only after the last
-/// checkout retires, so while this holds the archive has deleted nothing,
-/// and abandoning it loses nothing.
+/// the workspace has at least one checkout, the workspace's directory and
+/// every checkout's directory are directories, and no checkout lies at, or
+/// has a directory at, its quarantine name. An archive deletes the root
+/// files only after the last checkout retires, so while this holds the
+/// archive has deleted nothing, and abandoning it loses nothing. A
+/// workspace without checkouts is never untouched, because nothing on
+/// disk says whether its archive already deleted the root files, whose
+/// only copies the archive then holds.
 pub(crate) fn untouched(workspace: &Workspace) -> bool {
-    workspace.path.is_dir()
+    !workspace.checkouts.is_empty()
+        && workspace.path.is_dir()
         && workspace.checkouts.iter().all(|checkout| {
             checkout.path.is_dir()
                 && crate::archive::quarantine(&checkout.path)

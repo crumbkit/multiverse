@@ -129,8 +129,12 @@ pub(crate) struct RepairResult {
     /// The workspace's directory that undoing a stopped restore deleted, or
     /// would delete, or null when it deletes no directory.
     directory: Option<String>,
-    /// The references of the pins that the deletion or the abandon
-    /// deleted, or would delete.
+    /// The head pin of each checkout of the archive that the deletion or
+    /// the abandon deleted, or would delete, such as
+    /// `refs/mxv/archives/<id>/app/head`. Each also deletes the archive's
+    /// other pins, of its uncommitted work, stashes, branches and tags,
+    /// which this list leaves out. An abandon names a checkout's head pin
+    /// even when the archive stopped before it wrote that pin.
     pins: Vec<String>,
     /// With `--orphans`, one row for each item that no record names. Empty
     /// without `--orphans`.

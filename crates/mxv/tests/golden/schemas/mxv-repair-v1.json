@@ -682,7 +682,7 @@
           ]
         },
         "pins": {
-          "description": "The references of the pins that the deletion or the abandon\ndeleted, or would delete.",
+          "description": "The head pin of each checkout of the archive that the deletion or\nthe abandon deleted, or would delete, such as\n`refs/mxv/archives/<id>/app/head`. Each also deletes the archive's\nother pins, of its uncommitted work, stashes, branches and tags,\nwhich this list leaves out. An abandon names a checkout's head pin\neven when the archive stopped before it wrote that pin.",
           "type": "array",
           "items": {
             "type": "string"

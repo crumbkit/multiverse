@@ -783,3 +783,37 @@ fn a_repair_keeps_an_archive_that_quarantined_a_checkout_for_mxv_archive() {
         assert!(stopped.setup.record().is_some(), "{kind:?}");
     }
 }
+
+#[test]
+fn a_repair_keeps_the_archive_of_a_workspace_without_checkouts_that_deleted_its_root_files() {
+    let setup = setup(Kind::Worktree);
+    let created = setup
+        .workspaces
+        .create_repos(&setup.root, &name(), &[], Mode::Change, None)
+        .unwrap();
+    assert!(matches!(created, NewOutcome::Created(_)), "{created:?}");
+    write(setup.root.join("triage/notes.md"), "keep me\n");
+    let plan = setup.plan(ArchiveOptions::default());
+    kill("delete", || {
+        drop(setup.workspaces.archive(&setup.archives, plan));
+    });
+    assert!(!setup.root.join("triage/notes.md").exists());
+    let archive = setup.record().unwrap();
+    for mode in [Mode::DryRun, Mode::Change] {
+        let repaired = setup
+            .workspaces
+            .repair(&setup.archives, &name(), mode)
+            .unwrap();
+        assert!(
+            !matches!(repaired, Repaired::Abandoned { .. }),
+            "{mode:?}: {repaired:?}"
+        );
+    }
+    assert_eq!(setup.record(), Some(archive));
+    setup.archive();
+    setup.restore();
+    assert_eq!(
+        fs::read_to_string(setup.root.join("triage/notes.md")).unwrap(),
+        "keep me\n"
+    );
+}

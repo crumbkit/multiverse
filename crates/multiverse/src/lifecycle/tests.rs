@@ -430,7 +430,10 @@ fn deleting_an_archive_holds_the_lock_at_every_step() {
         .unwrap();
 
     assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
-    assert_eq!(*seen.borrow(), [("volumes".to_owned(), true)]);
+    assert_eq!(
+        *seen.borrow(),
+        [("volumes".to_owned(), true), ("unpinned".to_owned(), true)]
+    );
     assert!(setup.runs.lock(&name()).is_ok());
 }
 
