@@ -766,7 +766,7 @@ fn stash_clause(removal: &Removal) -> String {
 /// outside phase that `outside` gives, or nothing.
 fn outside_clause(outside: Option<&str>) -> String {
     outside.map_or_else(String::new, |reason| {
-        format!(" A process outside phase works in it ({reason}).")
+        format!(" It is in use: {reason}.")
     })
 }
 
@@ -803,7 +803,11 @@ pub(crate) fn remove(
             }
             .into());
         }
-        outside = outside_user(&name, &workspace, allow)?;
+        // Phase's own units work in the checkouts, so a workspace with
+        // running units has no process outside phase to look for.
+        if running.is_empty() {
+            outside = outside_user(&name, &workspace, allow)?;
+        }
         // A volume may hold the only copy of a database, so removing it
         // needs its own flag, and `--force` alone keeps the workspace.
         let found = processes::volumes(environment, &workspace)?;

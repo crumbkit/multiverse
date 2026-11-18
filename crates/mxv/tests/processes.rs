@@ -1039,6 +1039,19 @@ fn remove_refuses_while_processes_run_and_force_stops_them_first() {
     assert!(!setup.root().join("state/mxv/runs/triage").exists());
 }
 
+/// Phase's units work in the checkouts, so a forced removal of a workspace
+/// whose units run does not look for a process outside phase and removes it.
+#[test]
+fn a_forced_remove_of_a_workspace_with_running_units_finds_no_outside_process() {
+    let setup = Setup::new();
+    setup.workspace("triage", &server_and_worker());
+    setup.json(&["up", "-w", "triage"]);
+    let (exit, removed) = setup.json(&["remove", "triage", "--yes", "--force"]);
+    assert_eq!(exit, 0, "{removed}");
+    assert!(!removed.to_string().contains("mxv::remove::in_use"), "{removed}");
+    assert!(!setup.root().join("workspaces/triage").exists());
+}
+
 /// A workspace that an older mxv started keeps run files that phase never
 /// reads: a run record, an exit file, a container record and the record of
 /// its volumes. `up` starts the workspace under phase beside them, and

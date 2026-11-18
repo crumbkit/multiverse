@@ -5,7 +5,7 @@ fn a_removal_question_names_the_process_outside_phase() {
     let clause = outside_clause(Some("process 42 outside phase works in it, in /w/app"));
     assert_eq!(
         clause,
-        " A process outside phase works in it (process 42 outside phase works in it, in /w/app)."
+        " It is in use: process 42 outside phase works in it, in /w/app."
     );
 }
 
