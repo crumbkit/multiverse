@@ -12,6 +12,10 @@ license = "MIT OR Apache-2.0"
 repository = "https://github.com/crumbkit/multiverse"
 
 [workspace.dependencies]
+# starmap parses `starmap.toml`, which declares the environment variables that
+# mxv reads. Only mxv's tests use it, and it needs no feature.
+starmap = { version = "0.4.2", default-features = false }
+
 # clap parses the `mxv` command line. The workspace entry enables only
 # `std`, and mxv enables the user-facing features it needs. Cargo turns on a
 # feature for every crate in a build when any one crate asks for it, so each
