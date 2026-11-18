@@ -317,24 +317,19 @@ fn remove_deletes_a_clean_workspace_its_merged_branch_and_its_record() {
     assert_eq!(setup.json(&["list"]).1["total"], 0);
 }
 
-/// Starts a `sleep` outside mxv whose working directory is `dir`.
-fn outside_process(dir: &Path) -> std::process::Child {
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the test starts a process outside mxv whose working directory is in the workspace"
-    )]
-    std::process::Command::new("sleep")
-        .arg("30")
-        .current_dir(dir)
-        .spawn()
-        .unwrap()
-}
-
 #[test]
 fn remove_refuses_a_workspace_that_a_process_outside_phase_works_in_and_names_it() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
-    let mut child = outside_process(&workspace.join("app"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test starts a process outside mxv whose working directory is in the workspace"
+    )]
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(workspace.join("app"))
+        .spawn()
+        .unwrap();
     let (exit, document) = setup.json(&["remove", "reading-list", "--yes"]);
     child.kill().unwrap();
     child.wait().unwrap();
@@ -355,7 +350,15 @@ fn remove_refuses_a_workspace_that_a_process_outside_phase_works_in_and_names_it
 fn a_forced_remove_names_the_outside_process_in_its_question_and_removes_the_workspace() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
-    let mut child = outside_process(&workspace.join("app"));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test starts a process outside mxv whose working directory is in the workspace"
+    )]
+    let mut child = std::process::Command::new("sleep")
+        .arg("30")
+        .current_dir(workspace.join("app"))
+        .spawn()
+        .unwrap();
     let (exit, document) = setup.json(&["remove", "reading-list", "--force"]);
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::confirmation::needs_yes");
