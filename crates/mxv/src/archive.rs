@@ -945,7 +945,7 @@ fn outside_user(workspace: &Workspace) -> Result<Option<String>, MxvFailure> {
 
 /// Returns what [`outside_user`] returns, as the library's check for an
 /// archive that holds the workspace's lock.
-fn outside_reason(workspace: &Workspace) -> Result<Option<String>, multiverse::Error> {
+pub(crate) fn outside_reason(workspace: &Workspace) -> Result<Option<String>, multiverse::Error> {
     let table = multiverse::process_table()?;
     let own = std::process::id();
     let ancestors = ancestors(&table, own);
