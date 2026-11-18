@@ -5,6 +5,10 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Changed
+
+- Library: `Repaired` is exhaustive, so a match on it names every kind of repair.
+
 ### Fixed
 
 - An archive whose restore mark names a reference outside `refs/mxv/kept/`,

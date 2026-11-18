@@ -1203,3 +1203,53 @@ fn a_repair_of_an_abandon_whose_checkout_was_deleted_after_the_question_changes_
         "{replanned:?}"
     );
 }
+
+#[test]
+fn a_repair_moves_aside_an_archive_whose_workspace_was_removed() {
+    let setup = fresh();
+    setup.create();
+    setup.stopped_archive(setup.archive_plan(), "pins");
+    let removed = setup.workspaces.remove(setup.removal()).unwrap();
+    assert!(matches!(removed, RemovalOutcome::Done(_)), "{removed:?}");
+    let planned = setup.repair_plan();
+    assert!(matches!(planned, Repaired::MovedAside { .. }), "{planned:?}");
+
+    let outcome = setup.lifecycle().repair(&name(), &planned).unwrap();
+
+    let Repairing::Done(done) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(matches!(done.repaired, Repaired::MovedAside { .. }));
+    assert!(done.finish.is_none());
+    assert_eq!(setup.archive_record(), None);
+}
+
+#[test]
+fn a_repair_undoes_a_restore_that_stopped_after_it_made_the_directory() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    let plan = setup.restore_plan();
+    stop_at("root");
+    let stopped = setup.lifecycle().restore(&plan);
+    assert!(
+        matches!(stopped, Err(Error::Unwritable { .. })),
+        "{stopped:?}"
+    );
+    HOOK.with(|hook| *hook.borrow_mut() = None);
+    let planned = setup.repair_plan();
+    assert!(
+        matches!(&planned, Repaired::Undone { archive: undone, .. } if undone.id == archive.id),
+        "{planned:?}"
+    );
+
+    let outcome = setup.lifecycle().repair(&name(), &planned).unwrap();
+
+    let Repairing::Done(done) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(matches!(done.repaired, Repaired::Undone { .. }));
+    assert!(done.finish.is_none());
+    assert!(!setup.record_exists());
+    assert!(setup.runs.lock(&name()).is_ok());
+}

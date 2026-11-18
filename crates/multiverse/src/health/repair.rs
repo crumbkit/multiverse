@@ -29,7 +29,6 @@ const DATED_SUFFIX_BYTES: usize = 14;
 /// What [`Workspaces::repair`] did with the records of one name, or would
 /// do in [`Mode::DryRun`].
 #[derive(Debug)]
-#[non_exhaustive]
 pub enum Repaired {
     /// Nothing of the name is broken, or what is broken is another
     /// command's to repair, which `repair` names.
