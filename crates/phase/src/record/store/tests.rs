@@ -310,14 +310,50 @@ fn a_write_never_follows_a_symbolic_link_left_where_its_temporary_file_goes() {
     write_file(&target, "untouched");
     let temp = state
         .path()
-        .join(format!("runs/.0b9f3c8e.json.{}.tmp", std::process::id()));
+        .join(format!("runs/.0b9f3c8e.json.{}.0.tmp", std::process::id()));
     std::os::unix::fs::symlink(&target, &temp).unwrap();
 
     store.write(&planned(), &lock).unwrap();
 
     assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
     assert_eq!(on_disk(&store), planned());
-    assert!(!temp.exists());
+    assert!(
+        temp.is_symlink(),
+        "the write leaves a name it did not make alone"
+    );
+}
+
+#[test]
+fn a_write_succeeds_beside_a_temporary_file_that_this_process_id_left() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let lock = store.lock(&workspace(), SHORT).unwrap();
+    let left = state
+        .path()
+        .join(format!("runs/.0b9f3c8e.json.{}.tmp", std::process::id()));
+    write_file(&left, "half");
+
+    store.write(&planned(), &lock).unwrap();
+
+    assert_eq!(on_disk(&store), planned());
+}
+
+#[test]
+fn a_lock_refuses_a_symbolic_link_and_leaves_its_target_alone() {
+    let state = tempfile::tempdir().unwrap();
+    let store = RunStore::new(state.path());
+    let target = state.path().join("target");
+    write_file(&target, "untouched");
+    fs::create_dir_all(state.path().join("runs")).unwrap();
+    std::os::unix::fs::symlink(&target, state.path().join("runs/0b9f3c8e.lock")).unwrap();
+
+    let refused = store.lock(&workspace(), SHORT);
+
+    assert!(
+        matches!(&refused, Err(PhaseError::StateUnwritable { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "untouched");
 }
 
 #[test]

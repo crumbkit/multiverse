@@ -96,8 +96,11 @@ pub struct Asked<'a> {
 /// A way to wait for a place on the machine before heavy work starts.
 pub trait Admission {
     /// Waits until the work `asked` describes may start, and returns the
-    /// place that counts it as running. It has no deadline: a machine that
-    /// is busy for an hour holds the work for an hour.
+    /// place that counts it as running. A machine that is busy for an hour
+    /// holds the work for an hour. An admission may stop waiting on its own
+    /// and let the work start, as mxv's deadband admission does when a
+    /// deadband 0.4 daemon that queued the work sends no line for 16
+    /// seconds.
     fn admit(&mut self, asked: &Asked<'_>) -> Box<dyn Place>;
 
     /// Returns where the output of one build is copied. A build always

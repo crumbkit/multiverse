@@ -48,6 +48,18 @@ workspace may need to act on.
 
 ### Changed
 
+- mxv and phase write their records and files and take their locks through
+  crumbkit-durable. A lock file that mxv creates from now on has mode 0600
+  instead of the umask's bits; an existing lock file keeps its mode. A
+  symbolic link where a lock file goes is refused with
+  `mxv::file::unwritable` instead of followed. A command that waits for a
+  lock notices its release within 5 ms instead of 50 ms, and the length of
+  the wait does not change. Two writes of one file at once in one mxv both
+  succeed, a temporary file that a crashed mxv with the same process id left
+  no longer makes a write fail, and a failed write names the file it was
+  writing instead of its hidden temporary file. The temporary file is now
+  `.<name>.<pid>.<n>.tmp`, and phase leaves one that a crash left in place
+  instead of deleting it on its next write.
 - mxv builds on crumbkit 0.6.0 and deadband 0.4.0, which read and print
   durations with jiff in place of humantime, so RUSTSEC-2026-0542 no longer
   applies to mxv. `mxv self usage --since` now reads `3mo` and `1y` as

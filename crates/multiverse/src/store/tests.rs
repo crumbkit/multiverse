@@ -1131,3 +1131,89 @@ fn a_store_refuses_to_repoint_a_record_whose_checkout_does_not_match_its_kind() 
         assert_eq!(fs::read(store.path(&held.name)).unwrap(), before);
     }
 }
+
+#[test]
+fn two_threads_that_replace_one_file_at_once_both_succeed_and_leave_one_whole() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record.json");
+    let first = vec![b'a'; 64 * 1024];
+    let second = vec![b'b'; 64 * 1024];
+    std::thread::scope(|scope| {
+        let writers = [&first, &second].map(|bytes| {
+            let path = &path;
+            scope.spawn(move || {
+                (0..50)
+                    .map(|_| crate::store::replace_file(path, bytes))
+                    .collect::<Result<Vec<()>, Error>>()
+            })
+        });
+        for writer in writers {
+            writer.join().unwrap().unwrap();
+        }
+    });
+    let left = fs::read(&path).unwrap();
+    assert!(left == first || left == second);
+}
+
+#[test]
+fn a_replace_succeeds_beside_a_temporary_file_that_this_process_id_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("record.json");
+    let left = dir
+        .path()
+        .join(format!(".record.json.{}.tmp", std::process::id()));
+    write(&left, "half\n");
+    crate::store::replace_file(&path, b"whole\n").unwrap();
+    assert_eq!(fs::read_to_string(&path).unwrap(), "whole\n");
+}
+
+#[test]
+fn a_failed_replace_names_the_file_it_was_asked_to_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("missing").join("record.json");
+    let failed = crate::store::replace_file(&path, b"whole\n");
+    assert!(
+        matches!(&failed, Err(Error::Unwritable { path: named, .. }) if *named == path),
+        "{failed:?}"
+    );
+}
+
+#[test]
+fn a_new_lock_file_is_readable_and_writable_by_its_owner_alone() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("locks").join("triage.lock");
+    let _held = lock(&path, Duration::ZERO).unwrap();
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+}
+
+#[test]
+fn a_lock_refuses_a_symbolic_link_and_leaves_its_target_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target");
+    write(&target, "untouched\n");
+    let path = dir.path().join("triage.lock");
+    std::os::unix::fs::symlink(&target, &path).unwrap();
+    let refused = lock(&path, Duration::ZERO);
+    assert!(
+        matches!(&refused, Err(Error::Unwritable { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "untouched\n");
+}
+
+#[test]
+fn a_temporary_file_names_its_target_in_the_old_form_and_in_crumbkits_form() {
+    fn targets(found: &str) -> Vec<&str> {
+        crate::store::temp_of(found).collect()
+    }
+    assert_eq!(targets(".AGENTS.md.99999.tmp"), ["AGENTS.md"]);
+    assert_eq!(
+        targets(".AGENTS.md.99999.0.tmp"),
+        ["AGENTS.md", "AGENTS.md.99999"]
+    );
+    assert!(targets("AGENTS.md").is_empty());
+    assert!(targets(".AGENTS.md.tmp").is_empty());
+    assert!(targets(".AGENTS.md.x.tmp").is_empty());
+}

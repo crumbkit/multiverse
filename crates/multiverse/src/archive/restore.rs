@@ -1222,8 +1222,9 @@ struct Accounted {
 /// account for, relative to the directory and sorted. The mark accounts
 /// for each checkout that the run started, `AGENTS.md`, the archive's root
 /// entries and the manifest once the run marked them as written, the
-/// marker once it did, and the temporary file `.<name>.<pid>.tmp` that a
-/// write of one of those files leaves when it stops.
+/// marker once it did, and the temporary file `.<name>.<pid>.<n>.tmp` or
+/// `.<name>.<pid>.tmp` that a write of one of those files leaves when it
+/// stops.
 fn other_files(archive: &Archive, made: &MadeSoFar) -> Result<Vec<String>, Error> {
     let workspace = archive.workspace();
     let started = made.clones.max(made.branches.len());
@@ -1309,7 +1310,7 @@ fn find_other_files(
             continue;
         }
         let half_written =
-            store::temp_of(&name).is_some_and(|target| accounted.files.contains(&dir.join(target)));
+            store::temp_of(&name).any(|target| accounted.files.contains(&dir.join(target)));
         if !half_written {
             found.push(shown);
         }

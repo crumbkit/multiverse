@@ -4,20 +4,25 @@
 //!
 //! It also owns the advisory locks that keep two mxv commands from starting
 //! or stopping one workspace's app, or allocating ports, at the same time.
-//! A lock is an exclusive `flock` on a file. The operating system releases
-//! it when the file closes, which happens when the [`Lock`] drops or the
-//! process that holds it ends, so a crashed mxv leaves no stale lock.
+//! A lock is crumbkit-durable's [`PathLock`], an exclusive `flock` on a
+//! file. The operating system releases it when the file closes, which
+//! happens when the [`Lock`] drops or the process that holds it ends, so a
+//! crashed mxv leaves no stale lock.
+//!
+//! [`replace_file`] and [`lock`] call crumbkit-durable. The other writes
+//! stay here, because crumbkit-durable has no create-if-absent, no
+//! streamed write and no permission bits other than 0600 and the umask's.
 
-use std::fs::{self, File, OpenOptions, TryLockError};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crumbkit_durable::{LockError, Mode, PathLock, WriteStep};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::archive::{ArchiveId, MintHeld, mint_held};
-use crate::clock::{POLL_INTERVAL, pause};
 use crate::error::Error;
 use crate::name::WorkspaceName;
 use crate::record::{RECORD_VERSION, Workspace, WorkspaceState};
@@ -440,35 +445,40 @@ fn read_record(path: &Path) -> Result<Option<Workspace>, Error> {
 }
 
 /// Writes `bytes` to the file at `path`, replacing any file there in one
-/// step: it writes a temporary file beside `path`, syncs it, renames it
-/// over `path` and syncs the directory (DUR-1).
+/// step, with crumbkit-durable's `write_atomically`: it writes the
+/// temporary file `.<name>.<pid>.<n>.tmp` beside `path` with the umask's
+/// permission bits, syncs it, renames it over `path` and syncs the
+/// directory (DUR-1).
+///
+/// A failed directory sync after the rename counts as success, because
+/// `path` already holds `bytes`, and a caller such as [`Store::advance`]
+/// must not take the write back in memory while the disk holds it.
 ///
 /// # Errors
 ///
-/// Returns [`Error::Unwritable`] when a step fails. The temporary file is
-/// removed after a failed rename.
+/// Returns [`Error::Unwritable`] with `path` when a step before the
+/// directory sync fails. `path` is then unchanged, and the temporary file
+/// is removed.
 pub(crate) fn replace_file(path: &Path, bytes: &[u8]) -> Result<(), Error> {
-    let temp = write_temp(path, bytes)?;
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
     )]
-    let renamed = fs::rename(&temp, path);
-    if let Err(source) = renamed {
-        let _ = fs::remove_file(&temp);
-        return Err(Error::Unwritable {
-            path: path.to_path_buf(),
-            source,
-        });
+    let written = crumbkit_durable::write_atomically(path, bytes, Mode::Umask);
+    match written {
+        Ok(()) => Ok(()),
+        Err(error) if error.step == WriteStep::SyncDirectory => Ok(()),
+        Err(error) => Err(Error::Unwritable {
+            path: error.path,
+            source: error.source,
+        }),
     }
-    if let Some(dir) = path.parent() {
-        sync_dir(dir);
-    }
-    Ok(())
 }
 
 /// Writes `bytes` to a new temporary file beside `target`, syncs it and
-/// returns its path. The name starts with `.`, so [`Store::list`] skips it.
+/// returns its path, for [`Store::create`], which links it to `target` only
+/// when no record is there. The name starts with `.`, so [`Store::list`]
+/// skips it.
 fn write_temp(target: &Path, bytes: &[u8]) -> Result<PathBuf, Error> {
     let name = target
         .file_name()
@@ -708,15 +718,26 @@ pub(crate) fn write_file_with(
     Ok(())
 }
 
-/// Returns `<name>` when `found` is the name of a temporary file
-/// `.<name>.<pid>.tmp` that a write of the file `<name>` left, or `None`.
-pub(crate) fn temp_of(found: &str) -> Option<&str> {
-    let (name, pid) = found
-        .strip_prefix('.')?
-        .strip_suffix(".tmp")?
-        .rsplit_once('.')?;
-    (!name.is_empty() && !pid.is_empty() && pid.bytes().all(|byte| byte.is_ascii_digit()))
-        .then_some(name)
+/// Returns each `<name>` whose write could have left the temporary file
+/// `found`: `.<name>.<pid>.<n>.tmp`, which [`replace_file`] leaves through
+/// crumbkit-durable, and `.<name>.<pid>.tmp`, which the other writes here
+/// and earlier versions of mxv leave. A name such as `.a.1.2.tmp` fits
+/// both, as `a` and as `a.1`, so a caller checks each. It returns nothing
+/// for a name of another form.
+pub(crate) fn temp_of(found: &str) -> impl Iterator<Item = &str> {
+    /// Returns what comes before the last `.` of `text` when what follows it
+    /// is a number.
+    fn before_number(text: &str) -> Option<&str> {
+        let (before, number) = text.rsplit_once('.')?;
+        (!before.is_empty() && !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()))
+            .then_some(before)
+    }
+    let stem = found
+        .strip_prefix('.')
+        .and_then(|rest| rest.strip_suffix(".tmp"));
+    let old = stem.and_then(before_number);
+    let crumbkit = old.and_then(before_number);
+    crumbkit.into_iter().chain(old)
 }
 
 /// Removes each temporary file `.<name>.<pid>.tmp` in `dir`.
@@ -736,7 +757,7 @@ fn remove_stale_temps(dir: &Path, name: &str) -> Result<(), Error> {
         let Some(found) = found.to_str() else {
             continue;
         };
-        if temp_of(found) == Some(name) {
+        if temp_of(found).any(|target| target == name) {
             let path = entry.path();
             match fs::remove_file(&path) {
                 Ok(()) => {}
@@ -820,30 +841,6 @@ pub(crate) fn move_aside(from: &Path, to: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Opens the file at `path` for appending, and creates it and its
-/// directory when they do not exist. An app's process writes its log
-/// through the handle, so the log grows in place and is never replaced.
-///
-/// # Errors
-///
-/// Returns [`Error::Unwritable`] when the directory or the file cannot be
-/// created or opened.
-pub(crate) fn append_file(path: &Path) -> Result<File, Error> {
-    let unwritable = |source| Error::Unwritable {
-        path: path.to_path_buf(),
-        source,
-    };
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir).map_err(unwritable)?;
-    }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/multiverse/src/store.rs is the module that writes durable files (DUR-1)"
-    )]
-    let opened = OpenOptions::new().create(true).append(true).open(path);
-    opened.map_err(unwritable)
-}
-
 /// Sets the modification time of the file at `path` to now, and creates
 /// it and its directory when they do not exist. The file holds no bytes,
 /// and nothing syncs it, because a time that a power loss takes back only
@@ -917,43 +914,45 @@ pub const LOCK_WAIT: Duration = Duration::from_secs(5);
 #[derive(Debug)]
 #[must_use = "the lock is released when it drops"]
 pub(crate) struct Lock {
-    /// The locked file, which holds the lock while it is open.
-    _file: File,
+    /// The held lock, which lasts while its file is open.
+    _lock: PathLock,
 }
 
-/// Takes the exclusive lock on the file at `path`, creating the file and
-/// its directory when they do not exist. When another holder has the
-/// lock, it tries again every [`POLL_INTERVAL`] until `wait` passes.
+/// Takes the exclusive lock on the file at `path` with crumbkit-durable's
+/// [`PathLock`], creating the file with mode 0600, and its directory, when
+/// they do not exist. When another holder has the lock, it tries again
+/// every 5 ms until `wait` passes. A `wait` of zero tries once. It refuses
+/// a symbolic link at `path`.
 ///
 /// # Errors
 ///
 /// Returns [`Error::Busy`] when another holder keeps the lock for all of
-/// `wait`, and [`Error::Unwritable`] when the file cannot be opened or
-/// locked.
+/// `wait`, and [`Error::Unwritable`] when the directory or the file cannot
+/// be made or opened, or the file cannot be locked.
 pub(crate) fn lock(path: &Path, wait: Duration) -> Result<Lock, Error> {
-    let file = append_file(path)?;
-    let deadline = Instant::now() + wait;
-    loop {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "crates/multiverse/src/store.rs owns file locks and their deadline"
-        )]
-        let attempt = file.try_lock();
-        match attempt {
-            Ok(()) => return Ok(Lock { _file: file }),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(source)) => {
-                return Err(Error::Unwritable {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(Error::Busy {
-                path: PathBuf::from(path),
-            });
-        }
-        pause(POLL_INTERVAL);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|source| Error::Unwritable {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/store.rs owns file locks and their deadline (DUR-2)"
+    )]
+    let taken = PathLock::acquire(path, Instant::now() + wait);
+    match taken {
+        Ok(lock) => Ok(Lock { _lock: lock }),
+        Err(LockError::Busy { .. }) => Err(Error::Busy {
+            path: PathBuf::from(path),
+        }),
+        Err(LockError::Io { source, .. }) => Err(Error::Unwritable {
+            path: path.to_path_buf(),
+            source,
+        }),
+        Err(other) => Err(Error::Unwritable {
+            path: path.to_path_buf(),
+            source: other.into(),
+        }),
     }
 }
