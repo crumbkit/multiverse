@@ -1233,6 +1233,31 @@ fn a_restore_that_died_is_named_by_list_and_undone_by_mxv_repair_and_the_archive
 }
 
 #[test]
+fn removing_an_archive_beside_a_stopped_restore_that_holds_the_persons_file_refuses_in_a_dry_run_too()
+ {
+    let setup = Setup::new();
+    setup.archive();
+    let directory = setup.plant_a_stopped_restore();
+    write(&directory.join("mine.txt"), "mine\n");
+    for last in ["--dry-run", "--yes"] {
+        let (exit, document) = setup.run(&["remove", "--archived", "triage", last]);
+        assert_eq!(exit, 1, "{last}: {document}");
+        assert_eq!(
+            document["code"], "mxv::restore::stopped_holds_other_files",
+            "{last}: {document}"
+        );
+        assert!(document.to_string().contains("mine.txt"), "{document}");
+    }
+    assert_eq!(
+        fs::read_to_string(directory.join("mine.txt")).unwrap(),
+        "mine\n"
+    );
+    let record: Value =
+        serde_json::from_str(&fs::read_to_string(setup.archive_record("triage")).unwrap()).unwrap();
+    assert!(record.get("restoring").is_some(), "{record}");
+}
+
+#[test]
 fn a_restore_after_a_restore_that_died_finishes_instead_of_refusing_with_name_taken() {
     let setup = Setup::new();
     let head = setup.head();

@@ -409,6 +409,41 @@ fn the_refusal_names_each_path_the_mark_does_not_account_for_and_the_directory()
 }
 
 #[test]
+fn a_regular_file_where_the_mark_names_a_checkout_or_a_root_directory_is_the_persons() {
+    let made = archived(Kind::Worktree);
+    made.kill_at("root");
+    let dir = made.setup.root.join("triage");
+    // The archive gains a root directory, and the person replaces it with a
+    // file of the same name.
+    let mut stopped = made.marked();
+    stopped.root.push(crate::archive::RootEntry {
+        path: "docs".to_owned(),
+        kind: crate::archive::RootKind::Directory { mode: 0o755 },
+    });
+    made.setup.archives.write(&stopped).unwrap();
+    write(dir.join("docs"), "mine\n");
+    // A checkout's folder that the person replaced with a file.
+    git(
+        &made.setup.fixture.clone,
+        &[
+            "worktree",
+            "remove",
+            "--force",
+            made.setup.checkout().to_str().unwrap(),
+        ],
+    );
+    write(made.setup.checkout(), "mine\n");
+    let paths = refused_paths(made.setup.workspaces.repair(
+        &made.setup.archives,
+        &name(),
+        Mode::Change,
+    ));
+    assert_eq!(paths, ["app", "docs"]);
+    assert_eq!(fs::read_to_string(dir.join("docs")).unwrap(), "mine\n");
+    assert_eq!(fs::read_to_string(made.setup.checkout()).unwrap(), "mine\n");
+}
+
+#[test]
 fn a_file_the_person_puts_inside_a_made_checkout_goes_with_the_undone_restore() {
     for kind in [Kind::Worktree, Kind::Clone] {
         let made = archived(kind);

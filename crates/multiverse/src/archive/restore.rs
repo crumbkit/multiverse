@@ -282,8 +282,11 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Archives::read`], and of the backend's
-    /// lookups.
+    /// Returns [`Error::StoppedRestoreHoldsOtherFiles`] when the archive
+    /// holds the mark of a restore that stopped after it made the
+    /// workspace's directory, and the directory holds an entry that the
+    /// mark does not account for. Returns the errors of [`Archives::read`],
+    /// and of the backend's lookups.
     pub fn plan_restore(
         &self,
         archives: &Archives,
@@ -1238,12 +1241,24 @@ fn find_other_files(
         } else {
             format!("{prefix}/{name}")
         };
-        if accounted.whole.contains(&path) || accounted.files.contains(&path) {
+        if accounted.files.contains(&path) {
+            continue;
+        }
+        // A checkout and a root directory entry are directories that the
+        // run made. Anything else at their path, such as a regular file or
+        // a link, is the person's.
+        let directory = || std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir());
+        if accounted.whole.contains(&path) {
+            if !directory() {
+                found.push(shown);
+            }
             continue;
         }
         if accounted.dirs.contains(&path) {
-            if std::fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+            if directory() {
                 find_other_files(&path, &shown, accounted, found)?;
+            } else {
+                found.push(shown);
             }
             continue;
         }

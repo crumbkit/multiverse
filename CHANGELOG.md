@@ -84,7 +84,8 @@ workspace may need to act on.
   file that the person put there afterwards, `mxv repair NAME`,
   `mxv restore NAME` and `mxv remove --archived NAME` delete nothing, keep
   the mark and fail with `mxv::restore::stopped_holds_other_files`, which
-  names each such entry. The mark accounts for each checkout that the
+  names each such entry. Their dry runs refuse the same way, and
+  `mxv remove --archived` refuses before it asks. The mark accounts for each checkout that the
   restore started, with everything inside it, and for `AGENTS.md`, the
   manifest, the marker and the archive's root files once the restore marked
   them as written. The `directory` field of the repair result and the question name

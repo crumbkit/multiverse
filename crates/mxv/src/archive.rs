@@ -1810,6 +1810,11 @@ pub(crate) fn remove(
     }
     let runs = environment.runs()?;
     let lifecycle = Lifecycle::new(&workspaces, &records, &runs);
+    // A stopped restore whose directory holds the person's files refuses
+    // before the question and in a dry run, as the removal itself would.
+    lifecycle
+        .check_stopped_restore(&archive)
+        .map_err(MxvFailure::from)?;
     if args.delete_volumes {
         refuse_live_volumes(&lifecycle, &archive)?;
     }
