@@ -19,6 +19,9 @@ use crate::processes;
 use crate::rows::{NewRow, RemovalResult, ShowRow, WorkspaceRow};
 use crate::run_failures::RunFailure;
 
+#[cfg(test)]
+mod tests;
+
 /// The document that `mxv new` prints.
 pub(crate) const NEW: Document<NewRow> = Document::new(
     "mxv",

@@ -2901,7 +2901,9 @@ fn remove_during_an_ad_hoc_command_removes_the_workspace_and_the_command_runs_on
         "the command never started"
     );
 
-    let (exit, document) = setup.json(&["remove", "triage", "--yes"]);
+    // The command is a process outside phase, so only `--force` removes
+    // the workspace under it.
+    let (exit, document) = setup.json(&["remove", "triage", "--force", "--yes"]);
     let ran_on = child.try_wait().unwrap().is_none();
     // The command ends here whatever the assertions find, so a failure
     // leaves no process behind.

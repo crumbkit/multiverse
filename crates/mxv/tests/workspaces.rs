@@ -347,7 +347,7 @@ fn remove_refuses_a_workspace_that_a_process_outside_phase_works_in_and_names_it
 }
 
 #[test]
-fn a_forced_remove_names_the_outside_process_in_its_question_and_removes_the_workspace() {
+fn a_forced_remove_removes_a_workspace_that_a_process_outside_phase_works_in() {
     let setup = Setup::new();
     let workspace = created(&setup, "reading-list");
     #[expect(
@@ -359,14 +359,6 @@ fn a_forced_remove_names_the_outside_process_in_its_question_and_removes_the_wor
         .current_dir(workspace.join("app"))
         .spawn()
         .unwrap();
-    let (exit, document) = setup.json(&["remove", "reading-list", "--force"]);
-    assert_eq!(exit, 1, "{document}");
-    assert_eq!(document["code"], "mxv::confirmation::needs_yes");
-    assert!(
-        document.to_string().contains(&child.id().to_string()),
-        "{document}"
-    );
-    assert!(workspace.join("app").is_dir());
     let (exit, document) = setup.json(&["remove", "reading-list", "--force", "--yes"]);
     child.kill().unwrap();
     child.wait().unwrap();
