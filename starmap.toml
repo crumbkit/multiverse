@@ -1,0 +1,109 @@
+# The environment variables that the mxv command reads itself. The catalog
+# `VARIABLES` in crates/mxv/src/environment.rs describes the first eleven in
+# the same words, and `PATH` is the one that mxv reads from the caller's
+# environment beside them. crates/mxv/tests/starmap.rs checks that this file
+# declares exactly those variables.
+#
+# mxv reads no secret. It also forwards some variables of its own
+# environment to the host processes that phase starts, such as `LANG` and
+# `SSH_AUTH_SOCK`, and it hands them on without reading them for itself, so
+# this file leaves them out. The variables that the crumbkit crate reads in
+# every tool, such as `NO_COLOR`, are crumbkit's to declare.
+
+[variables.HOME]
+purpose = "The person's home directory, which each base directory defaults to a directory in and which a config file's `root` may start with `~/` for."
+effect = "When it is unset or empty, mxv reads the home directory from the user database, and when it finds none a workspace command fails with mxv::environment::no_directory."
+type = "path"
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.XDG_CONFIG_HOME]
+purpose = "The config directory, where mxv reads its config file from `$XDG_CONFIG_HOME/mxv/config.toml`."
+effect = "When it is unset, empty or relative, mxv uses `~/.config`."
+type = { path = { absolute = true } }
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.XDG_DATA_HOME]
+purpose = "The data directory, which holds the default workspace root `$XDG_DATA_HOME/mxv/workspaces`, one bare mirror for each origin in `$XDG_DATA_HOME/mxv/mirrors`, and the ignored files that an archive keeps."
+effect = "When it is unset, empty or relative, mxv uses `~/.local/share`."
+type = { path = { absolute = true } }
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.XDG_STATE_HOME]
+purpose = "The state directory, which holds each workspace's record, lock and marks, the run records and logs of its units, and each archive's record, all under `$XDG_STATE_HOME/mxv`."
+effect = "When it is unset, empty or relative, mxv uses `~/.local/state`."
+type = { path = { absolute = true } }
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.DEADBAND_SOCKET]
+purpose = "The path of the socket of deadband, the machine's job limiter, which `mxv up` and `mxv restart` ask for a place before a process's `build`, and `mxv run` before a task."
+effect = "When it is unset or empty, mxv looks for `deadband.sock` in `DEADBAND_SOCKET_DIR`, then in the per-user temporary directory on macOS, then in `TMPDIR`. When no daemon answers, the build or task starts at once."
+type = "path"
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.DEADBAND_SOCKET_DIR]
+purpose = "The directory that holds deadband's socket, named `deadband.sock`, which applies when `DEADBAND_SOCKET` is unset or empty."
+effect = "When it is unset or empty, mxv looks in the per-user temporary directory and then in `TMPDIR`."
+type = "path"
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.TMPDIR]
+purpose = "The temporary directory, which holds deadband's socket when `DEADBAND_SOCKET` and `DEADBAND_SOCKET_DIR` are unset and the system has no per-user temporary directory."
+effect = "When it is unset or empty, mxv uses `/tmp/deadband-<USER>.sock`."
+type = "path"
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.USER]
+purpose = "The person's user name, which names deadband's socket in `/tmp` when neither `DEADBAND_SOCKET` nor `TMPDIR` is set."
+effect = "When it is unset or empty, mxv uses `/tmp/deadband.sock`."
+type = "string"
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.DEADBAND_HELD]
+purpose = "Set by deadband for a job that it granted, so that a `build` or a task started under that job runs at once, because the job already holds a place."
+effect = "When it is unset or empty, mxv asks deadband for a place."
+type = "string"
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.DEADBAND_BYPASS]
+purpose = "When it is set to anything but 0, a `build` or a task runs at once without asking deadband for a place."
+effect = "When it is unset, empty or 0, mxv asks deadband for a place."
+type = "string"
+unset = "optional"
+show = "shown"
+source = "inherited"
+
+[variables.MXV_ROOT]
+purpose = "The directory that holds one directory for each workspace, which wins over the config file's `root`, which wins over `$XDG_DATA_HOME/mxv/workspaces`."
+effect = "When it is unset or empty, mxv uses the next of those, and when it is relative a command that needs the root fails with mxv::environment::relative_root."
+type = "path"
+unset = "optional"
+show = "shown"
+source = "setting"
+
+[variables.PATH]
+purpose = "The search path that mxv uses to find the `caddy` program that serves the proxy, when the config file names none, and that phase gives to every host process and to the `docker` commands that run containers."
+effect = "When it is unset, mxv searches no directory for `caddy`, and phase gives the processes and docker commands no PATH."
+type = "path"
+unset = "optional"
+# An empty PATH is a value that names no directory, so it is not unset.
+empty = "value"
+show = "shown"
+source = "inherited"

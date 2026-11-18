@@ -92,6 +92,10 @@ snapbox = { workspace = true, features = ["cmd"] }
 # `std` reads the JSON documents and usage log lines that the binary writes.
 serde_json = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
+# starmap parses the repository's `starmap.toml`, so `tests/starmap.rs` can
+# check that it declares the variables that mxv reads. mxv itself does not
+# link it.
+starmap = { workspace = true }
 
 [lints]
 workspace = true
