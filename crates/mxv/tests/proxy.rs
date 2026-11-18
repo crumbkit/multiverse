@@ -370,6 +370,35 @@ fn two_workspaces_that_make_one_host_label_serve_the_first_and_shadow_the_second
     );
 }
 
+#[test]
+fn the_shadowing_note_names_the_host_label_of_a_route_whose_name_is_not_one() {
+    let setup = Setup::new();
+    setup.without_caddy();
+    let manifest = site()
+        .replace("\"web\", \"api\"", "\"api_v2\"")
+        .replace("routes = [\"web\"]", "routes = [\"api_v2\"]")
+        .replace("\"web\"", "\"api_v2\"")
+        .replace("processes.web", "processes.api_v2");
+    setup.workspace("my_notes", &manifest);
+    setup.workspace("my.notes", &manifest);
+    for name in ["my_notes", "my.notes"] {
+        let (exit, _, _) = setup.json_and_errors(&["up", "-w", name]);
+        assert_eq!(exit, 0);
+    }
+    let routes = setup.routes();
+    let shadowed = routes
+        .iter()
+        .find(|row| row["workspace"] == "my_notes")
+        .unwrap();
+    assert_eq!(shadowed["route"], "api_v2");
+    assert!(
+        shadowed["notes"][0].as_str().unwrap().contains(
+            "my_notes and my.notes both map to the host label my-notes; my.notes serves it"
+        ),
+        "{shadowed}"
+    );
+}
+
 /// Returns a manifest whose unit `web` serves the route `web`, lists the
 /// extra host name `host`, and records its proxy variables in `proxy.txt`
 /// in its checkout.

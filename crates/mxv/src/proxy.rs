@@ -603,16 +603,9 @@ fn listing(
         })
         .collect();
     rows.extend(status.routes.shadowed.iter().map(|shadowed| {
-        let label = shadowed
-            .route
-            .host
-            .strip_prefix(&format!("{}.", shadowed.route.name))
-            .and_then(|rest| rest.strip_suffix(&format!(".{}", multiverse::ROUTE_DOMAIN)))
-            .unwrap_or_default()
-            .to_owned();
         let note = format!(
-            "{} and {} both map to the host label {label}; {} serves it",
-            shadowed.route.workspace, shadowed.by, shadowed.by
+            "{} and {} both map to the host label {}; {} serves it",
+            shadowed.route.workspace, shadowed.by, shadowed.label, shadowed.by
         );
         states.row(&shadowed.route, "(not served)".to_owned(), vec![note])
     }));

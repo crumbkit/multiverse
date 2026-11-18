@@ -7,6 +7,10 @@ workspace may need to act on.
 
 ### Fixed
 
+- The `mxv proxy` routes listing names the host label that two workspaces
+  share in its note on a shadowed route, also when the route's name holds
+  `_`, `.` or an upper-case letter, such as `api_v2`. The note used to show
+  no label for those names.
 - An archive whose restore mark names a reference outside `refs/mxv/kept/`,
   or a repository that is not the source of one of its checkouts, is
   reported as a corrupt archive. `mxv restore`, `mxv repair` and
