@@ -9,10 +9,30 @@ fn declaration() -> std::io::Result<String> {
     std::fs::read_to_string(path)
 }
 
-/// The variables that mxv reads outside [`mxv::VARIABLES`]. `PATH` comes
-/// from the caller's environment that `main` snapshots, and mxv searches its
-/// directories for the programs of a workspace's units.
-const ALSO_READ: &[&str] = &["PATH"];
+/// The variables that mxv reads outside [`mxv::VARIABLES`], each with the
+/// code that reads it.
+const ALSO_READ: &[&str] = &[
+    // The caller's environment that `main` snapshots: the proxy searches it
+    // for `caddy`, and phase passes it on.
+    "PATH",
+    // crumbkit's colour and output budget, from `crumbkit::parse`.
+    "TERM",
+    "NO_COLOR",
+    "CLICOLOR",
+    "CLICOLOR_FORCE",
+    "MXV_OUTPUT_BUDGET",
+    // crumbkit-usage, from `crumbkit_usage::start`.
+    "MXV_PROGRAM",
+    "TRACEPARENT",
+    "TRACESTATE",
+    // crumbkit's `complete` and `mxv completion`.
+    "COMPLETE",
+    "SHELL",
+    "FPATH",
+    "BASH_COMPLETION_USER_DIR",
+    // crumbkit-skills, from `mxv skills`.
+    "CODEX_HOME",
+];
 
 #[test]
 fn starmap_toml_parses_with_the_starmap_crate() {
