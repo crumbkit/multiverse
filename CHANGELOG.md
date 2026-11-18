@@ -92,6 +92,18 @@ workspace may need to act on.
   the workspace's directory only when the repair deletes it, and the question
   and dry run of `mxv restore` say that the run first deletes what a stopped
   restore left.
+- `mxv repair NAME` abandons an archive that stopped before it deleted any
+  checkout: it deletes the archive's record, pins and ignored-files tar, and
+  the workspace is `live` again with every checkout as it was. The result
+  has the new states `abandoned` and `would_abandon`. `mxv list` names
+  `mxv repair NAME` for such an archive, with the new problem "the archive
+  stopped before it deleted any checkout", where it named
+  `mxv archive -w NAME`, which still carries the archive on. `mxv restore`
+  and `mxv remove --archived` of the name name `mxv repair NAME` too. A
+  refused `mxv archive`, such as one that found a file written while a
+  checkout was moved aside, abandons its archive in the same way and still
+  reports the refusal. An archive that has deleted or moved aside a
+  checkout keeps `mxv archive -w NAME`.
 - `mxv up` and every other verb that reads the manifest refuse `ready = { log = "" }`
   with `mxv::manifest::invalid` and the line of the `log` key. Before, phase
   refused the empty pattern only when it checked the plan, with no line.

@@ -91,6 +91,12 @@ pub(crate) enum RepairState {
     Undone,
     /// A dry run: what the stopped restore made would be deleted.
     WouldUndo,
+    /// An archive that stopped before it deleted any checkout was
+    /// abandoned: its record, pins and ignored-files tar were deleted, and
+    /// the workspace is live again with every checkout as it was.
+    Abandoned,
+    /// A dry run: the archive would be abandoned.
+    WouldAbandon,
     /// With `--orphans`, the sweep deleted at least one item.
     Swept,
     /// With `--orphans`, a dry run: the sweep would delete at least one
@@ -123,8 +129,8 @@ pub(crate) struct RepairResult {
     /// The workspace's directory that undoing a stopped restore deleted, or
     /// would delete, or null when it deletes no directory.
     directory: Option<String>,
-    /// The references of the pins that the deletion deleted, or would
-    /// delete.
+    /// The references of the pins that the deletion or the abandon
+    /// deleted, or would delete.
     pins: Vec<String>,
     /// With `--orphans`, one row for each item that no record names. Empty
     /// without `--orphans`.
@@ -403,6 +409,14 @@ impl fmt::Display for RepairResult {
                     "mxv {done} the restore of {name} that stopped: it deleted {made}. The archive stays whole, and `mxv restore {name}` brings the workspace back."
                 )
             }
+            RepairState::Abandoned => write!(
+                formatter,
+                "mxv abandoned the archive of {name}, which stopped before it deleted any checkout: it deleted the archive's record, pins and ignored-files tar, and the workspace {name} is live again."
+            ),
+            RepairState::WouldAbandon => write!(
+                formatter,
+                "mxv would abandon the archive of {name}, which stopped before it deleted any checkout: it would delete the archive's record, pins and ignored-files tar, and the workspace {name} would be live again."
+            ),
         }
     }
 }
@@ -431,6 +445,9 @@ fn question(name: &WorkspaceName, planned: &Repaired) -> Option<String> {
         )),
         Repaired::Undone { .. } => Some(format!(
             "Delete what the restore of {name} that stopped made? The archive stays."
+        )),
+        Repaired::Abandoned { .. } => Some(format!(
+            "Abandon the archive of {name} that stopped before it deleted any checkout? mxv deletes its record, pins and ignored-files tar, and the workspace stays as it is."
         )),
         _ => None,
     }
@@ -545,6 +562,34 @@ pub(crate) fn repair(
                 },
             )
         },
+        Repaired::Abandoned { removal, .. } => {
+            let (pins, warnings) = removal.map_or_else(
+                || (Vec::new(), Vec::new()),
+                |removal| {
+                    (
+                        removal
+                            .archive
+                            .checkouts
+                            .iter()
+                            .map(|checkout| checkout.pin.clone())
+                            .collect(),
+                        removal.warnings,
+                    )
+                },
+            );
+            RepairResult {
+                pins,
+                warnings,
+                ..RepairResult::new(
+                    &name,
+                    if dry {
+                        RepairState::WouldAbandon
+                    } else {
+                        RepairState::Abandoned
+                    },
+                )
+            }
+        }
         // `Repaired` is non-exhaustive, so a repair that a newer library
         // adds reports no change until this command learns it.
         _ => RepairResult::new(&name, RepairState::Unchanged),

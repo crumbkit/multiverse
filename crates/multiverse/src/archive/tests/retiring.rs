@@ -256,7 +256,7 @@ fn a_retiring_record_without_its_state_key_beside_its_archive_resumes() {
         );
         assert_eq!(
             health.workspaces[0].problem,
-            Problem::ArchiveUnfinished,
+            Problem::ArchiveNotStarted,
             "{kind:?}"
         );
         let archive = resumed(&setup);

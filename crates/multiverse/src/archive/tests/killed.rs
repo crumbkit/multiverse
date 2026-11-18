@@ -6,7 +6,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::*;
 use crate::archive::RestoreMark;
-use crate::health::Repaired;
+use crate::health::{self, Repaired};
 
 /// The checkpoints of a restore after which a kill leaves something made,
 /// and `mirrors`, before which it leaves nothing.
@@ -553,4 +553,233 @@ fn a_killed_restore_keeps_a_branch_that_has_moved_since_it_was_created() {
     let moved = Git.branch_tip(&source, "triage").unwrap();
     made.repair(Mode::Change);
     assert_eq!(Git.branch_tip(&source, "triage").unwrap(), moved);
+}
+
+/// The checkpoints of an archive after which a kill leaves every checkout
+/// in place, so a repair abandons the archive.
+const UNTOUCHED_STEPS: [&str; 7] = [
+    "state",
+    "record",
+    "wip",
+    "pins",
+    "ignored",
+    "root",
+    "before-move:app",
+];
+
+/// A workspace with an ignored file, uncommitted work and a root file,
+/// whose archive a panic stopped.
+struct Stopped {
+    setup: Setup,
+    /// The status of the checkout before the archive.
+    before: Vec<String>,
+    /// The head of the checkout before the archive.
+    head: String,
+}
+
+impl Stopped {
+    fn new(kind: Kind, step: &'static str) -> Self {
+        let setup = setup(kind);
+        setup.create();
+        setup.ignore_env();
+        write(setup.checkout().join(".env"), "SECRET=1\n");
+        write(setup.root.join("triage/notes.md"), "keep me\n");
+        leave_uncommitted_work(&setup.checkout());
+        let before = status(&setup.checkout());
+        let head = setup.head();
+        let plan = setup.plan(ArchiveOptions::default());
+        kill(step, || {
+            drop(setup.workspaces.archive(&setup.archives, plan));
+        });
+        Self {
+            setup,
+            before,
+            head,
+        }
+    }
+
+    fn repair(&self, mode: Mode) -> Repaired {
+        self.setup
+            .workspaces
+            .repair(&self.setup.archives, &name(), mode)
+            .unwrap()
+    }
+
+    fn state(&self) -> crate::record::WorkspaceState {
+        self.setup
+            .workspaces
+            .store
+            .read(&name())
+            .unwrap()
+            .unwrap()
+            .state()
+    }
+
+    /// Returns every pin of every archive in the repository that holds
+    /// the pins of this kind of workspace.
+    fn pins(&self) -> String {
+        let workspace = self.setup.workspaces.store.read(&name()).unwrap().unwrap();
+        let holder = workspace.checkouts[0]
+            .mirror()
+            .map_or_else(|| self.setup.fixture.clone.clone(), Path::to_path_buf);
+        git(
+            &holder,
+            &["for-each-ref", "--format=%(refname)", "refs/mxv/archives/"],
+        )
+    }
+
+    /// Checks that the workspace is live and whole, and that no archive
+    /// record, pin or tar is left.
+    fn assert_abandoned(&self, what: &str) {
+        assert_eq!(self.state(), crate::record::WorkspaceState::Live, "{what}");
+        assert!(self.setup.record().is_none(), "{what}: the record");
+        assert!(
+            !self.setup.archives.dir_of(&name()).exists(),
+            "{what}: the record's directory"
+        );
+        assert_eq!(self.pins(), "", "{what}: the pins");
+        assert!(
+            fs::read_dir(self.setup.base.join("data/archives"))
+                .map_or(true, |mut entries| entries.next().is_none()),
+            "{what}: the tar"
+        );
+        assert_eq!(self.setup.head(), self.head, "{what}");
+        assert_eq!(status(&self.setup.checkout()), self.before, "{what}");
+        assert_eq!(
+            fs::read_to_string(self.setup.checkout().join(".env")).unwrap(),
+            "SECRET=1\n",
+            "{what}"
+        );
+        assert_eq!(
+            fs::read_to_string(self.setup.root.join("triage/notes.md")).unwrap(),
+            "keep me\n",
+            "{what}"
+        );
+    }
+}
+
+/// Runs `run` with a checkpoint that panics at `step`, as a kill there
+/// would stop it.
+fn kill(step: &'static str, run: impl FnOnce()) {
+    set_hook(move |at| {
+        assert_ne!(at, step, "killed at {step}");
+        Ok(())
+    });
+    let result = catch_unwind(AssertUnwindSafe(run));
+    clear_hook();
+    assert!(result.is_err(), "{step}: the run was not killed");
+}
+
+fn a_killed_archive_that_deleted_no_checkout_is_abandoned_by_a_repair(kind: Kind) {
+    for step in UNTOUCHED_STEPS {
+        let what = format!("{kind:?} {step}");
+        let stopped = Stopped::new(kind, step);
+        let record = stopped.setup.record();
+        assert_eq!(record.is_some(), step != "state", "{what}");
+        if let Some(archive) = &record {
+            let health = health::classify(
+                &stopped.setup.workspaces.backend,
+                &stopped.setup.workspaces.store.list().unwrap(),
+                &stopped.setup.archives.list().unwrap(),
+            );
+            assert_eq!(
+                health.workspaces[0].problem,
+                health::Problem::ArchiveNotStarted,
+                "{what}"
+            );
+            let planned = stopped.repair(Mode::DryRun);
+            assert!(
+                matches!(&planned, Repaired::Abandoned { id, removal: Some(_) } if *id == archive.id),
+                "{what}: {planned:?}"
+            );
+            assert_eq!(stopped.setup.record().as_ref(), Some(archive), "{what}");
+        }
+        let done = stopped.repair(Mode::Change);
+        assert!(
+            matches!(done, Repaired::Abandoned { .. }),
+            "{what}: {done:?}"
+        );
+        stopped.assert_abandoned(&what);
+        let again = stopped.repair(Mode::Change);
+        assert!(
+            matches!(again, Repaired::Unchanged { repair: None }),
+            "{what}: {again:?}"
+        );
+        stopped.setup.archive();
+        stopped.setup.restore();
+        assert_eq!(stopped.setup.head(), stopped.head, "{what}");
+    }
+}
+
+#[test]
+fn a_worktree_archive_killed_before_it_deleted_a_checkout_is_abandoned_by_a_repair() {
+    a_killed_archive_that_deleted_no_checkout_is_abandoned_by_a_repair(Kind::Worktree);
+}
+
+#[test]
+fn a_clone_archive_killed_before_it_deleted_a_checkout_is_abandoned_by_a_repair() {
+    a_killed_archive_that_deleted_no_checkout_is_abandoned_by_a_repair(Kind::Clone);
+}
+
+#[test]
+fn an_abandon_killed_after_each_step_is_finished_by_a_second_repair() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        for step in ["unpinned", "unrecorded", "abandoned"] {
+            let what = format!("{kind:?} {step}");
+            let stopped = Stopped::new(kind, "root");
+            kill(step, || {
+                drop(stopped.repair(Mode::Change));
+            });
+            let left = stopped.setup.record().is_some();
+            assert_eq!(left, step == "unpinned", "{what}: the record");
+            let retiring = stopped.state() != crate::record::WorkspaceState::Live;
+            assert_eq!(retiring, step != "abandoned", "{what}: the state");
+            let again = stopped.repair(Mode::Change);
+            let expected = match step {
+                "unpinned" => matches!(
+                    again,
+                    Repaired::Abandoned {
+                        removal: Some(_),
+                        ..
+                    }
+                ),
+                "unrecorded" => matches!(again, Repaired::Abandoned { removal: None, .. }),
+                _ => matches!(again, Repaired::Unchanged { repair: None }),
+            };
+            assert!(expected, "{what}: {again:?}");
+            stopped.assert_abandoned(&what);
+        }
+    }
+}
+
+#[test]
+fn a_repair_keeps_an_archive_that_quarantined_a_checkout_for_mxv_archive() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        let stopped = Stopped::new(kind, "moved:app");
+        let archive = stopped.setup.record().unwrap();
+        let planned = stopped.repair(Mode::Change);
+        assert!(
+            matches!(
+                planned,
+                Repaired::Unchanged {
+                    repair: Some(health::Repair::Archive(_))
+                }
+            ),
+            "{kind:?}: {planned:?}"
+        );
+        assert_eq!(stopped.setup.record(), Some(archive), "{kind:?}");
+        assert!(
+            stopped
+                .setup
+                .workspaces
+                .abandon_archive(
+                    &stopped.setup.archives,
+                    stopped.setup.record().unwrap(),
+                    Mode::Change
+                )
+                .unwrap()
+                .is_none()
+        );
+        assert!(stopped.setup.record().is_some(), "{kind:?}");
+    }
 }

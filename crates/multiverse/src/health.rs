@@ -73,8 +73,16 @@ pub enum Problem {
     },
     /// The archive has not finished, and either no workspace has its name,
     /// it counts as retired and every checkout's pin is there, or the
-    /// workspace of that name is the one it archives.
+    /// workspace of that name is the one it archives and the archive has
+    /// retired or quarantined a checkout, or counts as retired.
     ArchiveUnfinished,
+    /// The archive is [`ArchiveState::Retiring`], the workspace of its name
+    /// is the one it archives, and the workspace is untouched, as
+    /// [`untouched`] says, so the archive stopped before it deleted any
+    /// checkout. A repair abandons it: it deletes the archive's pins, tar
+    /// and record and moves the workspace back to live. `mxv archive -w`
+    /// carries it on instead.
+    ArchiveNotStarted,
     /// The archive is still [`ArchiveState::Retiring`], at this version,
     /// and no workspace has its name, because the workspace was removed
     /// after its archive stopped. Nothing says that every checkout was
@@ -255,6 +263,8 @@ pub(crate) struct ArchiveReading<'a> {
     /// finish, older name first, when the archive is one of them, whatever
     /// the case.
     pub(crate) rename: Option<(&'a Archive, &'a Archive)>,
+    /// The state of the archive record.
+    pub(crate) state: ArchiveState,
 }
 
 impl ArchiveReading<'_> {
@@ -267,6 +277,11 @@ impl ArchiveReading<'_> {
             return Some((Problem::RenameUnfinished, Repair::Repair(old.name.clone())));
         }
         let problem = match self.case {
+            ArchiveCase::Resumable(workspace)
+                if self.state == ArchiveState::Retiring && untouched(workspace) =>
+            {
+                Problem::ArchiveNotStarted
+            }
             ArchiveCase::Finishable | ArchiveCase::Resumable(_) => Problem::ArchiveUnfinished,
             ArchiveCase::WorkspaceRemoved => Problem::ArchiveWorkspaceRemoved,
             ArchiveCase::PinsGone => Problem::ArchivePinsGone,
@@ -347,7 +362,11 @@ pub(crate) fn archive_case<'a, E>(
         }
         (ArchiveState::Archived, None) => ArchiveCase::Archived,
     };
-    Ok(ArchiveReading { case, rename })
+    Ok(ArchiveReading {
+        case,
+        rename,
+        state: archive.state,
+    })
 }
 
 /// Reports whether `workspace` is the workspace that `archive` archives:
@@ -419,7 +438,8 @@ fn repair_of(problem: &Problem, name: &WorkspaceName) -> Repair {
         | Problem::ArchiveBesideNewerWorkspace
         | Problem::RenameUnfinished
         | Problem::RestoreUnfinished
-        | Problem::RestoreStopped => Repair::Repair(name.clone()),
+        | Problem::RestoreStopped
+        | Problem::ArchiveNotStarted => Repair::Repair(name.clone()),
     }
 }
 
@@ -487,6 +507,21 @@ pub(crate) fn checkouts_gone(workspace: &Workspace) -> bool {
             .checkouts
             .iter()
             .all(|checkout| gone(&checkout.path))
+}
+
+/// Reports whether an archive of `workspace` has deleted nothing of it:
+/// the workspace's directory and every checkout's directory are
+/// directories, and no checkout lies at, or has a directory at, its
+/// quarantine name. An archive deletes the root files only after the last
+/// checkout retires, so while this holds the archive has deleted nothing,
+/// and abandoning it loses nothing.
+pub(crate) fn untouched(workspace: &Workspace) -> bool {
+    workspace.path.is_dir()
+        && workspace.checkouts.iter().all(|checkout| {
+            checkout.path.is_dir()
+                && crate::archive::quarantine(&checkout.path)
+                    .is_some_and(|held| held.symlink_metadata().is_err())
+        })
 }
 
 /// Returns the broken record of `error`, the error of a record that cannot

@@ -682,7 +682,7 @@
           ]
         },
         "pins": {
-          "description": "The references of the pins that the deletion deleted, or would\ndelete.",
+          "description": "The references of the pins that the deletion or the abandon\ndeleted, or would delete.",
           "type": "array",
           "items": {
             "type": "string"
@@ -763,6 +763,16 @@
           "description": "A dry run: what the stopped restore made would be deleted.",
           "type": "string",
           "const": "would_undo"
+        },
+        {
+          "description": "An archive that stopped before it deleted any checkout was\nabandoned: its record, pins and ignored-files tar were deleted, and\nthe workspace is live again with every checkout as it was.",
+          "type": "string",
+          "const": "abandoned"
+        },
+        {
+          "description": "A dry run: the archive would be abandoned.",
+          "type": "string",
+          "const": "would_abandon"
         },
         {
           "description": "With `--orphans`, the sweep deleted at least one item.",

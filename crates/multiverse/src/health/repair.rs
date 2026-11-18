@@ -5,14 +5,17 @@ use std::path::PathBuf;
 
 use phase::calendar::civil_from_days;
 
-use crate::archive::{Archive, ArchiveRecords, ArchivedRemoval, Archives, RestoreMark};
+use crate::archive::{Archive, ArchiveId, ArchiveRecords, ArchivedRemoval, Archives, RestoreMark};
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::name::{MOST_NAME_BYTES, WorkspaceName};
 use crate::store::Records;
 use crate::workspaces::{Mode, Workspaces};
 
-use super::{ArchiveCase, Repair, archive_case, classify, count_as_there, pins_gone, rename_pair};
+use super::{
+    ArchiveCase, Problem, Repair, archive_case, classify, count_as_there, pins_gone, rename_pair,
+    untouched,
+};
 
 /// The most dated names that [`Workspaces::repair`] tries for an older
 /// archive: `NAME-<date>`, then `NAME-<date>-2` up to this suffix. When
@@ -72,6 +75,17 @@ pub enum Repaired {
         /// when it is empty.
         directory: bool,
     },
+    /// An archive that stopped before it deleted any checkout is abandoned:
+    /// its pins, its private tar and its record are deleted, and the
+    /// workspace is live again with every checkout as it was.
+    Abandoned {
+        /// The id of the abandoned archive.
+        id: ArchiveId,
+        /// What the abandon deleted, or `None` when an earlier abandon
+        /// already deleted the archive's record and stopped before it
+        /// moved the workspace back to live.
+        removal: Option<Box<ArchivedRemoval>>,
+    },
 }
 
 impl<B: Backend> Workspaces<B> {
@@ -82,7 +96,10 @@ impl<B: Backend> Workspaces<B> {
     /// or moves aside when its pins are gone or it had not retired every
     /// checkout, a rename that an earlier repair
     /// started is finished, and an archive that a restore already rebuilt
-    /// is deleted, and what a restore that died made is undone. `name` may be either name of a rename that stopped. Each
+    /// is deleted, what a restore that died made is undone, and an archive
+    /// that stopped before it deleted any checkout is abandoned, as is a
+    /// retiring workspace whose abandon deleted the archive record and
+    /// stopped. `name` may be either name of a rename that stopped. Each
     /// repair deletes only what the workspace already holds again. In
     /// [`Mode::DryRun`] it changes nothing and returns what it would do.
     /// The caller holds the workspace's lock.
@@ -104,7 +121,7 @@ impl<B: Backend> Workspaces<B> {
             // the record of the name is read again here, and the error of
             // an unreadable one returns instead of "nothing is broken".
             archives.read(name)?;
-            return self.repair_workspace(name);
+            return self.repair_retiring(archives, name, mode);
         };
         // A rename that stopped is finished first, whichever of its two
         // names the person gave and whether or not a workspace holds the
@@ -119,9 +136,23 @@ impl<B: Backend> Workspaces<B> {
             &all.archives,
             count_as_there(&self.backend),
         );
-        let repair = reading.broken(name).map(|(_, repair)| repair);
+        let broken = reading.broken(name);
         let case = reading.case;
         let archive = archive.clone();
+        if let Some((Problem::ArchiveNotStarted, _)) = broken {
+            let id = archive.id.clone();
+            // The caller holds the lock of the name, and the abandon reads
+            // the workspace again and checks it is untouched before it
+            // deletes anything.
+            return Ok(match self.abandon_archive(archives, archive, mode)? {
+                Some(removal) => Repaired::Abandoned {
+                    id,
+                    removal: Some(Box::new(removal)),
+                },
+                None => Repaired::Unchanged { repair: None },
+            });
+        }
+        let repair = broken.map(|(_, repair)| repair);
         match case {
             ArchiveCase::PinsGone | ArchiveCase::WorkspaceRemoved => {
                 move_aside(archives, archive, mode)
@@ -173,6 +204,33 @@ impl<B: Backend> Workspaces<B> {
                 self.repair_workspace(name)
             }
         }
+    }
+
+    /// Repairs the workspace record of `name`, which no archive record
+    /// has the name of. A retiring workspace with nothing deleted, which
+    /// an abandon that stopped after it deleted the archive record leaves,
+    /// moves back to live, and the empty directory that an archive makes
+    /// for its record before it moves the state is deleted. Any other
+    /// repair is another command's.
+    fn repair_retiring(
+        &self,
+        archives: &Archives,
+        name: &WorkspaceName,
+        mode: Mode,
+    ) -> Result<Repaired, Error> {
+        if let Some(mut workspace) = self.store.read(name)?
+            && let Some(id) = workspace.state().archive().cloned()
+            && untouched(&workspace)
+        {
+            if mode == Mode::Change {
+                // `remove_dir` deletes only an empty directory, so a
+                // directory that holds anything stays for `--orphans`.
+                drop(std::fs::remove_dir(archives.dir_of(name)));
+                self.store.abandon(&mut workspace)?;
+            }
+            return Ok(Repaired::Abandoned { id, removal: None });
+        }
+        self.repair_workspace(name)
     }
 
     /// Returns the repair that the workspace record of `name` needs, which

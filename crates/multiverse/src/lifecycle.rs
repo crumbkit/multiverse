@@ -508,7 +508,9 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     ///
     /// Then it stops the units, runs the in-use check, retires the
     /// checkouts and finishes the archive, and it holds the lock through the
-    /// last write.
+    /// last write. When [`Workspaces::archive`] refuses before it deleted
+    /// any checkout, it abandons the archive under the same lock, as
+    /// `mxv repair` does, and returns the refusal.
     ///
     /// # Errors
     ///
@@ -586,7 +588,10 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
                     disposable,
                     late,
                 } => (*archive, *removal, disposable, late),
-                ArchiveOutcome::Refused(refusal) => return Ok(Archived::Refused(refusal)),
+                ArchiveOutcome::Refused(refusal) => {
+                    self.abandon_refused(&name);
+                    return Ok(Archived::Refused(refusal));
+                }
             };
         let finish = self.finish_archive(&mut archive, volumes)?;
         Ok(Archived::Done(Box::new(RetireDone {
@@ -595,6 +600,21 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
             late,
             finished: FinishDone { archive, finish },
         })))
+    }
+
+    /// Abandons the archive of `name` that [`Workspaces::archive`] refused,
+    /// when it deleted no checkout, so a refusal leaves no archive record,
+    /// pins or tar, and the workspace is live again. The caller holds the
+    /// lock of `name`. The refusal is the answer whatever this does, so a
+    /// failure is dropped: it leaves the archive for `mxv repair`, which
+    /// `mxv list` names.
+    fn abandon_refused(&self, name: &WorkspaceName) {
+        if let Ok(Some(archive)) = self.archives.read(name) {
+            drop(
+                self.workspaces
+                    .abandon_archive(self.archives, archive, Mode::Change),
+            );
+        }
     }
 
     /// Finishes the archive that `confirmed` is, whose workspace is gone. It
@@ -742,7 +762,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// of either name excludes the other, and otherwise `name` alone. It
     /// plans the repair again, and changes nothing unless that plan is the
     /// confirmed one, which means the same directory moved aside, the same
-    /// rename, or a deletion. A renamed archive is finished under the lock
+    /// rename, a deletion, an undo or an abandon of the same archive. A renamed archive is finished under the lock
     /// of its new name, as [`Lifecycle::finish`] finishes an archive.
     ///
     /// # Errors
@@ -814,7 +834,8 @@ fn lock_names(name: &WorkspaceName, planned: &Repaired) -> Vec<WorkspaceName> {
 
 /// Reports whether `again` is the repair that `confirmed` asked about: the
 /// same directory moved aside, the same rename, a deletion of the same
-/// archive, or the same archive's stopped restore undone. A deletion names its archive by id, because another repair,
+/// archive, the same archive's stopped restore undone, or the same
+/// archive abandoned. A deletion names its archive by id, because another repair,
 /// a new archive and a stopped restore can leave another archive of the
 /// name to delete while the question is open. Any other plan asks no
 /// question, so it is never confirmed.
@@ -839,6 +860,7 @@ fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
                 archive: undone, ..
             },
         ) => asked.id == undone.id,
+        (Repaired::Abandoned { id: asked, .. }, Repaired::Abandoned { id, .. }) => asked == id,
         _ => false,
     }
 }

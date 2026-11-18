@@ -60,15 +60,16 @@ pub(crate) struct WorkspaceRow {
     /// What is wrong with the workspace or its archive, or empty when
     /// nothing is: a record that mxv cannot read, such as one that is not
     /// JSON or that a newer mxv wrote, an archive that stopped before it
-    /// finished, one that stopped and whose pins are gone, an older archive
-    /// beside a newer workspace of the same name, which only the archive
-    /// listing shows, a restore that stopped before it deleted the archive,
-    /// a restore that stopped before it finished the workspace,
-    /// a workspace whose checkout directories are all gone, a workspace that
-    /// mxv new did not finish, or a size that mxv cannot measure. A row of a record that mxv cannot read
-    /// names the record in `name`, a workspace record without `.json` and
-    /// an archive record by its directory, and leaves the other fields
-    /// empty.
+    /// deleted any checkout, which `mxv repair` abandons, an archive that
+    /// stopped before it finished, one that stopped and whose pins are
+    /// gone, an older archive beside a newer workspace of the same name,
+    /// which only the archive listing shows, a restore that stopped before
+    /// it deleted the archive, a restore that stopped before it finished
+    /// the workspace, a workspace whose checkout directories are all gone,
+    /// a workspace that mxv new did not finish, or a size that mxv cannot
+    /// measure. A row of a record that mxv cannot read names the record in
+    /// `name`, a workspace record without `.json` and an archive record by
+    /// its directory, and leaves the other fields empty.
     problem: String,
     /// The command that repairs the problem, such as
     /// `mxv archive -w old-api` or `mxv repair old-api`, what the person
@@ -287,6 +288,10 @@ fn problem_text(broken: &Broken) -> String {
     match &broken.problem {
         Problem::Unreadable { reason } => reason.clone(),
         Problem::ArchiveUnfinished => "the archive stopped before it finished".to_owned(),
+        Problem::ArchiveNotStarted => format!(
+            "the archive stopped before it deleted any checkout; `mxv archive -w {}` carries it on instead",
+            broken.name
+        ),
         Problem::ArchiveWorkspaceRemoved => {
             "the archive stopped before it finished, and its workspace was removed".to_owned()
         }
