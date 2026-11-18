@@ -104,7 +104,7 @@ source = "setting"
 
 [variables.PATH]
 purpose = "The search path that mxv uses to find the `caddy` program that serves the proxy, when the config file names none. phase also gives it to every host process and to the `docker` commands that run containers, and builds a sandboxed process's read grants from its directories."
-effect = "When it is unset, mxv searches no directory for `caddy`, and phase gives the processes and docker commands no PATH."
+effect = "When it is unset, mxv searches no directory for `caddy`, and phase gives the processes and docker commands no PATH. An empty PATH is not told apart from a path of one empty entry, so the search for `caddy` also tries a program named `caddy` in the directory that mxv started in."
 type = "path"
 unset = "optional"
 show = "shown"
