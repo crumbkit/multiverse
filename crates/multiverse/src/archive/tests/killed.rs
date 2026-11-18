@@ -900,9 +900,7 @@ fn a_mark_that_names_another_start_for_the_branch_is_refused_and_the_branch_stay
     let source = made.setup.fixture.clone.clone();
     made.kill_at("kept");
     let branch = made.marked().checkouts[0].branch.clone();
-    let start = git(&source, &["rev-parse", &branch]).trim().to_owned();
-    git(&source, &["branch", "-f", &branch, "HEAD"]);
-    let other = git(&source, &["rev-parse", &branch]).trim().to_owned();
+    let other = "1".repeat(40);
     edit_record(&made, |mark| mark["branches"] = serde_json::json!([other]));
     let repaired = made
         .setup
@@ -914,6 +912,6 @@ fn a_mark_that_names_another_start_for_the_branch_is_refused_and_the_branch_stay
     );
     assert!(
         !git(&source, &["branch", "--list", &branch]).is_empty(),
-        "{start}"
+        "the branch {branch} is gone"
     );
 }
