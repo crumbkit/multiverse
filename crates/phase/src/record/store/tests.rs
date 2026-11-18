@@ -1224,3 +1224,17 @@ fn a_planned_volume_keeps_the_owner_that_an_earlier_run_recorded() {
 
     assert_eq!(on_disk(&store).volumes[0].owner, Some(owner));
 }
+
+#[test]
+fn a_directory_sync_that_the_file_system_cannot_do_counts_as_done_as_crumbkit_durable_counts_it() {
+    for errno in [
+        rustix::io::Errno::INVAL,
+        rustix::io::Errno::NOTSUP,
+        rustix::io::Errno::NOSYS,
+    ] {
+        let error = std::io::Error::from_raw_os_error(errno.raw_os_error());
+        assert!(super::cannot_sync_directory(&error), "{errno:?}");
+    }
+    let denied = std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error());
+    assert!(!super::cannot_sync_directory(&denied));
+}

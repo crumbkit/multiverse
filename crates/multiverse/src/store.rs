@@ -740,7 +740,9 @@ pub(crate) fn temp_of(found: &str) -> impl Iterator<Item = &str> {
     crumbkit.into_iter().chain(old)
 }
 
-/// Removes each temporary file `.<name>.<pid>.tmp` in `dir`.
+/// Removes each temporary file of the file `<name>` in `dir`, in either
+/// form that [`temp_of`] reads: `.<name>.<pid>.tmp` and crumbkit-durable's
+/// `.<name>.<pid>.<n>.tmp`.
 fn remove_stale_temps(dir: &Path, name: &str) -> Result<(), Error> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,

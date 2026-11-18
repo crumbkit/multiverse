@@ -54,12 +54,17 @@ workspace may need to act on.
   symbolic link where a lock file goes is refused with
   `mxv::file::unwritable` instead of followed. A command that waits for a
   lock notices its release within 5 ms instead of 50 ms, and the length of
-  the wait does not change. Two writes of one file at once in one mxv both
-  succeed, a temporary file that a crashed mxv with the same process id left
-  no longer makes a write fail, and a failed write names the file it was
-  writing instead of its hidden temporary file. The temporary file is now
-  `.<name>.<pid>.<n>.tmp`, and phase leaves one that a crash left in place
-  instead of deleting it on its next write.
+  the wait does not change. A write that replaces a whole file, such as a
+  workspace record, `AGENTS.md`, the manifest, an archive record or a run
+  record, now behaves better in three ways. Two such writes of one file at
+  once in one mxv both succeed. A temporary file that a crashed mxv with the
+  same process id left no longer makes the write fail. A failed write names
+  the file it was writing instead of its hidden temporary file. The
+  temporary file of such a write is now `.<name>.<pid>.<n>.tmp`, and phase
+  leaves one that a crash left in place instead of deleting it on its next
+  write. The first write of a workspace record and the writes that copy
+  archived files keep their old temporary file, so a leftover of the same
+  process id still fails them, and their errors still name that file.
 - mxv builds on crumbkit 0.6.0 and deadband 0.4.0, which read and print
   durations with jiff in place of humantime, so RUSTSEC-2026-0542 no longer
   applies to mxv. `mxv self usage --since` now reads `3mo` and `1y` as

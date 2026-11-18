@@ -374,14 +374,15 @@ pub(crate) fn secure_dir(dir: &Path) -> Result<(), PhaseError> {
 
 /// Syncs the directory `dir`, so a rename or a removal in it survives a
 /// power loss. Some file systems cannot sync a directory and fail with
-/// EINVAL or ENOTSUP, and there the sync is skipped, because the rename
+/// EINVAL, ENOTSUP or ENOSYS, and there the sync is skipped, as
+/// crumbkit-durable skips it after a write, because the rename
 /// itself has succeeded.
 ///
 /// # Errors
 ///
 /// Returns [`PhaseError::StateUnwritable`] when the directory cannot be
 /// opened or synced for another reason.
-pub(crate) fn sync_directory(dir: &Path) -> Result<(), PhaseError> {
+fn sync_directory(dir: &Path) -> Result<(), PhaseError> {
     let synced = File::open(dir).and_then(|handle| handle.sync_all());
     match synced {
         Ok(()) => Ok(()),
@@ -394,11 +395,13 @@ pub(crate) fn sync_directory(dir: &Path) -> Result<(), PhaseError> {
 }
 
 /// Reports whether `error` is how a file system that cannot sync a
-/// directory refuses it: EINVAL or ENOTSUP.
+/// directory refuses it: EINVAL, ENOTSUP or ENOSYS, the errors that
+/// crumbkit-durable's directory sync also skips.
 fn cannot_sync_directory(error: &io::Error) -> bool {
     let code = error.raw_os_error();
     code == Some(rustix::io::Errno::INVAL.raw_os_error())
         || code == Some(rustix::io::Errno::NOTSUP.raw_os_error())
+        || code == Some(rustix::io::Errno::NOSYS.raw_os_error())
 }
 
 /// The write-ahead journal of one workspace's run, which the engine keeps
