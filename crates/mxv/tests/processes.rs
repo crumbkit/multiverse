@@ -1048,7 +1048,10 @@ fn a_forced_remove_of_a_workspace_with_running_units_finds_no_outside_process() 
     setup.json(&["up", "-w", "triage"]);
     let (exit, removed) = setup.json(&["remove", "triage", "--yes", "--force"]);
     assert_eq!(exit, 0, "{removed}");
-    assert!(!removed.to_string().contains("mxv::remove::in_use"), "{removed}");
+    assert!(
+        !removed.to_string().contains("mxv::remove::in_use"),
+        "{removed}"
+    );
     assert!(!setup.root().join("workspaces/triage").exists());
 }
 

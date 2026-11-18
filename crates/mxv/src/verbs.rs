@@ -765,9 +765,7 @@ fn stash_clause(removal: &Removal) -> String {
 /// Returns the sentence of a removal's question that names the process
 /// outside phase that `outside` gives, or nothing.
 fn outside_clause(outside: Option<&str>) -> String {
-    outside.map_or_else(String::new, |reason| {
-        format!(" It is in use: {reason}.")
-    })
+    outside.map_or_else(String::new, |reason| format!(" It is in use: {reason}."))
 }
 
 /// Removes the workspace that `args` names, after the person confirms, or
