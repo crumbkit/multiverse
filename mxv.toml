@@ -5,6 +5,17 @@
 # `mxv run <name>` runs in a workspace's checkout of this repository. Each
 # task takes one place from deadband. The rest of the lane needs environment
 # variables or other tools, which a task cannot set.
+#
+# mxv asks the deadband daemon for a place before a build or a task, and it
+# starts the build or task at once when no daemon answers. The want below
+# names that daemon as an optional dependency, and it is the table that
+# jumpgate reads. mxv itself ignores a `[wants.*]` table.
+
+[wants.deadband]
+repo = "github.com/crumbkit/deadband"
+provides = "deadband"
+as = "DEADBAND_SOCKET"
+optional = true
 
 [tasks.fmt]
 argv = ["cargo", "fmt", "--check"]
