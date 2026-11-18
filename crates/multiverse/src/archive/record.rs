@@ -411,7 +411,9 @@ impl TryFrom<String> for KeptRef {
         if name.strip_prefix(KEPT_NAMESPACE).is_some_and(stays_inside) {
             Ok(Self(name))
         } else {
-            Err(format!("the reference {name} is not below {KEPT_NAMESPACE}"))
+            Err(format!(
+                "the reference {name} is not below {KEPT_NAMESPACE}"
+            ))
         }
     }
 }
