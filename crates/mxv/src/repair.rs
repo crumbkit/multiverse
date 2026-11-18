@@ -86,6 +86,11 @@ pub(crate) enum RepairState {
     Deleted,
     /// A dry run: the archive would be deleted.
     WouldDelete,
+    /// What a restore that stopped had made was deleted, and the archive
+    /// stays whole.
+    Undone,
+    /// A dry run: what the stopped restore made would be deleted.
+    WouldUndo,
     /// With `--orphans`, the sweep deleted at least one item.
     Swept,
     /// With `--orphans`, a dry run: the sweep would delete at least one
@@ -115,6 +120,9 @@ pub(crate) struct RepairResult {
     /// The command that repairs what is broken when `mxv repair` does not,
     /// such as `mxv archive -w docs`, or null.
     repair: Option<String>,
+    /// The workspace's directory that undoing a stopped restore deleted, or
+    /// would delete, or null when it deletes no directory.
+    directory: Option<String>,
     /// The references of the pins that the deletion deleted, or would
     /// delete.
     pins: Vec<String>,
@@ -146,6 +154,7 @@ impl RepairResult {
             archive: None,
             kept: Vec::new(),
             repair: None,
+            directory: None,
             pins: Vec::new(),
             orphans: Vec::new(),
             warnings: Vec::new(),
@@ -379,6 +388,21 @@ impl fmt::Display for RepairResult {
                 formatter,
                 "mxv would delete the archive of {name}, which the restore had already rebuilt."
             ),
+            RepairState::Undone | RepairState::WouldUndo => {
+                let made = self.directory.as_deref().map_or_else(
+                    || "what the restore had made".to_owned(),
+                    |directory| format!("what the restore had made, such as {directory}"),
+                );
+                let done = if self.state == RepairState::Undone {
+                    "undid"
+                } else {
+                    "would undo"
+                };
+                write!(
+                    formatter,
+                    "mxv {done} the restore of {name} that stopped: it deleted {made}. The archive stays whole, and `mxv restore {name}` brings the workspace back."
+                )
+            }
         }
     }
 }
@@ -397,6 +421,16 @@ fn question(name: &WorkspaceName, planned: &Repaired) -> Option<String> {
         )),
         Repaired::Deleted(_) => Some(format!(
             "Delete the archive of {name} and its pins? The workspace {name} that the restore rebuilt stays."
+        )),
+        Repaired::Undone {
+            archive,
+            directory: true,
+        } => Some(format!(
+            "Delete what the restore of {name} that stopped made, including {}? The archive stays.",
+            archive.path.display()
+        )),
+        Repaired::Undone { .. } => Some(format!(
+            "Delete what the restore of {name} that stopped made? The archive stays."
         )),
         _ => None,
     }
@@ -497,6 +531,17 @@ pub(crate) fn repair(
                     RepairState::WouldDelete
                 } else {
                     RepairState::Deleted
+                },
+            )
+        },
+        Repaired::Undone { archive, directory } => RepairResult {
+            directory: directory.then(|| archive.path.display().to_string()),
+            ..RepairResult::new(
+                &name,
+                if dry {
+                    RepairState::WouldUndo
+                } else {
+                    RepairState::Undone
                 },
             )
         },

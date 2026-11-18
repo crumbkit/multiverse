@@ -2,8 +2,8 @@ use crumbkit::{Call, Failure as _, Recovery};
 use multiverse::SshRefusal;
 
 use super::{
-    MxvFailure, RESTORE_CHANGED, SSH_AUTHENTICATION_FAILED, SSH_HOST_KEY_CHANGED,
-    SSH_HOST_KEY_UNVERIFIED, WORKSPACE_NOT_FOUND,
+    MxvFailure, RESTORE_CHANGED, RESTORE_STOPPED_HOLDS_OTHER_FILES, SSH_AUTHENTICATION_FAILED,
+    SSH_HOST_KEY_CHANGED, SSH_HOST_KEY_UNVERIFIED, WORKSPACE_NOT_FOUND,
 };
 
 #[test]
@@ -41,6 +41,31 @@ fn a_restore_whose_records_changed_after_the_question_offers_its_dry_run() {
         "--dry-run".to_owned(),
     ]);
     assert_eq!(format!("{call:?}"), format!("{expected:?}"));
+}
+
+#[test]
+fn a_stopped_restore_beside_the_persons_files_names_them_and_says_to_move_them() {
+    let failure = MxvFailure::from(multiverse::Error::StoppedRestoreHoldsOtherFiles {
+        name: "triage".parse().unwrap(),
+        path: "/work/triage".into(),
+        paths: vec!["mine.txt".to_owned(), "notes".to_owned()],
+    });
+
+    assert_eq!(failure.code(), RESTORE_STOPPED_HOLDS_OTHER_FILES);
+    assert_eq!(
+        failure.to_string(),
+        "a stopped restore of triage made the directory /work/triage, which now holds entries that the restore did not make, so mxv deleted nothing and kept the record of what the restore made: mine.txt, notes"
+    );
+    assert_eq!(
+        hint(&failure),
+        "move or delete these entries of /work/triage, which the stopped restore did not make, and run the command again: mine.txt, notes"
+    );
+    let fields: Vec<String> = failure
+        .fields()
+        .iter()
+        .map(|field| field.name().to_owned())
+        .collect();
+    assert_eq!(fields, ["name", "path", "paths"]);
 }
 
 /// Returns the failure of an ssh refusal of `refusal` by the host

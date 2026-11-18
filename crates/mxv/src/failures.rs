@@ -187,6 +187,12 @@ pub const REPAIR_CHANGED: Code = Code::from_spelling("mxv::repair::changed");
 /// The code of a restore whose records changed between the question that
 /// offered to delete a left-over archive and the deletion.
 pub const RESTORE_CHANGED: Code = Code::from_spelling("mxv::restore::changed");
+/// The code of a stopped restore whose workspace directory, which the
+/// restore made, holds entries that the restore's mark does not account
+/// for, so `mxv repair`, `mxv restore` and `mxv remove --archived` delete
+/// nothing.
+pub const RESTORE_STOPPED_HOLDS_OTHER_FILES: Code =
+    Code::from_spelling("mxv::restore::stopped_holds_other_files");
 /// The code of a manifest that declares containers on a machine without a
 /// `docker` program on `PATH`.
 pub const DOCKER_NOT_FOUND: Code = Code::from_spelling("mxv::docker::not_found");
@@ -570,6 +576,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     REPAIR_NAMES_TAKEN,
     REPAIR_CHANGED,
     RESTORE_CHANGED,
+    RESTORE_STOPPED_HOLDS_OTHER_FILES,
     DOCKER_NOT_FOUND,
     DOCKER_COMPOSE_MISSING,
     DOCKER_ADDRESS_POOLS_EXHAUSTED,
@@ -702,6 +709,7 @@ impl Failure for MxvFailure {
                 Error::WrongLock { .. } => WORKSPACE_WRONG_LOCK,
                 Error::ArchiveUnfinished { .. } => WORKSPACE_ARCHIVE_UNFINISHED,
                 Error::DatedNamesTaken { .. } => REPAIR_NAMES_TAKEN,
+                Error::StoppedRestoreHoldsOtherFiles { .. } => RESTORE_STOPPED_HOLDS_OTHER_FILES,
                 Error::MirrorBusy { .. } => MIRROR_LOCKED,
                 Error::MirrorFetchFailed { .. } => MIRROR_FETCH_FAILED,
                 Error::SshRefused { refusal, .. } => match refusal {
@@ -1117,6 +1125,11 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::DatedNamesTaken { name, last } => Recovery::hint(format!(
             "rename or remove a workspace or archive that holds a dated name of {name}, such as {last}, then run `mxv repair {name}` again"
         )),
+        Error::StoppedRestoreHoldsOtherFiles { path, paths, .. } => Recovery::hint(format!(
+            "move or delete these entries of {}, which the stopped restore did not make, and run the command again: {}",
+            shown(path),
+            paths.join(", ")
+        )),
         Error::DockerMissing { .. } => Recovery::hint(
             "install docker and put it on PATH, and run the command again; a workspace that has run containers needs docker until `mxv remove` removes it",
         ),
@@ -1217,6 +1230,11 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         Error::DatedNamesTaken { name, last } => {
             vec![Field::new("name", name.as_str()), Field::new("last", last)]
         }
+        Error::StoppedRestoreHoldsOtherFiles { name, path, paths } => vec![
+            Field::new("name", name.as_str()),
+            Field::new("path", shown(path)),
+            Field::new("paths", FieldValue::list(paths.iter())),
+        ],
         Error::MirrorBusy { mirror } => vec![Field::new("mirror", shown(mirror))],
         Error::TemplateInvalid { path, message } => vec![
             Field::new("path", shown(path)),

@@ -74,14 +74,14 @@ use mxv::{
     REPAIR_NAMES_TAKEN, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH,
     REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED, RESTORE_CHANGED,
     RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING,
-    RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED, RESTORE_UNFINISHED,
-    RUN_CODES, SSH_AUTHENTICATION_FAILED, SSH_HOST_KEY_CHANGED, SSH_HOST_KEY_UNVERIFIED,
-    TASK_AMBIGUOUS, TASK_UNKNOWN, TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED,
-    WORKSPACE_ARCHIVE_UNFINISHED, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED,
-    WORKSPACE_CREATING, WORKSPACE_DIRTY, WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES,
-    WORKSPACE_MISMATCHED_CHECKOUT, WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING,
-    WORKSPACE_STATE_CHANGED, WORKSPACE_TRANSITION_REFUSED, WORKSPACE_VOLUMES,
-    WORKSPACE_WORKTREE_KIND, WORKSPACE_WRONG_LOCK,
+    RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
+    RESTORE_STOPPED_HOLDS_OTHER_FILES, RESTORE_UNFINISHED, RUN_CODES, SSH_AUTHENTICATION_FAILED,
+    SSH_HOST_KEY_CHANGED, SSH_HOST_KEY_UNVERIFIED, TASK_AMBIGUOUS, TASK_UNKNOWN,
+    TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED, WORKSPACE_ARCHIVE_UNFINISHED,
+    WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_CREATING, WORKSPACE_DIRTY,
+    WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_MISMATCHED_CHECKOUT,
+    WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_STATE_CHANGED,
+    WORKSPACE_TRANSITION_REFUSED, WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND, WORKSPACE_WRONG_LOCK,
 };
 use tempfile::TempDir;
 
@@ -107,6 +107,10 @@ const REPAIR_RACE: &str = "Only a second command that changes the records of the
 
 /// Why the start probes cannot provoke `mxv::restore::changed`.
 const RESTORE_RACE: &str = "Only a second command that changes the records of the name between the question of `mxv restore` and the restore, or between its question about the archive that an earlier restore left and the deletion, provokes it, and no test runs two commands at that moment; the unit tests of mxv's failures check its message and its recovery.";
+
+/// Why the start probes cannot provoke
+/// `mxv::restore::stopped_holds_other_files`.
+const STOPPED_RESTORE: &str = "Only a restore that a kill stopped after it made the workspace's directory, beside a file that the person put there afterwards, provokes it, and the start probes kill no restore; the killed-restore tests of multiverse's archive module provoke it, and the unit tests of mxv's failures check its message and its hint.";
 
 /// Why the start probes cannot provoke `mxv::repair::names_taken`.
 const REPAIR_NAMES: &str = "Only an older archive beside a newer workspace whose 99 dated names are all taken provokes it, and the fixture holds no such archive; multiverse's health tests check the names that the repair tries.";
@@ -499,6 +503,7 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(REPAIR_CHANGED, REPAIR_RACE),
     Unprovoked::new(RESTORE_CHANGED, RESTORE_RACE),
     Unprovoked::new(REPAIR_NAMES_TAKEN, REPAIR_NAMES),
+    Unprovoked::new(RESTORE_STOPPED_HOLDS_OTHER_FILES, STOPPED_RESTORE),
     Unprovoked::new(ARCHIVE_MANIFEST_DISPOSABLE, ARCHIVE_STATE),
     Unprovoked::new(ARCHIVE_RECORD_TOO_LARGE, ARCHIVE_STATE),
     Unprovoked::new(ARCHIVE_VOLUMES_IN_USE, ARCHIVE_STATE),

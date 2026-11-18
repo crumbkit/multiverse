@@ -103,6 +103,7 @@ pub(super) fn archive(text: &str, digit: char, state: ArchiveState) -> Archive {
         manifest: None,
         manifest_mode: None,
         ignored: Vec::new(),
+        restoring: None,
     }
 }
 

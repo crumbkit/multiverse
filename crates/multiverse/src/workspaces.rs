@@ -5,6 +5,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use serde::{Deserialize, Serialize};
+
 use crate::backend::{Backend, INITIALIZING, RefHolder};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
@@ -868,7 +870,8 @@ pub(crate) fn default_branch(base: &str) -> String {
 
 /// What a run of [`Workspaces::make`] created, so that
 /// [`Workspaces::undo`] deletes that and nothing else.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub(crate) struct MadeSoFar {
     /// Whether the run created the workspace's directory.
     pub(crate) directory: bool,
@@ -894,6 +897,7 @@ pub(crate) struct MadeSoFar {
     /// Whether the record belongs to someone else, because the run did not
     /// write it. A restore writes the record last, so [`Workspaces::undo`]
     /// leaves whatever record has the name alone.
+    #[serde(skip)]
     pub(crate) record_not_ours: bool,
 }
 
@@ -2052,7 +2056,8 @@ impl<B: Backend> Workspaces<B> {
     /// Each step is best effort, because the caller reports the failure
     /// that stopped the creation. The record is deleted only when every
     /// step succeeded, so `mxv remove` can finish a cleanup that failed.
-    pub(crate) fn undo(&self, workspace: &Workspace, made: &MadeSoFar) {
+    /// It returns whether every step succeeded.
+    pub(crate) fn undo(&self, workspace: &Workspace, made: &MadeSoFar) -> bool {
         let mut clean = true;
         for (repository, reference) in &made.refs {
             clean &= self
@@ -2081,10 +2086,16 @@ impl<B: Backend> Workspaces<B> {
             }
             clean &= self.backend.prune_checkouts(&checkout.source).is_ok();
             if let Some(start) = start {
+                // A branch that is gone or has moved is not the one the run
+                // created, so there is nothing of the run's to delete.
                 clean &= self
                     .backend
                     .delete_branch_at(&checkout.source, &checkout.branch, start)
-                    .is_ok();
+                    .is_ok()
+                    || self
+                        .backend
+                        .branch_tip(&checkout.source, &checkout.branch)
+                        .is_ok_and(|tip| tip.as_deref() != Some(start.as_str()));
             }
         }
         if made.manifest {
@@ -2104,11 +2115,15 @@ impl<B: Backend> Workspaces<B> {
             clean &= crate::marker::delete(&workspace.path).is_ok();
         }
         if made.directory {
-            clean &= fs::remove_dir(&workspace.path).is_ok();
+            clean &= match fs::remove_dir(&workspace.path) {
+                Ok(()) => true,
+                Err(error) => error.kind() == io::ErrorKind::NotFound,
+            };
         }
         if clean && !made.record_not_ours {
             let _ = self.store.delete(&workspace.name);
         }
+        clean
     }
 
     /// Returns what removing the workspace `name` would do, or why it

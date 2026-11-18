@@ -98,6 +98,12 @@ pub enum Problem {
     /// directory there, as [`Rebuilt::Whole`] says, so a restore rebuilt
     /// the workspace and stopped before it deleted the archive.
     RestoreUnfinished,
+    /// The archive is [`ArchiveState::Archived`], no workspace has its
+    /// name, and the archive holds a mark that a restore wrote, so a
+    /// restore died, or is still running, after it began to make the
+    /// workspace. The next restore of the name, or a repair, undoes what
+    /// the mark lists.
+    RestoreStopped,
     /// The workspace has checkouts, and every checkout's directory is gone,
     /// while the directory that holds the workspace's directory is there.
     CheckoutsGone,
@@ -230,6 +236,9 @@ pub(crate) enum ArchiveCase<'a> {
     /// The archive is archived, and the workspace of its name is the one a
     /// restore rebuilt from it, whole, as [`Rebuilt::Whole`] says.
     RestoreUnfinished,
+    /// The archive is archived, no workspace has its name, and its record
+    /// holds the mark of a restore that began and did not finish.
+    RestoreStopped,
     /// The archive is archived, and a workspace that is another one, or
     /// that a restore rebuilt and is partly gone, has its name.
     ArchivedBesideWorkspace,
@@ -264,6 +273,7 @@ impl ArchiveReading<'_> {
             ArchiveCase::Renaming(..) => Problem::RenameUnfinished,
             ArchiveCase::BesideNewerWorkspace => Problem::ArchiveBesideNewerWorkspace,
             ArchiveCase::RestoreUnfinished => Problem::RestoreUnfinished,
+            ArchiveCase::RestoreStopped => Problem::RestoreStopped,
             ArchiveCase::ArchivedBesideWorkspace | ArchiveCase::Archived => return None,
         };
         let repair = repair_of(&problem, name);
@@ -332,6 +342,9 @@ pub(crate) fn archive_case<'a, E>(
             ArchiveCase::RestoreUnfinished
         }
         (ArchiveState::Archived, Some(_)) => ArchiveCase::ArchivedBesideWorkspace,
+        (ArchiveState::Archived, None) if archive.restoring.is_some() => {
+            ArchiveCase::RestoreStopped
+        }
         (ArchiveState::Archived, None) => ArchiveCase::Archived,
     };
     Ok(ArchiveReading { case, rename })
@@ -405,7 +418,8 @@ fn repair_of(problem: &Problem, name: &WorkspaceName) -> Repair {
         | Problem::ArchivePinsGone
         | Problem::ArchiveBesideNewerWorkspace
         | Problem::RenameUnfinished
-        | Problem::RestoreUnfinished => Repair::Repair(name.clone()),
+        | Problem::RestoreUnfinished
+        | Problem::RestoreStopped => Repair::Repair(name.clone()),
     }
 }
 

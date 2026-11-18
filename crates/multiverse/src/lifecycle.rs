@@ -367,6 +367,24 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         self.delete_archive_held(&lock, confirmed, asked)
     }
 
+    /// Refuses with [`Error::StoppedRestoreHoldsOtherFiles`] when `archive`
+    /// holds the mark of a restore that stopped after it made the
+    /// workspace's directory, no workspace holds its name, and the
+    /// directory holds an entry that the mark does not account for. A dry
+    /// run of `mxv remove --archived` calls it, so it refuses as the
+    /// removal would. It changes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the refusal, and the errors of reading the workspace record
+    /// and the directory.
+    pub fn check_stopped_restore(&self, archive: &Archive) -> Result<(), Error> {
+        if archive.restoring.is_some() && self.workspaces.store.read(&archive.name)?.is_none() {
+            crate::archive::refuse_other_files(archive)?;
+        }
+        Ok(())
+    }
+
     /// Deletes the archive that `confirmed` is, for a caller that holds the
     /// lock of its name as `lock`, because a second lock of one name in one
     /// process waits and fails with [`Error::Busy`]. It reads the archive of
@@ -378,13 +396,20 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// the archive that `asked` did not name. Then it deletes those volumes,
     /// the pins and the record, in that order, so the record that holds the
     /// volumes' stable id stays until they are gone, and a failure can be
-    /// tried again.
+    /// tried again. An archive that holds the mark of a restore that died,
+    /// with no workspace of the name, has what that restore made deleted
+    /// before its record goes, because the mark goes with the record.
     ///
     /// # Errors
     ///
     /// Returns [`Error::WrongLock`] when `lock` is not the lock of
-    /// `confirmed`'s name, the errors of the archive's record, of docker,
-    /// and of [`Workspaces::remove_archive`]. The steps before a failure stay done.
+    /// `confirmed`'s name. Returns
+    /// [`Error::StoppedRestoreHoldsOtherFiles`], before it deletes
+    /// anything, when the archive holds the mark of a stopped restore whose
+    /// directory holds an entry that the mark does not account for, as
+    /// [`Lifecycle::check_stopped_restore`] says. Returns the errors of the
+    /// archive's record, of docker, and of [`Workspaces::remove_archive`];
+    /// when one of those fails, the deletions before it stay done.
     pub fn delete_archive_held(
         &self,
         lock: &WorkspaceLock,
@@ -398,6 +423,11 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         if archive.id != confirmed.id || archive.state != ArchiveState::Archived {
             return Ok(ArchiveDeleted::Changed);
         }
+        // A stopped restore whose directory holds the person's files is
+        // refused before the volumes go, so the refusal deletes nothing.
+        self.check_stopped_restore(&archive)?;
+        let stopped =
+            archive.restoring.is_some() && self.workspaces.store.read(&archive.name)?.is_none();
         if !asked.volumes.is_empty() {
             if let Some(workspace) = self.volumes_in_use(&archive)? {
                 return Ok(ArchiveDeleted::VolumesInUse(workspace));
@@ -424,6 +454,14 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
             }
         }
         (self.workspaces.checkpoint)("volumes")?;
+        // A restore that died leaves what its mark lists, and the mark goes
+        // with the record, so it is undone first. A workspace that holds the
+        // name means the restore finished, and the mark is stale.
+        let mut archive = archive;
+        if stopped {
+            self.workspaces
+                .undo_stopped_restore(self.archives, &mut archive)?;
+        }
         let removed = self
             .workspaces
             .remove_archive(self.archives, archive, Mode::Change)?;
@@ -775,8 +813,8 @@ fn lock_names(name: &WorkspaceName, planned: &Repaired) -> Vec<WorkspaceName> {
 }
 
 /// Reports whether `again` is the repair that `confirmed` asked about: the
-/// same directory moved aside, the same rename, or a deletion of the same
-/// archive. A deletion names its archive by id, because another repair,
+/// same directory moved aside, the same rename, a deletion of the same
+/// archive, or the same archive's stopped restore undone. A deletion names its archive by id, because another repair,
 /// a new archive and a stopped restore can leave another archive of the
 /// name to delete while the question is open. Any other plan asks no
 /// question, so it is never confirmed.
@@ -795,6 +833,12 @@ fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
         (Repaired::Deleted(asked), Repaired::Deleted(deleted)) => {
             asked.archive.id == deleted.archive.id
         }
+        (
+            Repaired::Undone { archive: asked, .. },
+            Repaired::Undone {
+                archive: undone, ..
+            },
+        ) => asked.id == undone.id,
         _ => false,
     }
 }

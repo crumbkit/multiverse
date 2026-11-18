@@ -22,6 +22,7 @@ use crate::workspaces::{Mode, NewOutcome, Repo, Workspaces};
 
 mod cases;
 mod edges;
+mod killed;
 mod retiring;
 
 type Hook = Box<dyn FnMut(&str) -> Result<(), Error>>;

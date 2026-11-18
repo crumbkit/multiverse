@@ -1179,6 +1179,119 @@ fn a_restore_stopped_before_it_deleted_its_archive_is_finished_by_mxv_repair() {
     assert_eq!(document["total"], 1, "{document}");
 }
 
+impl Setup {
+    /// Leaves the archive `triage` as a restore that died after it made the
+    /// workspace's directory leaves it: the record holds the mark, and the
+    /// directory holds a file that the restore wrote. Returns the directory.
+    fn plant_a_stopped_restore(&self) -> PathBuf {
+        let path = self.archive_record("triage");
+        let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        record["restoring"] = serde_json::json!({ "directory": true, "agents": true });
+        write(&path, &serde_json::to_string_pretty(&record).unwrap());
+        let directory = PathBuf::from(record["path"].as_str().unwrap());
+        write(&directory.join("AGENTS.md"), "half written\n");
+        directory
+    }
+}
+
+#[test]
+fn a_restore_that_died_is_named_by_list_and_undone_by_mxv_repair_and_the_archive_stays_whole() {
+    let setup = Setup::new();
+    let head = setup.head();
+    setup.archive();
+    let directory = setup.plant_a_stopped_restore();
+    for args in [&["list"][..], &["list", "--archived"][..]] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        let row = &document["data"][0];
+        assert_eq!(
+            row["problem"],
+            "the restore stopped before it finished, and left what it made"
+        );
+        assert_eq!(row["repair"], "mxv repair triage");
+    }
+    let (exit, document) = setup.run(&["repair", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "would_undo", "{document}");
+    assert_eq!(
+        document["data"]["directory"],
+        directory.display().to_string()
+    );
+    assert!(directory.join("AGENTS.md").exists());
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "undone", "{document}");
+    assert!(!directory.exists());
+    let record: Value =
+        serde_json::from_str(&fs::read_to_string(setup.archive_record("triage")).unwrap()).unwrap();
+    assert!(record.get("restoring").is_none(), "{record}");
+    let (exit, document) = setup.run(&["list", "--archived"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(setup.head(), head);
+}
+
+#[test]
+fn removing_an_archive_beside_a_stopped_restore_that_holds_the_persons_file_refuses_in_a_dry_run_too()
+ {
+    let setup = Setup::new();
+    setup.archive();
+    let directory = setup.plant_a_stopped_restore();
+    write(&directory.join("mine.txt"), "mine\n");
+    for last in ["--dry-run", "--yes"] {
+        let (exit, document) = setup.run(&["remove", "--archived", "triage", last]);
+        assert_eq!(exit, 1, "{last}: {document}");
+        assert_eq!(
+            document["code"], "mxv::restore::stopped_holds_other_files",
+            "{last}: {document}"
+        );
+        assert!(document.to_string().contains("mine.txt"), "{document}");
+    }
+    assert_eq!(
+        fs::read_to_string(directory.join("mine.txt")).unwrap(),
+        "mine\n"
+    );
+    let record: Value =
+        serde_json::from_str(&fs::read_to_string(setup.archive_record("triage")).unwrap()).unwrap();
+    assert!(record.get("restoring").is_some(), "{record}");
+}
+
+#[test]
+fn a_restore_after_a_restore_that_died_finishes_instead_of_refusing_with_name_taken() {
+    let setup = Setup::new();
+    let head = setup.head();
+    setup.archive();
+    let directory = setup.plant_a_stopped_restore();
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_ne!(
+        fs::read_to_string(directory.join("AGENTS.md")).unwrap(),
+        "half written\n"
+    );
+    assert_eq!(setup.head(), head);
+    assert!(!setup.archive_record("triage").exists());
+}
+
+#[test]
+fn a_restore_refuses_a_directory_that_the_person_made_even_beside_a_mark_that_covers_none() {
+    let setup = Setup::new();
+    setup.archive();
+    let path = setup.archive_record("triage");
+    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record["restoring"] = serde_json::json!({});
+    write(&path, &serde_json::to_string_pretty(&record).unwrap());
+    let directory = PathBuf::from(record["path"].as_str().unwrap());
+    write(&directory.join("mine.txt"), "mine\n");
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::restore::name_taken", "{document}");
+    assert_eq!(
+        fs::read_to_string(directory.join("mine.txt")).unwrap(),
+        "mine\n"
+    );
+}
+
 #[test]
 fn repair_of_a_name_with_nothing_broken_has_nothing_to_do() {
     let setup = Setup::new();

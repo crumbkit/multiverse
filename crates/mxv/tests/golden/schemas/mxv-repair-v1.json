@@ -674,6 +674,13 @@
             "null"
           ]
         },
+        "directory": {
+          "description": "The workspace's directory that undoing a stopped restore deleted, or\nwould delete, or null when it deletes no directory.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "pins": {
           "description": "The references of the pins that the deletion deleted, or would\ndelete.",
           "type": "array",
@@ -703,6 +710,7 @@
         "archive",
         "kept",
         "repair",
+        "directory",
         "pins",
         "orphans",
         "warnings"
@@ -745,6 +753,16 @@
           "description": "A dry run: the archive would be deleted.",
           "type": "string",
           "const": "would_delete"
+        },
+        {
+          "description": "What a restore that stopped had made was deleted, and the archive\nstays whole.",
+          "type": "string",
+          "const": "undone"
+        },
+        {
+          "description": "A dry run: what the stopped restore made would be deleted.",
+          "type": "string",
+          "const": "would_undo"
         },
         {
           "description": "With `--orphans`, the sweep deleted at least one item.",

@@ -293,6 +293,15 @@ fn archived_beside_its_restore(setup: &Setup) -> WorkspaceName {
     name()
 }
 
+/// An archive with the mark of a restore that died, and no workspace.
+fn archived_with_a_restore_mark(setup: &Setup) -> WorkspaceName {
+    setup.create();
+    let mut archive = setup.archive();
+    archive.restoring = Some(crate::archive::RestoreMark::default());
+    setup.archives.write(&archive).unwrap();
+    name()
+}
+
 fn archived_beside_its_restore_without_checkouts(setup: &Setup) -> WorkspaceName {
     archived_beside_its_restore(setup);
     fs::remove_dir_all(setup.checkout()).unwrap();
@@ -340,6 +349,7 @@ fn listed(found: &[Broken], name: &WorkspaceName, old: &str) -> String {
         Problem::ArchiveBesideNewerWorkspace => "beside a newer workspace",
         Problem::RenameUnfinished => "rename unfinished",
         Problem::RestoreUnfinished => "restore unfinished",
+        Problem::RestoreStopped => "restore stopped",
         Problem::CheckoutsGone => "checkouts gone",
         Problem::CreateUnfinished => "create unfinished",
     };
@@ -408,6 +418,7 @@ fn repaired_text(repaired: Result<Repaired, Error>, old: &str) -> String {
             "rename to the dated name".to_owned()
         }
         Ok(Repaired::Deleted(_)) => "delete".to_owned(),
+        Ok(Repaired::Undone { .. }) => "undo the restore".to_owned(),
     }
 }
 
@@ -637,6 +648,16 @@ const ROWS: &[Row] = &[
         workspaces: "healthy",
         subject: "unchanged",
         repair: "unchanged, no repair",
+    },
+    Row {
+        case: "archived with the mark of a restore that died",
+        kind: Kind::Clone,
+        pins: Pins::Readable,
+        build: archived_with_a_restore_mark,
+        archives: "restore stopped, repair the name",
+        workspaces: "restore stopped, repair the name",
+        subject: "unchanged",
+        repair: "undo the restore",
     },
     Row {
         case: "archived beside a newer workspace",

@@ -64,11 +64,34 @@ workspace may need to act on.
   beats, so when a deadband 0.4 daemon queues an mxv build and then sends no
   line for 16 seconds, mxv stops waiting and starts the build; before, it
   waited with no deadline.
-
 - `mxv list` names a workspace that a killed `mxv new` left in the `creating`
   state, with the repair `mxv remove NAME`, and `mxv new` of that name fails
   with `mxv::workspace::creating` instead of `mxv::workspace::exists`.
-
+- `mxv restore` writes a mark into the archive's record, in the optional
+  field `restoring`, before each step that creates something. When a restore
+  dies, the next `mxv restore` of the name deletes what the mark lists and
+  restores again, instead of refusing with `mxv::restore::name_taken`, and
+  `mxv repair NAME` deletes it without restoring, with the new state
+  `undone` that names the directory. `mxv list` shows the new problem "the
+  restore stopped before it finished, and left what it made". mxv deletes a
+  directory at the workspace's path only when the mark says the restore made
+  it, or when the directory is empty. The archive record stays at version 3.
+  `mxv remove --archived NAME` on an archive that holds a mark deletes what
+  the stopped restore made before it deletes the record, and a repair, a
+  restore or a removal keeps the mark when something it made cannot be
+  deleted. When the mark says the restore made the directory and the
+  directory holds an entry that the mark does not account for, such as a
+  file that the person put there afterwards, `mxv repair NAME`,
+  `mxv restore NAME` and `mxv remove --archived NAME` delete nothing, keep
+  the mark and fail with `mxv::restore::stopped_holds_other_files`, which
+  names each such entry. Their dry runs refuse the same way, and
+  `mxv remove --archived` refuses before it asks. The mark accounts for each checkout that the
+  restore started, with everything inside it, and for `AGENTS.md`, the
+  manifest, the marker and the archive's root files once the restore marked
+  them as written. The `directory` field of the repair result and the question name
+  the workspace's directory only when the repair deletes it, and the question
+  and dry run of `mxv restore` say that the run first deletes what a stopped
+  restore left.
 - `mxv up` and every other verb that reads the manifest refuse `ready = { log = "" }`
   with `mxv::manifest::invalid` and the line of the `log` key. Before, phase
   refused the empty pattern only when it checked the plan, with no line.
