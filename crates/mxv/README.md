@@ -315,7 +315,9 @@ what a repair would do before it does it.
 | the restore stopped before it finished, and left what it made | `mxv repair NAME` | Deletes what the `restoring` mark lists and keeps the archive whole, so `mxv restore NAME` can run again. |
 
 A workspace that is `retiring` with no archive record has no row in
-`mxv list`. An archive that stopped right after it moved the workspace to
+`mxv list` unless it has checkouts and every checkout directory is gone, when
+its row is "every checkout directory is gone" with `mxv remove NAME`.
+An archive that stopped right after it moved the workspace to
 `retiring`, or an abandon that stopped after it deleted the archive record,
 leaves one. When the workspace has at least one checkout and every checkout
 is in place, `mxv repair NAME` moves it back to `live`. Otherwise

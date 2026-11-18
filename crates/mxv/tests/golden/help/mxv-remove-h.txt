@@ -1,4 +1,4 @@
-Remove a workspace's checkouts, its merged branches, its directory and its record
+Remove a workspace's clones with their branches, its directory and its record
 
 Usage: mxv remove [OPTIONS] <NAME>
 

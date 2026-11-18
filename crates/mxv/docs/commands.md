@@ -23,7 +23,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv archive`](#mxv-archive): Archive a workspace, so restore can rebuild it at the same commits
 - [`mxv restore`](#mxv-restore): Rebuild an archived workspace at its archived commits
 - [`mxv repair`](#mxv-repair): Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans list what no record names
-- [`mxv remove`](#mxv-remove): Remove a workspace's checkouts, its merged branches, its directory and its record
+- [`mxv remove`](#mxv-remove): Remove a workspace's clones with their branches, its directory and its record
 - [`mxv clean`](#mxv-clean): Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces
 - [`mxv reclaim`](#mxv-reclaim): Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
 - [`mxv pin`](#mxv-pin): Keep mxv reclaim from stopping a workspace
@@ -592,7 +592,7 @@ Effects: destructive, idempotent, closed-world.
 
 ## `mxv remove`
 
-Remove a workspace's checkouts, its merged branches, its directory and its record.
+Remove a workspace's clones with their branches, its directory and its record.
 
 Remove fetches nothing. It counts a clone's unpushed commits against the clone's own remote branches and the heads and tags that its mirror last fetched from origin, and a refusal names how long ago the mirror fetched.
 

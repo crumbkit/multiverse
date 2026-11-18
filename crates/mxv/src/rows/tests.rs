@@ -1,7 +1,9 @@
-use multiverse::ProcessNote;
-use multiverse::health::Problem;
+use std::path::PathBuf;
 
-use super::{KindName, NoteRow, ProcessRow, StateName, text_of_problem};
+use multiverse::ProcessNote;
+use multiverse::health::{Problem, Repair};
+
+use super::{KindName, NoteRow, ProcessRow, StateName, repair_text, text_of_problem};
 
 fn row(notes: &[ProcessNote]) -> ProcessRow {
     ProcessRow {
@@ -102,15 +104,38 @@ fn the_readme_problem_table_has_a_row_for_every_problem() {
         .take_while(|line| line.starts_with('|'))
         .skip(2)
         .collect();
+    // Each row's first two cells, the problem and the repair, trimmed. A
+    // problem matches only a whole cell, so a text that starts another
+    // problem's text does not stand in for it.
+    let cells: Vec<Vec<&str>> = rows
+        .iter()
+        .map(|row| {
+            row.split(" | ")
+                .map(|cell| cell.trim_matches(['|', ' ']))
+                .take(2)
+                .collect()
+        })
+        .collect();
     let missing: Vec<String> = every_problem()
         .iter()
-        .map(|problem| match problem {
-            // The problem of a record that cannot be read is the read
-            // error, so its row is found by its repair.
-            Problem::Unreadable { .. } => "move PATH aside by hand".to_owned(),
-            problem => text_of_problem(problem, "NAME"),
+        .filter_map(|problem| {
+            let (column, text) = match problem {
+                // The problem of a record that cannot be read is the read
+                // error, so its row is found by its repair.
+                Problem::Unreadable { .. } => (
+                    1,
+                    format!(
+                        "`{}`",
+                        repair_text(&Repair::MoveAside(PathBuf::from("PATH")))
+                    ),
+                ),
+                problem => (0, text_of_problem(problem, "NAME")),
+            };
+            let found = cells
+                .iter()
+                .any(|row| row.get(column).is_some_and(|cell| *cell == text));
+            (!found).then_some(text)
         })
-        .filter(|text| !rows.iter().any(|row| row.contains(text.as_str())))
         .collect();
     assert!(
         missing.is_empty(),
