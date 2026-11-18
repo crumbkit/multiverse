@@ -1270,13 +1270,17 @@ fn a_repair_undoes_a_restore_that_stopped_after_it_made_the_directory() {
     setup.create();
     let archive = setup.archive();
     let plan = setup.restore_plan();
-    stop_at("root");
-    let stopped = setup.lifecycle().restore(&plan);
-    assert!(
-        matches!(stopped, Err(Error::Unwritable { .. })),
-        "{stopped:?}"
-    );
+    // A kill unwinds without the undo that a failed step runs, so the
+    // restore leaves its mark in the archive's record.
+    set_hook(|step| {
+        assert_ne!(step, "root", "killed at {step}");
+        Ok(())
+    });
+    let killed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        drop(setup.lifecycle().restore(&plan));
+    }));
     HOOK.with(|hook| *hook.borrow_mut() = None);
+    assert!(killed.is_err(), "the restore was not killed");
     let planned = setup.repair_plan();
     assert!(
         matches!(&planned, Repaired::Undone { archive: undone, .. } if undone.id == archive.id),
