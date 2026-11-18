@@ -646,6 +646,19 @@ pub(crate) fn remove_volumes_line(name: &str, allow: Allow) -> String {
     format!("mxv {}", words.join(" "))
 }
 
+/// Returns the recovery of a removal that a process outside phase stops.
+fn remove_in_use_recovery(name: &str, allow: Allow) -> Recovery {
+    let forced = Allow {
+        discard_changes: true,
+        ..allow
+    };
+    Recovery::hint(format!(
+        "stop that process or move it out of the workspace and run `{}` again, or run `{}`, which removes the workspace under it",
+        remove_line(name, allow),
+        remove_line(name, forced)
+    ))
+}
+
 /// Returns the recovery that runs the removal of the workspace `name` with
 /// the flags of `allow` and `--yes`.
 fn run_removal(name: &str, allow: Allow) -> Recovery {
@@ -775,17 +788,7 @@ impl Failure for MxvFailure {
             Self::Changed { name, allow } => {
                 Recovery::Run(Call::typed(remove_words(name, *allow, "--dry-run")))
             }
-            Self::RemoveInUse { name, allow, .. } => Recovery::hint(format!(
-                "stop that process or move it out of the workspace and run `{}` again, or run `{}`, which removes the workspace under it",
-                remove_line(name, *allow),
-                remove_line(
-                    name,
-                    Allow {
-                        discard_changes: true,
-                        ..*allow
-                    }
-                )
-            )),
+            Self::RemoveInUse { name, allow, .. } => remove_in_use_recovery(name, *allow),
             Self::RepairChanged { name } => Recovery::hint(format!(
                 "run `mxv repair {name}` again, which asks about the records as they now stand"
             )),
