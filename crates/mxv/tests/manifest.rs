@@ -1,5 +1,5 @@
 //! The check that `mxv.toml` at the repository root is a manifest that mxv
-//! accepts, and that it declares the tasks and the want that the file's
+//! accepts, and that it declares the tasks and the need that the file's
 //! comments describe.
 
 use std::path::Path;
@@ -34,13 +34,13 @@ fn mxv_toml_declares_the_fmt_clippy_and_test_tasks_and_no_unit() {
 }
 
 #[test]
-fn mxv_toml_wants_the_deadband_daemon_as_an_optional_process() {
+fn mxv_toml_needs_the_deadband_socket_as_an_optional_variable() {
     let table: toml::Table = toml::from_str(&declaration().unwrap()).unwrap();
-    let wants = table["wants"].as_table().unwrap();
-    assert_eq!(wants.keys().collect::<Vec<_>>(), ["deadband"]);
-    let want = wants["deadband"].as_table().unwrap();
-    assert_eq!(want["repo"].as_str(), Some("github.com/crumbkit/deadband"));
-    assert_eq!(want["provides"].as_str(), Some("deadband"));
-    assert_eq!(want["as"].as_str(), Some("DEADBAND_SOCKET"));
-    assert_eq!(want["optional"].as_bool(), Some(true));
+    let needs = table["needs"].as_table().unwrap();
+    assert_eq!(needs.keys().collect::<Vec<_>>(), ["deadband"]);
+    let need = needs["deadband"].as_table().unwrap();
+    assert_eq!(need["repo"].as_str(), Some("github.com/crumbkit/deadband"));
+    assert_eq!(need["from"].as_str(), Some("deadband-socket"));
+    assert_eq!(need["as"].as_str(), Some("DEADBAND_SOCKET"));
+    assert_eq!(need["optional"].as_bool(), Some(true));
 }

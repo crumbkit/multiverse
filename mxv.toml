@@ -7,13 +7,14 @@
 # variables or other tools, which a task cannot set.
 #
 # mxv asks the deadband daemon for a place before a build or a task, and it
-# starts the build or task at once when no daemon answers. The want below
-# names that daemon as an optional dependency, and it is the table that
-# jumpgate reads. mxv itself ignores a `[wants.*]` table.
+# starts the build or task at once when no daemon answers. The need below
+# names that daemon's socket as an optional dependency, which the tasks of
+# this file consume, and it is the table that jumpgate reads. mxv itself
+# ignores a `[needs.*]` table.
 
-[wants.deadband]
+[needs.deadband]
 repo = "github.com/crumbkit/deadband"
-provides = "deadband"
+from = "deadband-socket"
 as = "DEADBAND_SOCKET"
 optional = true
 
