@@ -77,9 +77,10 @@ pub enum Problem {
     /// retired or quarantined a checkout, or counts as retired.
     ArchiveUnfinished,
     /// The archive is [`ArchiveState::Retiring`], the workspace of its name
-    /// is the one it archives, and the workspace is untouched, as
-    /// [`untouched`] says, so the archive stopped before it deleted any
-    /// checkout. A repair abandons it: it deletes the archive's pins, tar
+    /// is the one it archives, and the workspace is untouched: it has at
+    /// least one checkout, its directory and every checkout's directory are
+    /// there, and no checkout is at its quarantine name. So the archive
+    /// stopped before it deleted any checkout. A repair abandons it: it deletes the archive's pins, tar
     /// and record and moves the workspace back to live. `mxv archive -w`
     /// carries it on instead.
     ArchiveNotStarted,
