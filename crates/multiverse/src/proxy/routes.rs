@@ -104,6 +104,8 @@ impl Declared {
 pub struct Shadowed {
     /// The route that is not served.
     pub route: Route,
+    /// The host label that the two workspace names share.
+    pub label: String,
     /// The workspace that keeps the host label.
     pub by: WorkspaceName,
 }
@@ -261,6 +263,7 @@ pub fn derive(mut declared: Vec<Declared>) -> Derived {
                 route.extra = listed;
                 derived.shadowed.push(Shadowed {
                     route,
+                    label: label.clone(),
                     by: owner.clone(),
                 });
             }
