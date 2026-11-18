@@ -1249,7 +1249,10 @@ fn a_repair_moves_aside_an_archive_whose_workspace_was_removed() {
     let removed = setup.workspaces.remove(setup.removal()).unwrap();
     assert!(matches!(removed, RemovalOutcome::Done(_)), "{removed:?}");
     let planned = setup.repair_plan();
-    assert!(matches!(planned, Repaired::MovedAside { .. }), "{planned:?}");
+    assert!(
+        matches!(planned, Repaired::MovedAside { .. }),
+        "{planned:?}"
+    );
 
     let outcome = setup.lifecycle().repair(&name(), &planned).unwrap();
 
