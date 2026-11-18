@@ -905,18 +905,18 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
             entry.path
         ))));
     }
-    if let Some(mark) = &archive.restoring {
-        if let Some((repository, _)) = mark.0.refs.iter().find(|(repository, _)| {
+    if let Some(mark) = &archive.restoring
+        && let Some((repository, _)) = mark.0.refs.iter().find(|(repository, _)| {
             !archive
                 .checkouts
                 .iter()
                 .any(|checkout| checkout.source == *repository)
-        }) {
-            return Err(corrupt(serde::de::Error::custom(format!(
-                "the restore mark names the repository {}, which is no checkout's source",
-                repository.display()
-            ))));
-        }
+        })
+    {
+        return Err(corrupt(serde::de::Error::custom(format!(
+            "the restore mark names the repository {}, which is no checkout's source",
+            repository.display()
+        ))));
     }
     for checkout in &archive.checkouts {
         if !inside_workspace(&archive.path, &checkout.path) {

@@ -5,7 +5,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::*;
-use crate::archive::RestoreMark;
+use crate::archive::{KeptRef, RestoreMark};
 use crate::health::{self, Repaired};
 
 /// The checkpoints of a restore after which a kill leaves something made,
@@ -500,9 +500,10 @@ fn a_record_without_a_mark_has_no_restoring_key_and_a_mark_round_trips() {
     assert!(!fs::read_to_string(&file).unwrap().contains("restoring"));
     let mut mark = RestoreMark::default();
     mark.0.directory = true;
-    mark.0
-        .refs
-        .push((PathBuf::from("/repo"), "refs/mxv/kept/abc".to_owned()));
+    mark.0.refs.push((
+        archive.checkouts[0].source.clone(),
+        KeptRef::of_commit("abc").unwrap(),
+    ));
     archive.restoring = Some(mark);
     setup.archives.write(&archive).unwrap();
     assert_eq!(setup.record(), Some(archive));
