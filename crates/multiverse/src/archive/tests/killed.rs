@@ -5,7 +5,7 @@
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::*;
-use crate::archive::RestoreMark;
+use crate::archive::{KeptRef, RestoreMark};
 use crate::health::{self, Repaired};
 
 /// The checkpoints of a restore after which a kill leaves something made,
@@ -214,7 +214,7 @@ fn a_mark_names_the_kept_reference_before_the_run_makes_it() {
     assert!(
         mark.refs
             .iter()
-            .any(|(_, reference)| *reference == made.kept),
+            .any(|(_, reference)| reference.as_str() == made.kept),
         "{mark:?}"
     );
 }
@@ -500,9 +500,10 @@ fn a_record_without_a_mark_has_no_restoring_key_and_a_mark_round_trips() {
     assert!(!fs::read_to_string(&file).unwrap().contains("restoring"));
     let mut mark = RestoreMark::default();
     mark.0.directory = true;
-    mark.0
-        .refs
-        .push((PathBuf::from("/repo"), "refs/mxv/kept/abc".to_owned()));
+    mark.0.refs.push((
+        archive.checkouts[0].source.clone(),
+        KeptRef::of_commit("abc").unwrap(),
+    ));
     archive.restoring = Some(mark);
     setup.archives.write(&archive).unwrap();
     assert_eq!(setup.record(), Some(archive));
@@ -833,5 +834,84 @@ fn a_repair_keeps_the_archive_of_a_workspace_without_checkouts_that_deleted_its_
     assert_eq!(
         fs::read_to_string(setup.root.join("triage/notes.md")).unwrap(),
         "keep me\n"
+    );
+}
+
+/// Rewrites the first entry of the stopped restore's mark in the record on
+/// disk, which `edit` changes as JSON.
+fn edit_mark(made: &Archived, edit: impl FnOnce(&mut serde_json::Value)) {
+    edit_record(made, |mark| edit(&mut mark["refs"][0]));
+}
+
+/// Rewrites the stopped restore's mark as a whole.
+fn edit_record(made: &Archived, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = made.setup.archives.dir_of(&name()).join("archive.json");
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    edit(&mut record["restoring"]);
+    write(&path, serde_json::to_string(&record).unwrap());
+}
+
+#[test]
+fn a_mark_that_names_a_branch_is_refused_as_corrupt_and_the_branch_stays() {
+    let made = archived(Kind::Worktree);
+    let source = made.setup.fixture.clone.clone();
+    git(&source, &["branch", "precious"]);
+    made.kill_at("kept");
+    edit_mark(&made, |entry| entry[1] = "refs/heads/precious".into());
+    let repaired = made
+        .setup
+        .workspaces
+        .repair(&made.setup.archives, &name(), Mode::Change);
+    assert!(
+        matches!(repaired, Err(Error::CorruptRecord { .. })),
+        "{repaired:?}"
+    );
+    assert!(git(&source, &["branch", "--list", "precious"]).contains("precious"));
+}
+
+#[test]
+fn a_mark_that_climbs_out_of_the_kept_namespace_is_refused_as_corrupt() {
+    let made = archived(Kind::Worktree);
+    made.kill_at("kept");
+    edit_mark(&made, |entry| {
+        entry[1] = "refs/mxv/kept/../../heads/main".into();
+    });
+    assert!(matches!(
+        made.setup.archives.read(&name()),
+        Err(Error::CorruptRecord { .. })
+    ));
+}
+
+#[test]
+fn a_mark_that_names_a_repository_that_is_no_checkouts_source_is_refused_as_corrupt() {
+    let made = archived(Kind::Worktree);
+    made.kill_at("kept");
+    edit_mark(&made, |entry| entry[0] = "/somewhere/else".into());
+    assert!(matches!(
+        made.setup.archives.read(&name()),
+        Err(Error::CorruptRecord { .. })
+    ));
+}
+
+#[test]
+fn a_mark_that_names_another_start_for_the_branch_is_refused_and_the_branch_stays() {
+    let made = archived(Kind::Worktree);
+    let source = made.setup.fixture.clone.clone();
+    made.kill_at("kept");
+    let branch = made.marked().checkouts[0].branch.clone();
+    let other = "1".repeat(40);
+    edit_record(&made, |mark| mark["branches"] = serde_json::json!([other]));
+    let repaired = made
+        .setup
+        .workspaces
+        .repair(&made.setup.archives, &name(), Mode::Change);
+    assert!(
+        matches!(repaired, Err(Error::CorruptRecord { .. })),
+        "{repaired:?}"
+    );
+    assert!(
+        !git(&source, &["branch", "--list", &branch]).is_empty(),
+        "the branch {branch} is gone"
     );
 }

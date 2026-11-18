@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 
 use crate::archive::ignored::{self, IgnoredRefusal};
 use crate::archive::{
-    Archive, ArchiveState, ArchivedCheckout, Archives, KEPT_NAMESPACE, Kept, RestoreMark, RootKind,
-    root,
+    Archive, ArchiveState, ArchivedCheckout, Archives, Kept, KeptRef, RECORD_FILE, RestoreMark,
+    RootKind, root,
 };
 use crate::backend::{Backend, RefHolder, WipCommits};
 use crate::error::Error;
@@ -208,7 +208,7 @@ pub struct PutBack {
     pub tags: Vec<String>,
     /// Each per-worktree reference, by its name below `refs/worktree/`.
     pub worktree: Vec<String>,
-    /// Each reference below [`KEPT_NAMESPACE`] that keeps a commit no other
+    /// Each reference below [`KEPT_NAMESPACE`](crate::archive::KEPT_NAMESPACE) that keeps a commit no other
     /// reference reaches.
     pub kept: Vec<String>,
     /// Each submodule that the checkout's index names, which the restore
@@ -850,10 +850,15 @@ impl<B: Backend> Workspaces<B> {
         }
         (self.checkpoint)("ignored")?;
         for (checkout, archived) in workspace.checkouts.iter().zip(&archive.checkouts) {
-            let mut kept =
-                self.put_back_kept(archive.kind, checkout, &archived.kept, made, &|made| {
-                    self.mark(archives, &archive.name, Some(made))
-                })?;
+            let record = archives.dir_of(&archive.name).join(RECORD_FILE);
+            let mut kept = self.put_back_kept(
+                &record,
+                archive.kind,
+                checkout,
+                &archived.kept,
+                made,
+                &|made| self.mark(archives, &archive.name, Some(made)),
+            )?;
             kept.ignored = written
                 .iter()
                 .filter(|path| folder_of(path) == checkout.name)
@@ -974,9 +979,12 @@ impl<B: Backend> Workspaces<B> {
     /// a reference that the clone already holds, such as a branch that the
     /// clone started with, takes the kept value. A reference that it makes
     /// in a worktree's shared repository is recorded in `made`, so a failed
-    /// restore deletes it.
+    /// restore deletes it. `record` is the archive's record, which a kept
+    /// reference that cannot be made is reported against; `read_record`
+    /// refuses such a record, so a record that was read never fails so.
     fn put_back_kept(
         &self,
+        record: &Path,
         kind: WorkspaceKind,
         checkout: &Checkout,
         kept: &Kept,
@@ -1022,7 +1030,11 @@ impl<B: Backend> Workspaces<B> {
             }
         }
         for commit in &kept.orphans {
-            let reference = format!("{KEPT_NAMESPACE}{commit}");
+            let kept_ref = KeptRef::of_commit(commit).map_err(|reason| Error::CorruptRecord {
+                path: record.to_path_buf(),
+                source: serde::de::Error::custom(reason),
+            })?;
+            let reference = kept_ref.as_str().to_owned();
             // The mark names the reference before the run creates it, so a
             // death in between leaves nothing unlisted. A reference that the
             // repository holds already stays, as it may belong to another
@@ -1033,7 +1045,7 @@ impl<B: Backend> Workspaces<B> {
                     .resolve_commit(RefHolder::Repository(&checkout.source), &reference)?
                     .is_none();
             if journaled {
-                made.refs.push((checkout.source.clone(), reference.clone()));
+                made.refs.push((checkout.source.clone(), kept_ref.clone()));
                 journal(made)?;
             }
             let created = self.backend.create_ref(path, &reference, commit)?;
