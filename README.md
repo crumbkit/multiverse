@@ -30,7 +30,7 @@ mxv logs -w reading-list web --follow   # print a process's log and follow it
 mxv down -w reading-list                # stop the processes
 mxv clean --all --dry-run               # list the build output that idle workspaces would free
 mxv reclaim --need memory=2GiB --dry-run # list the idle workspaces whose stop frees 2 GiB of memory
-mxv remove reading-list                 # remove it, and its branch when merged
+mxv remove reading-list                 # remove its clones, branches and record
 ```
 
 Workspaces live in `~/.local/share/mxv/workspaces` by default. `MXV_ROOT`,

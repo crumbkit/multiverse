@@ -285,12 +285,16 @@ impl Row for WorkspaceRow {
 
 /// Returns the text of the problem of `broken`.
 fn problem_text(broken: &Broken) -> String {
-    match &broken.problem {
+    text_of_problem(&broken.problem, &broken.name)
+}
+
+/// Returns the text of `problem` in the record of `name`.
+fn text_of_problem(problem: &Problem, name: &str) -> String {
+    match problem {
         Problem::Unreadable { reason } => reason.clone(),
         Problem::ArchiveUnfinished => "the archive stopped before it finished".to_owned(),
         Problem::ArchiveNotStarted => format!(
-            "the archive stopped before it deleted any checkout; `mxv archive -w {}` carries it on instead",
-            broken.name
+            "the archive stopped before it deleted any checkout; `mxv archive -w {name}` carries it on instead"
         ),
         Problem::ArchiveWorkspaceRemoved => {
             "the archive stopped before it finished, and its workspace was removed".to_owned()
@@ -299,7 +303,7 @@ fn problem_text(broken: &Broken) -> String {
             "the archive stopped before it finished, and its pins are gone".to_owned()
         }
         Problem::ArchiveBesideNewerWorkspace => {
-            format!("an older archive beside a newer workspace {}", broken.name)
+            format!("an older archive beside a newer workspace {name}")
         }
         Problem::RenameUnfinished => {
             "a repair stopped while it moved the archive to its dated name".to_owned()

@@ -80,8 +80,9 @@ pub enum WorkspaceState {
     Live,
     /// `mxv archive` started to archive the workspace into the archive
     /// `archive`, and wrote this before it wrote the archive's record.
-    /// Every command that `live` allows still runs, because no way leads
-    /// back to `live` yet.
+    /// Every command that `live` allows still runs. An abandon, which a
+    /// refused archive or `mxv repair` runs while the archive has deleted
+    /// no checkout, moves the workspace back to `live`.
     #[non_exhaustive]
     Retiring {
         /// The id of the archive that retires the workspace.
@@ -147,7 +148,9 @@ pub struct Checkout {
     /// `refs/remotes/origin/main`.
     pub base: String,
     /// The commit that the branch started at, or `None` for a planned
-    /// checkout that a dry run reports.
+    /// checkout that a dry run reports, and for a checkout that `mxv new`
+    /// or `mxv add` wrote into the record before it made it and did not
+    /// finish.
     pub commit: Option<String>,
     /// How the checkout was made. The record writes a clone's mirror as
     /// `mirror` and leaves the key out for a worktree. A record whose

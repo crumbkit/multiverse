@@ -119,4 +119,6 @@ pub use crate::workspaces::{
 };
 pub use phase;
 #[cfg(test)]
+mod docs_tests;
+#[cfg(test)]
 mod testing;
