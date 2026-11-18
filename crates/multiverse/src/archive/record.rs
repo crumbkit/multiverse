@@ -905,6 +905,15 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
             entry.path
         ))));
     }
+    let stranger = archive
+        .restoring
+        .as_ref()
+        .and_then(|mark| strange_start(&archive, mark));
+    if let Some(start) = stranger {
+        return Err(corrupt(serde::de::Error::custom(format!(
+            "the restore mark says a branch started at {start}, which is not its checkout's archived commit"
+        ))));
+    }
     if let Some(mark) = &archive.restoring
         && let Some((repository, _)) = mark.0.refs.iter().find(|(repository, _)| {
             !archive
@@ -990,6 +999,17 @@ fn is_archive_id(id: &str) -> bool {
         && id
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Returns the first start that `mark` gives for a branch and that is not the
+/// archived commit of the checkout, because a restore creates a branch only
+/// at its checkout's archived commit and undoing it deletes that branch.
+fn strange_start<'a>(archive: &Archive, mark: &'a RestoreMark) -> Option<&'a str> {
+    mark.0
+        .branches
+        .iter()
+        .zip(&archive.checkouts)
+        .find_map(|(start, checkout)| start.as_deref().filter(|start| *start != checkout.commit))
 }
 
 /// Reports whether `pin`, a reference from a record, lies below the
