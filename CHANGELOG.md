@@ -12,6 +12,7 @@ workspace may need to act on.
   session, works in the workspace, and names the process. `--force`
   overrides the refusal and names the process in its question. A script that
   removes a workspace while its own child runs inside it needs `--force`.
+- Library: `Repaired` is exhaustive, so a match on it names every kind of repair.
 
 ### Fixed
 

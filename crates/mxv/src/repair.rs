@@ -453,7 +453,7 @@ fn question(name: &WorkspaceName, planned: &Repaired) -> Option<String> {
         Repaired::Abandoned { .. } => Some(format!(
             "Abandon the archive of {name} that stopped before it deleted any checkout? mxv deletes its record, pins and ignored-files tar, and the workspace stays as it is."
         )),
-        _ => None,
+        Repaired::Unchanged { .. } => None,
     }
 }
 
@@ -594,9 +594,6 @@ pub(crate) fn repair(
                 )
             }
         }
-        // `Repaired` is non-exhaustive, so a repair that a newer library
-        // adds reports no change until this command learns it.
-        _ => RepairResult::new(&name, RepairState::Unchanged),
     };
     Ok(Prose::new(result))
 }

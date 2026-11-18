@@ -847,8 +847,8 @@ fn lock_names(name: &WorkspaceName, planned: &Repaired) -> Vec<WorkspaceName> {
 /// archive, the same archive's stopped restore undone, or the same
 /// archive abandoned. A deletion names its archive by id, because another repair,
 /// a new archive and a stopped restore can leave another archive of the
-/// name to delete while the question is open. Any other plan asks no
-/// question, so it is never confirmed.
+/// name to delete while the question is open. A plan that asks no question
+/// ([`Repaired::Unchanged`]) is never confirmed.
 fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
     match (confirmed, again) {
         (Repaired::MovedAside { kept: asked, .. }, Repaired::MovedAside { kept, .. }) => {
@@ -871,7 +871,12 @@ fn same_repair(confirmed: &Repaired, again: &Repaired) -> bool {
             },
         ) => asked.id == undone.id,
         (Repaired::Abandoned { id: asked, .. }, Repaired::Abandoned { id, .. }) => asked == id,
-        _ => false,
+        (Repaired::Unchanged { .. }, _)
+        | (Repaired::MovedAside { .. }, _)
+        | (Repaired::Renamed { .. }, _)
+        | (Repaired::Deleted(_), _)
+        | (Repaired::Undone { .. }, _)
+        | (Repaired::Abandoned { .. }, _) => false,
     }
 }
 
