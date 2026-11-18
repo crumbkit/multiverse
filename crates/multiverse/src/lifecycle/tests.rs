@@ -284,6 +284,43 @@ fn a_removal_stopped_after_each_step_is_finished_by_remove_or_by_repair_orphans(
 }
 
 #[test]
+fn a_removal_whose_in_use_check_names_a_process_deletes_nothing() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let lifecycle = setup
+        .lifecycle()
+        .with_in_use(|_| Ok(Some("a shell works in it".to_owned())));
+
+    let outcome = lifecycle
+        .remove(setup.removal(), &RemoveAsked::default())
+        .unwrap();
+
+    let Removed::InUse(reason) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(reason, "a shell works in it");
+    assert!(workspace.checkouts[0].path.is_dir());
+    assert!(setup.record_exists());
+}
+
+#[test]
+fn a_forced_removal_does_not_ask_the_in_use_check() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let lifecycle = setup
+        .lifecycle()
+        .with_in_use(|_| Ok(Some("a shell works in it".to_owned())));
+
+    let outcome = lifecycle
+        .remove(setup.removal(), &RemoveAsked::new(true, Vec::new()))
+        .unwrap();
+
+    assert!(matches!(outcome, Removed::Done(_)), "{outcome:?}");
+    assert!(!workspace.checkouts[0].path.exists());
+    assert!(!setup.record_exists());
+}
+
+#[test]
 fn remove_of_a_workspace_recreated_under_its_name_stops_nothing_and_refuses() {
     let setup = fresh();
     setup.create();

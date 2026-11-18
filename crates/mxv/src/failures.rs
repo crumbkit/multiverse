@@ -52,6 +52,9 @@ pub const WORKSPACE_IGNORED_FILES: Code = Code::from_spelling("mxv::workspace::i
 /// the workspace changed while mxv waited for the confirmation, so the
 /// removal would lose more than mxv showed.
 pub const WORKSPACE_CHANGED: Code = Code::from_spelling("mxv::workspace::changed");
+/// The code of a removal that a process outside phase stops, because it
+/// works in the workspace and `--force` did not allow the removal.
+pub const REMOVE_IN_USE: Code = Code::from_spelling("mxv::remove::in_use");
 /// The code of a removal that commits on no branch, such as commits on a
 /// detached `HEAD`, stop.
 pub const CHECKOUT_UNREACHABLE_COMMITS: Code =
@@ -296,6 +299,16 @@ pub(crate) enum MxvFailure {
         /// What the removal's flags allowed.
         allow: Allow,
     },
+    /// A process outside phase works in the workspace, so `remove` refuses
+    /// without `--force`.
+    RemoveInUse {
+        /// The workspace's name.
+        name: String,
+        /// Which process, in a clause.
+        reason: String,
+        /// What the removal's flags allowed.
+        allow: Allow,
+    },
     /// The records of the name changed between the question of `mxv
     /// repair` and the repair, so it would do something other than what
     /// the person confirmed.
@@ -522,6 +535,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     WORKSPACE_DIRTY,
     WORKSPACE_IGNORED_FILES,
     WORKSPACE_CHANGED,
+    REMOVE_IN_USE,
     CHECKOUT_UNREACHABLE_COMMITS,
     CHECKOUT_UNPUSHED_COMMITS,
     CHECKOUT_STASHES,
@@ -664,6 +678,7 @@ impl Failure for MxvFailure {
             Self::Dirty { .. } => WORKSPACE_DIRTY,
             Self::IgnoredFiles { .. } | Self::ManifestDisposable { .. } => WORKSPACE_IGNORED_FILES,
             Self::Changed { .. } => WORKSPACE_CHANGED,
+            Self::RemoveInUse { .. } => REMOVE_IN_USE,
             Self::RepairChanged { .. } => REPAIR_CHANGED,
             Self::RestoreChanged { .. } => RESTORE_CHANGED,
             Self::StrayCommits { .. } => CHECKOUT_UNREACHABLE_COMMITS,
@@ -760,6 +775,17 @@ impl Failure for MxvFailure {
             Self::Changed { name, allow } => {
                 Recovery::Run(Call::typed(remove_words(name, *allow, "--dry-run")))
             }
+            Self::RemoveInUse { name, allow, .. } => Recovery::hint(format!(
+                "stop that process or move it out of the workspace and run `{}` again, or run `{}`, which removes the workspace under it",
+                remove_line(name, *allow),
+                remove_line(
+                    name,
+                    Allow {
+                        discard_changes: true,
+                        ..*allow
+                    }
+                )
+            )),
             Self::RepairChanged { name } => Recovery::hint(format!(
                 "run `mxv repair {name}` again, which asks about the records as they now stand"
             )),
@@ -911,6 +937,9 @@ impl Failure for MxvFailure {
                 Field::new("name", name),
                 Field::new("changes", FieldValue::list(changes.iter())),
             ],
+            Self::RemoveInUse { name, reason, .. } => {
+                vec![Field::new("name", name), Field::new("reason", reason)]
+            }
             Self::ManifestDisposable { name, paths, .. } => vec![
                 Field::new("name", name),
                 Field::new("paths", FieldValue::list(paths.iter())),
@@ -1416,6 +1445,9 @@ impl fmt::Display for MxvFailure {
                 formatter,
                 "the workspace {name} changed while mxv waited for the confirmation, so the removal would lose more than mxv showed, and mxv removed nothing"
             ),
+            Self::RemoveInUse { name, reason, .. } => {
+                write!(formatter, "the workspace {name} is in use: {reason}")
+            }
             Self::RepairChanged { name } => write!(
                 formatter,
                 "the records of {name} changed after mxv asked, so mxv repaired nothing"
@@ -1556,6 +1588,7 @@ impl std::error::Error for MxvFailure {
             | Self::IgnoredFiles { .. }
             | Self::ManifestDisposable { .. }
             | Self::Changed { .. }
+            | Self::RemoveInUse { .. }
             | Self::RepairChanged { .. }
             | Self::RestoreChanged { .. }
             | Self::StrayCommits { .. }

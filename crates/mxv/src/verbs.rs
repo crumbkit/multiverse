@@ -745,12 +745,24 @@ pub(crate) fn remove(
     };
     let mut volumes = None;
     let mut containers = Vec::new();
+    let mut outside = None;
     if let Some(workspace) = workspaces.find(&name).map_err(MxvFailure::from)? {
         let running = processes::running(environment, &workspace)?;
         if !running.is_empty() && !args.force {
             return Err(RunFailure::Running {
                 workspace: name.to_string(),
                 processes: running,
+            }
+            .into());
+        }
+        // A process that phase did not start loses its working directory
+        // when the checkouts go, so only `--force` removes under it.
+        outside = crate::archive::outside_reason(&workspace).map_err(MxvFailure::from)?;
+        if let Some(reason) = outside.clone().filter(|_| !args.force) {
+            return Err(MxvFailure::RemoveInUse {
+                name: name.to_string(),
+                reason,
+                allow,
             }
             .into());
         }
@@ -834,6 +846,9 @@ pub(crate) fn remove(
             crate::rows::stashes(u32::try_from(stashes).unwrap_or(u32::MAX))
         ));
     }
+    if let Some(reason) = &outside {
+        question.push_str(&format!(" A process outside phase works in it ({reason})."));
+    }
     if args.delete_volumes {
         question.push_str(&crate::archive::volumes_clause(&names));
     }
@@ -842,6 +857,7 @@ pub(crate) fn remove(
     let archives = crate::archive::archives(environment)?;
     let asked = RemoveAsked::new(args.force, names.clone());
     let outcome = Lifecycle::new(&workspaces, &archives, &runs)
+        .with_in_use(crate::archive::outside_reason)
         .remove(removal, &asked)
         .map_err(MxvFailure::from)?;
     match outcome {
@@ -873,6 +889,12 @@ pub(crate) fn remove(
         Removed::Running(processes) => Err(RunFailure::Running {
             workspace: name.to_string(),
             processes,
+        }
+        .into()),
+        Removed::InUse(reason) => Err(MxvFailure::RemoveInUse {
+            name: name.to_string(),
+            reason,
+            allow,
         }
         .into()),
         Removed::Unstoppable(unstoppable) => Err(RunFailure::Unstoppable {

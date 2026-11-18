@@ -78,7 +78,7 @@ use mxv::{
     RESTORE_STOPPED_HOLDS_OTHER_FILES, RESTORE_UNFINISHED, RUN_CODES, SSH_AUTHENTICATION_FAILED,
     SSH_HOST_KEY_CHANGED, SSH_HOST_KEY_UNVERIFIED, TASK_AMBIGUOUS, TASK_UNKNOWN,
     TEMPLATE_AMBIGUOUS, TEMPLATE_INVALID, TOOL, VOLUME_RENAMED, WORKSPACE_ARCHIVE_UNFINISHED,
-    WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_CREATING, WORKSPACE_DIRTY,
+    REMOVE_IN_USE, WORKSPACE_BAD_NAME, WORKSPACE_BUSY, WORKSPACE_CHANGED, WORKSPACE_CREATING, WORKSPACE_DIRTY,
     WORKSPACE_EXISTS, WORKSPACE_IGNORED_FILES, WORKSPACE_MISMATCHED_CHECKOUT,
     WORKSPACE_NOT_CURRENT, WORKSPACE_NOT_FOUND, WORKSPACE_RUNNING, WORKSPACE_STATE_CHANGED,
     WORKSPACE_TRANSITION_REFUSED, WORKSPACE_VOLUMES, WORKSPACE_WORKTREE_KIND, WORKSPACE_WRONG_LOCK,
@@ -550,6 +550,10 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
         WORKSPACE_CHANGED,
         "Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.",
+    ),
+    Unprovoked::new(
+        REMOVE_IN_USE,
+        "Only a process outside phase whose working directory is in the workspace provokes it, and the check's fixture has none; tests/workspaces.rs starts such a process and provokes it.",
     ),
     Unprovoked::new(
         PATH_INACCESSIBLE,

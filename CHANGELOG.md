@@ -5,6 +5,14 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Changed
+
+- `mxv remove` refuses with `mxv::remove::in_use` when a process that mxv
+  did not start, such as a command from `mxv exec` or `mxv run` or an agent
+  session, works in the workspace, and names the process. `--force`
+  overrides the refusal and names the process in its question. A script that
+  removes a workspace while its own child runs inside it needs `--force`.
+
 ## [0.2.0] - 2026-11-18
 
 ### Added

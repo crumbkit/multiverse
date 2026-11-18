@@ -191,6 +191,7 @@ codes that no start provokes:
   mxv::manifest::untrusted: Only a `--manifest` file inside a git work tree or under the workspaces' root provokes it, and the check's command lines name no manifest file; tests/workspaces.rs provokes it with the repository's own mxv.toml.
   mxv::template::ambiguous: Only two templates that list the repository's origin provoke it, and the check's fixture has no templates; tests/workspaces.rs provokes it with two such templates.
   mxv::workspace::changed: Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.
+  mxv::remove::in_use: Only a process outside phase whose working directory is in the workspace provokes it, and the check's fixture has none; tests/workspaces.rs starts such a process and provokes it.
   mxv::path::inaccessible: Only a workspace path below a directory without search permission provokes it, and the check's fixture copies keep the permissions searchable; the library's workspace tests provoke it.
   mxv::environment::no_directory: Only a run in which mxv finds no home directory provokes it, and etcetera reads the home directory from the user database when HOME is unset, so every test run has one.
   mxv::checkout::unowned: Only a checkout directory that git does not list provokes it, and the fixture's workspace has no checkout directory.
