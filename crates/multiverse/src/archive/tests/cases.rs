@@ -167,6 +167,15 @@ fn retiring_beside_its_workspace_without_ids(setup: &Setup) -> WorkspaceName {
     name()
 }
 
+/// Archives the workspace and stops after the checkout moved to its
+/// quarantine name, before the compare.
+fn retiring_with_a_quarantined_checkout(setup: &Setup) -> WorkspaceName {
+    setup.create();
+    stopped_at(setup, "moved:app");
+    assert!(!setup.checkout().exists());
+    name()
+}
+
 fn retiring_beside_its_workspace_without_its_state(setup: &Setup) -> WorkspaceName {
     retiring_beside_its_workspace(setup);
     without_state(setup, true);
@@ -344,6 +353,7 @@ fn listed(found: &[Broken], name: &WorkspaceName, old: &str) -> String {
     let problem = match &broken.problem {
         Problem::Unreadable { .. } => "unreadable",
         Problem::ArchiveUnfinished => "unfinished",
+        Problem::ArchiveNotStarted => "not started",
         Problem::ArchiveWorkspaceRemoved => "workspace removed",
         Problem::ArchivePinsGone => "pins gone",
         Problem::ArchiveBesideNewerWorkspace => "beside a newer workspace",
@@ -419,6 +429,10 @@ fn repaired_text(repaired: Result<Repaired, Error>, old: &str) -> String {
         }
         Ok(Repaired::Deleted(_)) => "delete".to_owned(),
         Ok(Repaired::Undone { .. }) => "undo the restore".to_owned(),
+        Ok(Repaired::Abandoned {
+            removal: Some(_), ..
+        }) => "abandon".to_owned(),
+        Ok(Repaired::Abandoned { removal: None, .. }) => "abandon without a record".to_owned(),
     }
 }
 
@@ -436,28 +450,44 @@ const fn resumed(case: &'static str, build: fn(&Setup) -> WorkspaceName) -> Row 
     }
 }
 
+/// The row of an archive that stopped before it deleted any checkout,
+/// beside its workspace, which `mxv archive` resumes and `mxv repair`
+/// abandons.
+const fn not_started(case: &'static str, build: fn(&Setup) -> WorkspaceName) -> Row {
+    Row {
+        archives: "not started, repair the name",
+        workspaces: "not started, repair the name",
+        repair: "abandon",
+        ..resumed(case, build)
+    }
+}
+
 const ROWS: &[Row] = &[
-    resumed(
+    not_started(
         "retiring beside the workspace it archives",
         retiring_beside_its_workspace,
     ),
-    resumed(
+    not_started(
         "retiring beside its workspace, neither with a stable id, the state naming the archive",
         retiring_beside_its_workspace_without_ids,
     ),
-    resumed(
+    not_started(
         "retiring beside its workspace, whose record an older mxv rewrote without the state",
         retiring_beside_its_workspace_without_its_state,
+    ),
+    resumed(
+        "retiring beside its workspace, with a checkout at its quarantine name",
+        retiring_with_a_quarantined_checkout,
     ),
     resumed(
         "retired beside the workspace it archives",
         retired_beside_its_workspace,
     ),
-    resumed(
+    not_started(
         "retiring at version 2 beside its workspace without a state, both with a stable id",
         older_beside_its_workspace_with_ids,
     ),
-    resumed(
+    not_started(
         "retiring at version 2 beside its workspace without a state, neither with a stable id",
         older_beside_its_workspace_without_ids,
     ),

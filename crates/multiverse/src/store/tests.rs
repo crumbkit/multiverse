@@ -738,6 +738,42 @@ fn a_repoint_refuses_a_live_workspace_and_writes_nothing() {
 }
 
 #[test]
+fn an_abandon_moves_a_retiring_workspace_back_to_live_and_keeps_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut workspace) = live(dir.path(), "app");
+    store
+        .advance(&mut workspace, WorkspaceState::retiring(archive_id('a')))
+        .unwrap();
+    let id = workspace.id.clone();
+    store.abandon(&mut workspace).unwrap();
+    assert_eq!(workspace.state(), WorkspaceState::Live);
+    let stored = store.read(&workspace.name).unwrap().unwrap();
+    assert_eq!(stored.state(), WorkspaceState::Live);
+    assert_eq!(stored.id, id);
+}
+
+#[test]
+fn an_abandon_refuses_a_live_or_creating_workspace_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, mut held) = live(dir.path(), "app");
+    let mut creating = workspace("web");
+    store.create(&mut creating).unwrap();
+    for (workspace, from) in [
+        (&mut held, WorkspaceState::Live),
+        (&mut creating, WorkspaceState::Creating),
+    ] {
+        let before = fs::read(store.path(&workspace.name)).unwrap();
+        let refused = store.abandon(workspace);
+        assert!(
+            matches!(&refused, Err(Error::TransitionRefused { from: at, to: WorkspaceState::Live, .. }) if *at == from),
+            "{refused:?}"
+        );
+        assert_eq!(workspace.state(), from);
+        assert_eq!(fs::read(store.path(&workspace.name)).unwrap(), before);
+    }
+}
+
+#[test]
 fn an_update_of_a_retiring_record_keeps_its_state() {
     let dir = tempfile::tempdir().unwrap();
     let (store, mut workspace) = live(dir.path(), "app");

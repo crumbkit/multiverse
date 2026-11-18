@@ -192,8 +192,8 @@ fn a_workspace_whose_state_names_the_archive_is_the_one_it_archives_whatever_its
     );
     let expected = Broken {
         name: "triage".to_owned(),
-        problem: Problem::ArchiveUnfinished,
-        repair: Some(Repair::Archive(name("triage"))),
+        problem: Problem::ArchiveNotStarted,
+        repair: Some(Repair::Repair(name("triage"))),
     };
     assert_eq!(health.workspaces, std::slice::from_ref(&expected));
     assert_eq!(health.archives, [expected]);
@@ -229,8 +229,81 @@ fn a_workspace_and_an_older_archive_that_both_lack_an_id_are_one_workspace() {
         &records(vec![triage], vec![]),
         &archives(vec![retiring], vec![]),
     );
-    assert_eq!(health.workspaces[0].problem, Problem::ArchiveUnfinished);
-    assert_eq!(health.archives[0].problem, Problem::ArchiveUnfinished);
+    assert_eq!(health.workspaces[0].problem, Problem::ArchiveNotStarted);
+    assert_eq!(health.archives[0].problem, Problem::ArchiveNotStarted);
+}
+
+/// Classifies the workspace `triage` with the checkouts `app` and `web`,
+/// retiring into a `state` archive of it, after `change` changed its
+/// directories, and returns the problem of the workspace's row.
+fn stopped_archive_problem(state: ArchiveState, change: impl FnOnce(&Path)) -> Problem {
+    let dir = tempfile::tempdir().unwrap();
+    let mut triage = workspace(dir.path(), "triage", '1', &["app", "web"]);
+    triage.set_state(WorkspaceState::retiring(archive_id('1')));
+    change(&dir.path().join("triage"));
+    let health = classify(
+        &records(vec![triage], vec![]),
+        &archives(vec![archive("triage", '1', state)], vec![]),
+    );
+    assert_eq!(health.workspaces.len(), 1, "{health:?}");
+    assert_eq!(health.archives[0], health.workspaces[0]);
+    health.workspaces[0].problem.clone()
+}
+
+#[test]
+fn a_retiring_archive_beside_its_untouched_workspace_has_not_started_and_is_repaired() {
+    assert_eq!(
+        stopped_archive_problem(ArchiveState::Retiring, |_| {}),
+        Problem::ArchiveNotStarted
+    );
+    assert_eq!(
+        super::repair_of(&Problem::ArchiveNotStarted, &name("triage")),
+        Repair::Repair(name("triage"))
+    );
+}
+
+#[test]
+fn an_archive_that_quarantined_or_deleted_one_checkout_is_finished_by_archiving_it() {
+    fn quarantined(dir: &Path) {
+        let held = crate::archive::quarantine(&dir.join("web")).unwrap();
+        crate::store::move_aside(&dir.join("web"), &held).unwrap();
+    }
+    fn deleted(dir: &Path) {
+        fs::remove_dir_all(dir.join("web")).unwrap();
+    }
+    fn left_beside(dir: &Path) {
+        fs::create_dir_all(crate::archive::quarantine(&dir.join("web")).unwrap()).unwrap();
+    }
+    for (what, change) in [
+        ("quarantined", quarantined as fn(&Path)),
+        ("deleted", deleted),
+        ("a quarantine beside the checkout", left_beside),
+    ] {
+        assert_eq!(
+            stopped_archive_problem(ArchiveState::Retiring, change),
+            Problem::ArchiveUnfinished,
+            "{what}"
+        );
+    }
+}
+
+#[test]
+fn a_retired_archive_beside_its_workspace_is_finished_by_archiving_it() {
+    assert_eq!(
+        stopped_archive_problem(ArchiveState::Retired, |_| {}),
+        Problem::ArchiveUnfinished
+    );
+}
+
+#[test]
+fn a_retiring_archive_whose_workspace_directory_is_gone_is_finished_by_archiving_it() {
+    let gone = |dir: &Path| {
+        crate::store::move_aside(dir, &dir.with_extension("moved")).unwrap();
+    };
+    assert_eq!(
+        stopped_archive_problem(ArchiveState::Retiring, gone),
+        Problem::ArchiveUnfinished
+    );
 }
 
 #[test]

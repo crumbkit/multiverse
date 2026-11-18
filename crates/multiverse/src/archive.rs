@@ -136,7 +136,7 @@ fn pin_ref(id: &str, folder: &str) -> String {
 /// Returns the path beside `checkout` under which `archive` holds it while
 /// it compares it with what it admitted, or `None` for a path without a
 /// name.
-fn quarantine(checkout: &Path) -> Option<PathBuf> {
+pub(crate) fn quarantine(checkout: &Path) -> Option<PathBuf> {
     let name = checkout.file_name()?.to_str()?;
     Some(checkout.with_file_name(format!(".{name}{QUARANTINE_SUFFIX}")))
 }

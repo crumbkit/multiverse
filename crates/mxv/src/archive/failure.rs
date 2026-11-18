@@ -104,8 +104,9 @@ impl Holder {
 pub(crate) enum Finisher {
     /// `mxv archive -w NAME` finishes or resumes the archive.
     Archive,
-    /// Only `mxv repair NAME` deals with the archive: it moves it aside, or
-    /// finishes it under a dated name beside a newer workspace.
+    /// `mxv repair NAME` deals with the archive: it abandons one that
+    /// deleted no checkout, moves one aside, or finishes one under a dated
+    /// name beside a newer workspace.
     Repair,
 }
 
@@ -553,7 +554,7 @@ fn unfinished(name: &str, finisher: Finisher) -> Recovery {
     Recovery::hint(match finisher {
         Finisher::Archive => format!("run `mxv archive -w {name}`, which finishes the archive"),
         Finisher::Repair => format!(
-            "run `mxv repair {name}`, which moves the archive aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says"
+            "run `mxv repair {name}`, which abandons the archive, moves it aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says"
         ),
     })
 }

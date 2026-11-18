@@ -430,7 +430,10 @@ fn deleting_an_archive_holds_the_lock_at_every_step() {
         .unwrap();
 
     assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
-    assert_eq!(*seen.borrow(), [("volumes".to_owned(), true)]);
+    assert_eq!(
+        *seen.borrow(),
+        [("volumes".to_owned(), true), ("unpinned".to_owned(), true)]
+    );
     assert!(setup.runs.lock(&name()).is_ok());
 }
 
@@ -1105,4 +1108,98 @@ fn a_held_finish_refuses_the_lock_of_another_name_and_changes_nothing() {
         "{refused:?}"
     );
     assert_eq!(archive, before);
+}
+
+#[test]
+fn a_refused_archive_abandons_its_archive_and_leaves_the_workspace_live() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let checkout = workspace.checkouts[0].path.clone();
+    let late = crate::archive::quarantine(&checkout)
+        .unwrap()
+        .join("late.txt");
+    let plan = setup.archive_plan();
+    set_hook(move |step| {
+        if step == "moved:app" {
+            write(&late, "late\n");
+        }
+        Ok(())
+    });
+
+    let outcome = setup
+        .lifecycle()
+        .archive(plan, &VolumesAsked::default())
+        .unwrap();
+
+    HOOK.with(|hook| *hook.borrow_mut() = None);
+    assert!(matches!(outcome, Archived::Refused(_)), "{outcome:?}");
+    assert_eq!(setup.archive_record(), None);
+    assert!(!setup.archives.dir_of(&name()).exists());
+    let stored = setup.workspaces.store.read(&name()).unwrap().unwrap();
+    assert_eq!(stored.state(), crate::record::WorkspaceState::Live);
+    assert!(checkout.join("late.txt").is_file());
+    let pins = git(
+        &setup.fixture.clone,
+        &["for-each-ref", "--format=%(refname)", "refs/mxv/archives/"],
+    );
+    assert_eq!(pins, "");
+    assert!(
+        setup
+            .workspaces
+            .repair(&setup.archives, &name(), Mode::DryRun)
+            .is_ok_and(|repaired| matches!(repaired, Repaired::Unchanged { repair: None }))
+    );
+}
+
+#[test]
+fn a_repair_abandons_an_archive_that_stopped_before_it_deleted_a_checkout() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let archive = setup.stopped_archive(setup.archive_plan(), "root");
+    assert!(!setup.pins_of(&archive).is_empty());
+    let planned = setup.repair_plan();
+    assert!(
+        matches!(&planned, Repaired::Abandoned { id, removal: Some(_) } if *id == archive.id),
+        "{planned:?}"
+    );
+
+    let outcome = setup.lifecycle().repair(&name(), &planned).unwrap();
+
+    let Repairing::Done(done) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert!(matches!(done.repaired, Repaired::Abandoned { .. }));
+    assert_eq!(setup.archive_record(), None);
+    assert_eq!(setup.pins_of(&archive), "");
+    let stored = setup.workspaces.store.read(&name()).unwrap().unwrap();
+    assert_eq!(stored.state(), crate::record::WorkspaceState::Live);
+    assert_eq!(stored.id, workspace.id);
+    assert!(workspace.checkouts[0].path.is_dir());
+    assert!(setup.runs.lock(&name()).is_ok());
+}
+
+#[test]
+fn a_repair_of_an_abandon_whose_checkout_was_deleted_after_the_question_changes_nothing() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let archive = setup.stopped_archive(setup.archive_plan(), "root");
+    let planned = setup.repair_plan();
+    assert!(matches!(planned, Repaired::Abandoned { .. }), "{planned:?}");
+    std::fs::remove_dir_all(&workspace.checkouts[0].path).unwrap();
+
+    let outcome = setup.lifecycle().repair(&name(), &planned).unwrap();
+
+    assert!(matches!(outcome, Repairing::Changed), "{outcome:?}");
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
+    assert!(!setup.pins_of(&archive).is_empty());
+    let replanned = setup.repair_plan();
+    assert!(
+        matches!(
+            &replanned,
+            Repaired::Unchanged {
+                repair: Some(crate::health::Repair::Archive(_))
+            }
+        ),
+        "{replanned:?}"
+    );
 }

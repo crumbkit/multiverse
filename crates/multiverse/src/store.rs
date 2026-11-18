@@ -300,6 +300,28 @@ impl Store {
         self.move_to(workspace, to)
     }
 
+    /// Moves a retiring workspace back to live, for an archive that is
+    /// abandoned before it deleted any checkout. The caller deletes the
+    /// archive record first, so a failure here leaves a retiring workspace
+    /// without an archive record, which the next repair moves again.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::TransitionRefused`] when the workspace is not
+    /// retiring, and the errors of [`Store::update`]. `workspace` keeps its
+    /// state after a failure.
+    pub fn abandon(&self, workspace: &mut Workspace) -> Result<(), Error> {
+        let from = workspace.state();
+        if from.archive().is_none() {
+            return Err(Error::TransitionRefused {
+                name: workspace.name.clone(),
+                from,
+                to: WorkspaceState::Live,
+            });
+        }
+        self.move_to(workspace, WorkspaceState::Live)
+    }
+
     /// Writes the record of `workspace` in the state `to`, once its
     /// checkouts match its kind and the record on disk holds the state that
     /// `workspace` holds.

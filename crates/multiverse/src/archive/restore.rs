@@ -1108,8 +1108,54 @@ impl<B: Backend> Workspaces<B> {
             });
         }
         let warnings = self.delete_pins(&archive);
+        (self.checkpoint)("unpinned")?;
         archives.delete(&archive)?;
         Ok(ArchivedRemoval { archive, warnings })
+    }
+
+    /// Abandons `archive`, an archive that stopped before it deleted any
+    /// checkout: it deletes the archive's pins, its private tar and its
+    /// record with [`Workspaces::remove_archive`], and then moves the
+    /// workspace record back to live with [`Store::abandon`](crate::Store::abandon).
+    /// The record goes before the state moves, so a run that stops between
+    /// them leaves a retiring workspace with no archive record, which
+    /// [`Workspaces::repair`] moves to live. It returns `None` and changes
+    /// nothing unless `archive` is [`ArchiveState::Retiring`], the
+    /// workspace of its name is the one it archives, and that workspace is
+    /// untouched (`health::untouched`). A workspace record without a state,
+    /// as an older mxv wrote it, reads as live, so its state does not move.
+    /// In [`Mode::DryRun`] it deletes nothing. The caller holds the
+    /// workspace's lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of reading the workspace record, of
+    /// [`Workspaces::remove_archive`] and of [`Store::abandon`](crate::Store::abandon).
+    pub fn abandon_archive(
+        &self,
+        archives: &Archives,
+        archive: Archive,
+        mode: Mode,
+    ) -> Result<Option<ArchivedRemoval>, Error> {
+        let Some(mut workspace) = self.store.read(&archive.name)? else {
+            return Ok(None);
+        };
+        if archive.state != ArchiveState::Retiring
+            || !health::same_workspace(&archive, &workspace)
+            || !health::untouched(&workspace)
+        {
+            return Ok(None);
+        }
+        let removal = self.remove_archive(archives, archive, mode)?;
+        if mode == Mode::DryRun {
+            return Ok(Some(removal));
+        }
+        (self.checkpoint)("unrecorded")?;
+        if workspace.state().archive().is_some() {
+            self.store.abandon(&mut workspace)?;
+        }
+        (self.checkpoint)("abandoned")?;
+        Ok(Some(removal))
     }
 }
 

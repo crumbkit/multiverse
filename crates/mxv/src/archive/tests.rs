@@ -201,7 +201,7 @@ mxv::archive::unfinished exits 1
   recovery Hint("run `mxv archive -w triage`, which finishes the archive")
   field name = Text("triage")
 mxv::archive::unfinished exits 1
-  recovery Hint("run `mxv repair triage`, which moves the archive aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says")
+  recovery Hint("run `mxv repair triage`, which abandons the archive, moves it aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says")
   field name = Text("triage")
 mxv::archive::pins_gone exits 1
   recovery Hint("run `mxv repair triage`, which moves the archive aside so that it no longer claims a restore brings the workspace back")
@@ -244,7 +244,7 @@ mxv::restore::unfinished exits 1
   recovery Hint("run `mxv archive -w triage`, which finishes the archive")
   field name = Text("triage")
 mxv::restore::unfinished exits 1
-  recovery Hint("run `mxv repair triage`, which moves the archive aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says")
+  recovery Hint("run `mxv repair triage`, which abandons the archive, moves it aside or finishes it under a dated name, as the problem that `mxv list --archived` shows for it says")
   field name = Text("triage")
 mxv::restore::name_taken exits 1
   recovery Hint("run `mxv remove triage` first, which keeps the archive, and then restore again; `mxv remove --archived triage` deletes the archive instead, with any files that only it still holds")

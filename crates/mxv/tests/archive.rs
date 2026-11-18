@@ -3051,3 +3051,83 @@ fn an_archive_refuses_a_unit_that_started_after_the_question_and_mxv_up_runs_mea
     );
     assert!(setup.checkout().is_dir());
 }
+
+impl Setup {
+    /// Leaves the records that an archive stopped before it deleted any
+    /// checkout leaves: the workspace whole and retiring into an archive
+    /// record that is still retiring. It archives and restores the
+    /// workspace, then writes the archive's record back as retiring.
+    fn plant_an_archive_that_deleted_no_checkout(&self) {
+        let archive = self.archive_record("triage");
+        let saved = fs::read_to_string(&archive).unwrap();
+        let (exit, document) = self.run(&["restore", "triage", "--yes"]);
+        assert_eq!(exit, 0, "{document}");
+        let mut record: Value = serde_json::from_str(&saved).unwrap();
+        record["state"] = Value::from("retiring");
+        fs::create_dir_all(archive.parent().unwrap()).unwrap();
+        write(&archive, &serde_json::to_string_pretty(&record).unwrap());
+        let path = self.workspace_record();
+        let mut workspace: Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        workspace["state"] = serde_json::json!({ "retiring": { "archive": record["id"] } });
+        write(&path, &serde_json::to_string_pretty(&workspace).unwrap());
+    }
+}
+
+#[test]
+fn an_archive_that_deleted_no_checkout_is_listed_with_repair_and_abandoned_by_it() {
+    let setup = Setup::new();
+    setup.archive();
+    setup.plant_an_archive_that_deleted_no_checkout();
+    for args in [&["list"][..], &["list", "--archived"][..]] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        let row = &document["data"][0];
+        assert_eq!(row["name"], "triage", "{args:?}");
+        assert_eq!(
+            row["problem"],
+            "the archive stopped before it deleted any checkout; `mxv archive -w triage` carries it on instead",
+            "{args:?}"
+        );
+        assert_eq!(row["repair"], "mxv repair triage", "{args:?}");
+    }
+    let (exit, document) = setup.run(&["repair", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "would_abandon", "{document}");
+    assert!(setup.archive_record("triage").exists());
+
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "abandoned", "{document}");
+    assert_eq!(document["data"]["pins"].as_array().unwrap().len(), 1);
+    assert!(!setup.archive_record("triage").parent().unwrap().exists());
+    let workspace: Value =
+        serde_json::from_str(&fs::read_to_string(setup.workspace_record()).unwrap()).unwrap();
+    assert_eq!(workspace["state"], "live", "{workspace}");
+    assert!(setup.checkout().is_dir());
+    let (exit, document) = setup.run(&["list"]);
+    assert_eq!(exit, 0, "{document}");
+    let (exit, document) = setup.run(&["repair", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    setup.archive();
+}
+
+#[test]
+fn restore_and_remove_archived_name_repair_for_an_archive_that_deleted_no_checkout() {
+    let setup = Setup::new();
+    setup.archive();
+    setup.plant_an_archive_that_deleted_no_checkout();
+    for args in [
+        &["restore", "triage", "--yes"][..],
+        &["remove", "--archived", "triage", "--yes"][..],
+    ] {
+        let (exit, document) = setup.run(args);
+        assert_eq!(exit, 1, "{args:?}: {document}");
+        let text = recovery(&document);
+        assert!(text.contains("mxv repair triage"), "{args:?}: {text}");
+        assert!(!text.contains("mxv archive -w"), "{args:?}: {text}");
+    }
+    assert!(setup.archive_record("triage").exists());
+}
