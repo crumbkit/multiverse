@@ -33,7 +33,7 @@ pub struct Lifecycle<'a, B> {
 }
 
 /// Returns why a process outside phase keeps `workspace` from being
-/// archived, or `None` when no such process works in it.
+/// archived or removed, or `None` when no such process works in it.
 pub type InUse = fn(&Workspace) -> Result<Option<String>, Error>;
 
 /// The in-use check of a [`Lifecycle`] that its caller gave none: no process
@@ -88,6 +88,10 @@ pub enum Removed {
     /// Units run that the question did not allow the removal to stop, and
     /// nothing was stopped or deleted.
     Running(Vec<String>),
+    /// A process outside phase works in the workspace and `--force` did not
+    /// allow the removal, so nothing was stopped or deleted. It holds the
+    /// in-use check's reason.
+    InUse(String),
     /// A process outlived the stop, so the workspace and its record stay.
     Unstoppable(Unstoppable),
 }
@@ -258,9 +262,9 @@ pub enum Repairing {
 
 impl<'a, B> Lifecycle<'a, B> {
     /// Returns the destructive commands of `workspaces` and `archives`,
-    /// whose run files, volumes and locks `runs` holds. An archive checks
-    /// no process outside phase until [`Lifecycle::with_in_use`] gives it
-    /// the check.
+    /// whose run files, volumes and locks `runs` holds. An archive or a
+    /// removal checks no process outside phase until
+    /// [`Lifecycle::with_in_use`] gives it the check.
     #[must_use]
     pub const fn new(
         workspaces: &'a Workspaces<B>,
@@ -276,7 +280,7 @@ impl<'a, B> Lifecycle<'a, B> {
     }
 
     /// Returns these commands with `in_use` as the check for a process
-    /// outside phase that works in the workspace of an archive.
+    /// outside phase that works in the workspace of an archive or a removal.
     #[must_use]
     pub const fn with_in_use(mut self, in_use: InUse) -> Self {
         self.in_use = in_use;
@@ -293,7 +297,8 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// last deletion.
     ///
     /// The record that differs from the confirmed one, running units that
-    /// `asked` did not allow, and a docker volume that `asked` did not name
+    /// `asked` did not allow, a process outside phase that works in the
+    /// workspace when `asked` is not forced, and a docker volume that `asked` did not name
     /// each end the removal before the first stop.
     ///
     /// # Errors
@@ -314,6 +319,11 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         let running = self.runs.running(&record)?;
         if !running.is_empty() && !asked.force {
             return Ok(Removed::Running(running));
+        }
+        if !asked.force
+            && let Some(reason) = (self.in_use)(&record)?
+        {
+            return Ok(Removed::InUse(reason));
         }
         let volumes = self.runs.volumes(&record)?;
         if volumes

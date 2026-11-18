@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use multiverse::health::{self, Problem};
 use multiverse::{
     AddOutcome, Allow, ArchiveState, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined,
-    Lifecycle, Manifest, ManifestProblem, Mode, NewOutcome, PathGlob, RemovalPlan, RemoveAsked,
-    Removed, Repo, Store, Workspace, WorkspaceName, WorkspaceState, Workspaces, checkout_prefix,
-    prefixed,
+    Lifecycle, Manifest, ManifestProblem, Mode, NewOutcome, PathGlob, Removal, RemovalPlan,
+    RemoveAsked, Removed, Repo, Store, Workspace, WorkspaceName, WorkspaceState, Workspaces,
+    checkout_prefix, prefixed,
 };
 
 use crate::cli::{AddArgs, CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
@@ -18,6 +18,9 @@ use crate::failures::MxvFailure;
 use crate::processes;
 use crate::rows::{NewRow, RemovalResult, ShowRow, WorkspaceRow};
 use crate::run_failures::RunFailure;
+
+#[cfg(test)]
+mod tests;
 
 /// The document that `mxv new` prints.
 pub(crate) const NEW: Document<NewRow> = Document::new(
@@ -722,6 +725,49 @@ pub(crate) fn cd(environment: &Environment, args: &CdArgs) -> Result<Prose<Strin
     Ok(Prose::new(checkout.path.display().to_string()))
 }
 
+/// Returns why a process outside phase works in `workspace`, which stops
+/// its removal unless `allow` has `--force`. A process that phase did not
+/// start loses its working directory when the checkouts go.
+fn outside_user(
+    name: &WorkspaceName,
+    workspace: &Workspace,
+    allow: Allow,
+) -> Result<Option<String>, crumbkit::Error> {
+    let outside = crate::archive::outside_reason(workspace).map_err(MxvFailure::from)?;
+    match outside {
+        Some(reason) if !allow.discard_changes => Err(MxvFailure::RemoveInUse {
+            name: name.to_string(),
+            reason,
+            allow,
+        }
+        .into()),
+        other => Ok(other),
+    }
+}
+
+/// Returns the sentence of a removal's question that counts the stash
+/// entries of the clones that it deletes, or nothing.
+fn stash_clause(removal: &Removal) -> String {
+    let stashes: usize = removal
+        .checkouts
+        .iter()
+        .map(|checkout| checkout.stashes().len())
+        .sum();
+    if stashes == 0 {
+        return String::new();
+    }
+    format!(
+        " It deletes {} of the workspace's clones.",
+        crate::rows::stashes(u32::try_from(stashes).unwrap_or(u32::MAX))
+    )
+}
+
+/// Returns the sentence of a removal's question that names the process
+/// outside phase that `outside` gives, or nothing.
+fn outside_clause(outside: Option<&str>) -> String {
+    outside.map_or_else(String::new, |reason| format!(" It is in use: {reason}."))
+}
+
 /// Removes the workspace that `args` names, after the person confirms, or
 /// reports what removing it would do on a dry run. The removal plans again
 /// after the confirmation, and refuses when the workspace changed while
@@ -745,6 +791,7 @@ pub(crate) fn remove(
     };
     let mut volumes = None;
     let mut containers = Vec::new();
+    let mut outside = None;
     if let Some(workspace) = workspaces.find(&name).map_err(MxvFailure::from)? {
         let running = processes::running(environment, &workspace)?;
         if !running.is_empty() && !args.force {
@@ -753,6 +800,11 @@ pub(crate) fn remove(
                 processes: running,
             }
             .into());
+        }
+        // Phase's own units work in the checkouts, so a workspace with
+        // running units has no process outside phase to look for.
+        if running.is_empty() {
+            outside = outside_user(&name, &workspace, allow)?;
         }
         // A volume may hold the only copy of a database, so removing it
         // needs its own flag, and `--force` alone keeps the workspace.
@@ -823,17 +875,8 @@ pub(crate) fn remove(
     } else {
         format!("Remove the workspace {name}, {parts}?")
     };
-    let stashes: usize = removal
-        .checkouts
-        .iter()
-        .map(|checkout| checkout.stashes().len())
-        .sum();
-    if stashes > 0 {
-        question.push_str(&format!(
-            " It deletes {} of the workspace's clones.",
-            crate::rows::stashes(u32::try_from(stashes).unwrap_or(u32::MAX))
-        ));
-    }
+    question.push_str(&stash_clause(&removal));
+    question.push_str(&outside_clause(outside.as_deref()));
     if args.delete_volumes {
         question.push_str(&crate::archive::volumes_clause(&names));
     }
@@ -842,6 +885,7 @@ pub(crate) fn remove(
     let archives = crate::archive::archives(environment)?;
     let asked = RemoveAsked::new(args.force, names.clone());
     let outcome = Lifecycle::new(&workspaces, &archives, &runs)
+        .with_in_use(crate::archive::outside_reason)
         .remove(removal, &asked)
         .map_err(MxvFailure::from)?;
     match outcome {
@@ -873,6 +917,12 @@ pub(crate) fn remove(
         Removed::Running(processes) => Err(RunFailure::Running {
             workspace: name.to_string(),
             processes,
+        }
+        .into()),
+        Removed::InUse(reason) => Err(MxvFailure::RemoveInUse {
+            name: name.to_string(),
+            reason,
+            allow,
         }
         .into()),
         Removed::Unstoppable(unstoppable) => Err(RunFailure::Unstoppable {

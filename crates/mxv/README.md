@@ -1672,6 +1672,15 @@ terminal. After a removal that kept an unmerged branch, the record is gone,
 so the result names the `git branch -D` command that deletes the branch; a
 dry run names the `mxv remove` command with `--delete-unmerged` instead.
 
+A process outside phase whose working directory is in the workspace, such as
+a command from `mxv exec` or `mxv run`, an agent session or a test run,
+refuses `mxv remove` with `mxv::remove::in_use`, which names the process.
+`--force` overrides the refusal, and the question then names the process.
+mxv never stops a process that it did not start. The shell that runs
+`mxv remove` and its ancestors do not count, and a background job of that
+shell does. The check runs under the workspace lock before the first stop,
+and a process that starts after it is not caught.
+
 `mxv remove` checks the workspace again after the person confirms, because
 the workspace may change while mxv waits for the answer. When a new check
 refuses the removal, mxv reports that refusal and removes nothing. When the

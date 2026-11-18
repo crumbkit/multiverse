@@ -70,8 +70,8 @@ use mxv::{
     PROCESS_UNSTOPPABLE, PROCESS_UNSUPPORTED_OS, PROXY_CADDY_MISSING, PROXY_CADDY_TOO_OLD,
     PROXY_CHECK_FAILED, PROXY_CODES, PROXY_LOAD_FAILED, PROXY_PORT_DENIED, PROXY_PORT_HELD,
     PROXY_SOCKET_PATH_TOO_LONG, PROXY_START_FAILED, PROXY_TRUST_FAILED, PROXY_TRUST_NEEDS_TERMINAL,
-    RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REPAIR_CHANGED,
-    REPAIR_NAMES_TAKEN, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH,
+    RECORD_CORRUPT, RECORD_MISMATCHED, RECORD_NEWER, RECORD_UNREADABLE, REMOVE_IN_USE,
+    REPAIR_CHANGED, REPAIR_NAMES_TAKEN, REPOSITORY_EMPTY_ORIGIN, REPOSITORY_NO_DEFAULT_BRANCH,
     REPOSITORY_NO_ORIGIN, REPOSITORY_NOT_FOUND, RESTORE_BRANCH_MOVED, RESTORE_CHANGED,
     RESTORE_COMMIT_MISSING, RESTORE_IGNORED_DAMAGED, RESTORE_IGNORED_TAKEN, RESTORE_MIRROR_MISSING,
     RESTORE_NAME_TAKEN, RESTORE_NOT_FOUND, RESTORE_ROOT_FILE_CHANGED,
@@ -550,6 +550,10 @@ const UNPROVOKED: &[Unprovoked<'static>] = &[
     Unprovoked::new(
         WORKSPACE_CHANGED,
         "Only a workspace that changes while mxv remove waits for the person's answer provokes it, and the check's runs have no terminal to wait at; the library's workspace tests provoke the change.",
+    ),
+    Unprovoked::new(
+        REMOVE_IN_USE,
+        "Only a process outside phase whose working directory is in the workspace provokes it, and the check's fixture has none; tests/workspaces.rs starts such a process and provokes it.",
     ),
     Unprovoked::new(
         PATH_INACCESSIBLE,
