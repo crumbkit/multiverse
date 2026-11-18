@@ -289,6 +289,24 @@ fn a_directory_that_the_mark_says_the_run_made_is_deleted_with_the_half_written_
     assert!(setup.checkout().is_dir());
 }
 
+#[test]
+fn a_half_written_file_with_crumbkits_temporary_name_is_deleted_with_the_directory_the_run_made() {
+    let setup = setup(Kind::Worktree);
+    setup.create();
+    let mut archive = setup.archive();
+    let mut mark = RestoreMark::default();
+    mark.0.directory = true;
+    mark.0.agents = true;
+    archive.restoring = Some(mark);
+    setup.archives.write(&archive).unwrap();
+    let left = setup.root.join("triage");
+    fs::create_dir_all(&left).unwrap();
+    write(left.join(".AGENTS.md.99999.0.tmp"), "half\n");
+    setup.restore();
+    assert!(!left.join(".AGENTS.md.99999.0.tmp").exists());
+    assert!(setup.checkout().is_dir());
+}
+
 /// Returns the paths that a refusal of an undo names, or panics with what
 /// the undo returned instead.
 fn refused_paths<T: std::fmt::Debug>(result: Result<T, Error>) -> Vec<String> {

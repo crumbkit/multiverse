@@ -31,6 +31,9 @@ sandbox = ["dep:nono"]
 serde = { workspace = true }
 # The run record is JSON on disk.
 serde_json = { workspace = true }
+# crumbkit-durable writes the run record and each grant file in one step,
+# and takes the lifecycle and grant locks.
+crumbkit-durable = { workspace = true }
 # `sweep` signals the process groups of recorded processes and checks
 # whether a group still has a member, without unsafe code.
 rustix = { workspace = true }

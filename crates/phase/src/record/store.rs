@@ -2,29 +2,32 @@
 //! durable files (DUR-1) and takes file locks (DUR-2).
 //!
 //! The record of a workspace is `<state_dir>/runs/<workspace-id>.json`. The
-//! store writes it to a temporary file beside it with mode 0600, syncs the
-//! file, renames it over the record and syncs the directory, so a reader
-//! sees the old record or the new one and never part of one. A reader
-//! opens the record read-only and takes no lock.
+//! store writes it with crumbkit-durable's `write_atomically`, which writes
+//! a temporary file `.<name>.<pid>.<n>.tmp` beside it with mode 0600, syncs
+//! the file, renames it over the record and syncs the directory, so a
+//! reader sees the old record or the new one and never part of one. A
+//! reader opens the record read-only and takes no lock.
 //!
-//! The lifecycle lock of a workspace is an exclusive `flock` on
-//! `<state_dir>/runs/<workspace-id>.lock`, which `up`, `down`, `restart`
-//! and `sweep` hold while they change what runs. The operating system
-//! releases it when the file closes, which happens when the
-//! [`LifecycleLock`] drops or the process that holds it ends, so a crashed
-//! phase leaves no stale lock. The lock file is never deleted.
+//! The lifecycle lock of a workspace is crumbkit-durable's `PathLock`, an
+//! exclusive `flock` on `<state_dir>/runs/<workspace-id>.lock`, which `up`,
+//! `down`, `restart` and `sweep` hold while they change what runs. The
+//! operating system releases it when the file closes, which happens when
+//! the [`LifecycleLock`] drops or the process that holds it ends, so a
+//! crashed phase leaves no stale lock. The lock file is never deleted.
 //!
 //! This follows multiverse's state store.
 
-use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
-use std::io::{self, Read as _, Write as _};
-use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
+use std::fs::{self, DirBuilder, File};
+use std::io::{self, Read as _};
+use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde::Deserialize;
 
-use crate::clock::{POLL_INTERVAL, now, pause};
+use crumbkit_durable::{LockError, Mode, PathLock, WriteStep};
+
+use crate::clock::deadline_in;
 use crate::error::PhaseError;
 use crate::name::WorkspaceId;
 use crate::name::{AppName, ProcessName};
@@ -55,8 +58,8 @@ pub(crate) struct RunStore {
 #[derive(Debug)]
 #[must_use = "the lock is released when it drops"]
 pub(crate) struct LifecycleLock {
-    /// The locked file, which holds the lock while it is open.
-    _file: File,
+    /// The held lock, which lasts while its file is open.
+    _lock: PathLock,
 }
 
 /// The part of a record that the store reads first, so a record of a newer
@@ -148,8 +151,8 @@ impl RunStore {
         Ok(Some(record))
     }
 
-    /// Writes `record` over the record of its workspace in one step. The
-    /// caller holds the workspace's lifecycle lock.
+    /// Writes `record` over the record of its workspace in one step, and
+    /// syncs the directory. The caller holds the workspace's lifecycle lock.
     ///
     /// # Errors
     ///
@@ -157,34 +160,27 @@ impl RunStore {
     /// temporary file is removed after a failed step.
     #[cfg(test)]
     pub(crate) fn write(&self, record: &RunRecord, lock: &LifecycleLock) -> Result<(), PhaseError> {
-        self.replace(record, lock)?;
-        self.sync_dir()
+        self.replace(record, lock).map_err(Unreplaced::into_error)
     }
 
-    /// Writes `record` to a temporary file and renames it over the record
-    /// of its workspace, without syncing the directory. The caller holds
-    /// the workspace's lifecycle lock.
+    /// Writes `record` over the record of its workspace in one step, as
+    /// [`replace_file`] does. The caller holds the workspace's lifecycle
+    /// lock.
     ///
     /// # Errors
     ///
-    /// Returns [`PhaseError::StateUnwritable`] when a step fails. The
-    /// temporary file is removed after a failed step.
-    fn replace(&self, record: &RunRecord, _lock: &LifecycleLock) -> Result<(), PhaseError> {
+    /// Returns the errors of [`replace_file`].
+    fn replace(&self, record: &RunRecord, _lock: &LifecycleLock) -> Result<(), Unreplaced> {
         let target = self.path(&record.workspace);
-        let unwritable = |path: &Path, source| PhaseError::StateUnwritable {
-            path: path.to_path_buf(),
-            source,
-        };
-        let mut bytes = serde_json::to_vec_pretty(record)
-            .map_err(|error| unwritable(&target, io::Error::other(error)))?;
+        let mut bytes = serde_json::to_vec_pretty(record).map_err(|error| {
+            Unreplaced::Unchanged(PhaseError::StateUnwritable {
+                path: target.clone(),
+                source: io::Error::other(error),
+            })
+        })?;
         bytes.push(b'\n');
-        secure_dir(&self.dir)?;
-        let temp = self.dir.join(format!(
-            ".{}.json.{}.tmp",
-            record.workspace,
-            std::process::id()
-        ));
-        replace_file(&temp, &target, &bytes)
+        secure_dir(&self.dir).map_err(Unreplaced::Unchanged)?;
+        replace_file(&target, &bytes)
     }
 
     /// Deletes the record of `workspace`. Deleting a record that does not
@@ -208,7 +204,7 @@ impl RunStore {
     }
 
     /// Takes the lifecycle lock of `workspace`. When another holder has
-    /// it, it tries again every [`POLL_INTERVAL`] until `wait` passes.
+    /// it, it tries again every 5 ms until `wait` passes.
     ///
     /// # Errors
     ///
@@ -238,7 +234,7 @@ impl RunStore {
     ) -> Result<LifecycleLock, PhaseError> {
         secure_dir(&self.dir)?;
         match take_lock(&self.lock_path(workspace), wait, give_up)? {
-            Some(file) => Ok(LifecycleLock { _file: file }),
+            Some(lock) => Ok(LifecycleLock { _lock: lock }),
             None => Err(PhaseError::Busy {
                 workspace: workspace.clone(),
                 waited: wait,
@@ -252,60 +248,72 @@ impl RunStore {
     }
 }
 
-/// Writes `bytes` to the temporary file `temp` and renames it over
-/// `target`, without syncing the directory, so a reader sees the old file
-/// or the new one and never part of one. The file has mode 0600, and the
-/// write never follows a symbolic link that stands where `temp` goes.
+/// Why [`replace_file`] did not finish.
+#[derive(Debug)]
+pub(crate) enum Unreplaced {
+    /// A step before the rename failed, so the target is unchanged and the
+    /// temporary file is gone.
+    Unchanged(PhaseError),
+    /// The directory sync after the rename failed, so the target already
+    /// holds the new bytes, and after a power loss it may hold the old ones.
+    Unsynced(PhaseError),
+}
+
+impl Unreplaced {
+    /// Returns the error, whichever step failed.
+    pub(crate) fn into_error(self) -> PhaseError {
+        match self {
+            Self::Unchanged(error) | Self::Unsynced(error) => error,
+        }
+    }
+}
+
+/// Writes `bytes` over `target` in one step with crumbkit-durable's
+/// `write_atomically`: a temporary file `.<name>.<pid>.<n>.tmp` beside it
+/// with mode 0600, synced, renamed over `target`, and then the directory
+/// synced, so a reader sees the old file or the new one and never part of
+/// one. The temporary file is created anew, so the write never follows a
+/// symbolic link, and a name that a crash left is skipped and left alone. A
+/// file system that cannot sync a directory, which refuses with EINVAL,
+/// ENOTSUP or ENOSYS, counts as synced.
 ///
 /// # Errors
 ///
-/// Returns [`PhaseError::StateUnwritable`] when a step fails. The
-/// temporary file is removed after a failed step.
-pub(crate) fn replace_file(temp: &Path, target: &Path, bytes: &[u8]) -> Result<(), PhaseError> {
-    let unwritable = |path: &Path, source| PhaseError::StateUnwritable {
-        path: path.to_path_buf(),
-        source,
-    };
-    // A temporary file that a crashed write of this process id left is
-    // removed, so `create_new` below never meets it.
-    match fs::remove_file(temp) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(unwritable(temp, error)),
-    }
+/// Returns [`Unreplaced::Unchanged`] with [`PhaseError::StateUnwritable`]
+/// when a step before the rename fails, and [`Unreplaced::Unsynced`] when
+/// the directory sync fails.
+pub(crate) fn replace_file(target: &Path, bytes: &[u8]) -> Result<(), Unreplaced> {
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
     )]
-    let opened = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .custom_flags(no_follow())
-        .mode(0o600)
-        .open(temp);
-    let written = opened.and_then(|mut file| file.write_all(bytes).and_then(|()| file.sync_all()));
-    if let Err(error) = written {
-        let _ = fs::remove_file(temp);
-        return Err(unwritable(temp, error));
-    }
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
-    )]
-    let renamed = fs::rename(temp, target);
-    if let Err(error) = renamed {
-        let _ = fs::remove_file(temp);
-        return Err(unwritable(target, error));
-    }
-    Ok(())
+    let written = crumbkit_durable::write_atomically(target, bytes, Mode::Private);
+    written.map_err(|error| {
+        let unsynced = error.step == WriteStep::SyncDirectory;
+        let path = if unsynced {
+            target.parent().map_or_else(PathBuf::new, Path::to_path_buf)
+        } else {
+            error.path
+        };
+        let failure = PhaseError::StateUnwritable {
+            path,
+            source: error.source,
+        };
+        if unsynced {
+            Unreplaced::Unsynced(failure)
+        } else {
+            Unreplaced::Unchanged(failure)
+        }
+    })
 }
 
-/// Takes an exclusive `flock` on the file `path`, which it creates with
-/// mode 0600 when it does not exist. When another holder has it, it tries
-/// again every [`POLL_INTERVAL`] until `wait` passes, and stops after the
-/// first failed try once `give_up` holds. It returns `None` when the lock
-/// stayed held. The operating system releases the lock when the returned
-/// file closes or its process ends.
+/// Takes an exclusive lock on the file `path` with crumbkit-durable's
+/// `PathLock`, which creates the file with mode 0600 when it does not exist
+/// and refuses a symbolic link. When another holder has it, it tries again
+/// every 5 ms until `wait` passes, and stops after the first failed try
+/// once `give_up` holds. It returns `None` when the lock stayed held. The
+/// operating system releases the lock when the returned lock drops or its
+/// process ends.
 ///
 /// # Errors
 ///
@@ -315,43 +323,23 @@ pub(crate) fn take_lock(
     path: &Path,
     wait: Duration,
     give_up: &dyn Fn() -> bool,
-) -> Result<Option<File>, PhaseError> {
+) -> Result<Option<PathLock>, PhaseError> {
     #[expect(
         clippy::disallowed_methods,
-        reason = "crates/phase/src/record/store.rs is the module of phase that writes durable files (DUR-1)"
+        reason = "crates/phase/src/record/store.rs owns phase's file locks and their deadline (DUR-2)"
     )]
-    let opened = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .mode(0o600)
-        .open(path);
-    let file = opened.map_err(|source| PhaseError::StateUnwritable {
-        path: path.to_path_buf(),
-        source,
-    })?;
-    let deadline = now() + wait;
-    // Another process releases a `flock` with no event that this process
-    // can wait on, so the lock polls (BASE-11).
-    loop {
-        #[expect(
-            clippy::disallowed_methods,
-            reason = "crates/phase/src/record/store.rs owns phase's file locks and their deadline (DUR-2)"
-        )]
-        let attempt = file.try_lock();
-        match attempt {
-            Ok(()) => return Ok(Some(file)),
-            Err(TryLockError::WouldBlock) => {}
-            Err(TryLockError::Error(source)) => {
-                return Err(PhaseError::StateUnwritable {
-                    path: path.to_path_buf(),
-                    source,
-                });
-            }
-        }
-        if now() >= deadline || give_up() {
-            return Ok(None);
-        }
-        pause(POLL_INTERVAL);
+    let taken = PathLock::acquire_unless(path, deadline_in(wait), give_up);
+    match taken {
+        Ok(lock) => Ok(Some(lock)),
+        Err(LockError::Busy { .. }) => Ok(None),
+        Err(LockError::Io { source, .. }) => Err(PhaseError::StateUnwritable {
+            path: path.to_path_buf(),
+            source,
+        }),
+        Err(other) => Err(PhaseError::StateUnwritable {
+            path: path.to_path_buf(),
+            source: other.into(),
+        }),
     }
 }
 
@@ -386,14 +374,15 @@ pub(crate) fn secure_dir(dir: &Path) -> Result<(), PhaseError> {
 
 /// Syncs the directory `dir`, so a rename or a removal in it survives a
 /// power loss. Some file systems cannot sync a directory and fail with
-/// EINVAL or ENOTSUP, and there the sync is skipped, because the rename
+/// EINVAL, ENOTSUP or ENOSYS, and there the sync is skipped, as
+/// crumbkit-durable skips it after a write, because the rename
 /// itself has succeeded.
 ///
 /// # Errors
 ///
 /// Returns [`PhaseError::StateUnwritable`] when the directory cannot be
 /// opened or synced for another reason.
-pub(crate) fn sync_directory(dir: &Path) -> Result<(), PhaseError> {
+fn sync_directory(dir: &Path) -> Result<(), PhaseError> {
     let synced = File::open(dir).and_then(|handle| handle.sync_all());
     match synced {
         Ok(()) => Ok(()),
@@ -406,17 +395,13 @@ pub(crate) fn sync_directory(dir: &Path) -> Result<(), PhaseError> {
 }
 
 /// Reports whether `error` is how a file system that cannot sync a
-/// directory refuses it: EINVAL or ENOTSUP.
+/// directory refuses it: EINVAL, ENOTSUP or ENOSYS, the errors that
+/// crumbkit-durable's directory sync also skips.
 fn cannot_sync_directory(error: &io::Error) -> bool {
     let code = error.raw_os_error();
     code == Some(rustix::io::Errno::INVAL.raw_os_error())
         || code == Some(rustix::io::Errno::NOTSUP.raw_os_error())
-}
-
-/// Returns the `O_NOFOLLOW` flag, so the store never writes through a
-/// symbolic link that stands where its temporary file goes.
-fn no_follow() -> i32 {
-    i32::try_from(rustix::fs::OFlags::NOFOLLOW.bits()).unwrap_or(0)
+        || code == Some(rustix::io::Errno::NOSYS.raw_os_error())
 }
 
 /// The write-ahead journal of one workspace's run, which the engine keeps
@@ -774,9 +759,17 @@ impl<'s> Journal<'s> {
     /// writes its next changes over `record`, never over the record before
     /// it.
     fn commit(&mut self, record: RunRecord) -> Result<(), PhaseError> {
-        self.store.replace(&record, &self.lock)?;
-        self.record = Some(record);
-        self.store.sync_dir()
+        match self.store.replace(&record, &self.lock) {
+            Ok(()) => {
+                self.record = Some(record);
+                Ok(())
+            }
+            Err(Unreplaced::Unsynced(error)) => {
+                self.record = Some(record);
+                Err(error)
+            }
+            Err(Unreplaced::Unchanged(error)) => Err(error),
+        }
     }
 
     /// Returns the error of a change to an object the record does not

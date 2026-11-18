@@ -69,4 +69,4 @@ The design of the process runner is in [crates/phase/docs/design.md](crates/phas
 - `workspace-clones` makes each checkout a `git clone --shared` of a bare mirror that mxv owns, so that a sandbox can allow writes to one workspace alone.
 - `workspace-manifest` sets where the workspace manifest comes from and how it is read.
 
-Records and files that must survive a crash go through `store::replace_file`, which writes a temporary file, syncs it, renames it and syncs the directory. Locks are `flock` locks, so the operating system releases them when a process dies.
+Records and files that must survive a crash go through `store::replace_file`, which calls crumbkit-durable's `write_atomically` to write a temporary file, sync it, rename it and sync the directory. Locks are crumbkit-durable's `PathLock`, an exclusive `flock`, so the operating system releases them when a process dies.

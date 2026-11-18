@@ -104,6 +104,11 @@ crumbkit-usage = "0.6.0"
 # agent skills directories and check the installed copies.
 crumbkit-skills = "0.6.0"
 
+# crumbkit-durable replaces a file atomically and takes a file lock with a
+# deadline, for the state stores of the multiverse library and of phase
+# (DUR-1, DUR-2). It depends on no other crumbkit crate and has no features.
+crumbkit-durable = "0.6.0"
+
 # crumbkit-test checks the `mxv` command against crumbkit's conventions
 # (CLI-6). Only tests use it.
 crumbkit-test = "0.6.0"

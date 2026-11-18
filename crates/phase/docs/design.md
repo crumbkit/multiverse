@@ -1073,8 +1073,9 @@ run that phase no longer supervises. It matches a process by pid and start
 time together, so a reused pid is never mistaken for an app.
 
 The record of a workspace is `<state_dir>/runs/<workspace-id>.json`, with
-mode 0600. phase writes it to a temporary file, syncs it and renames it over
-the record, so a reader sees a whole record. The lifecycle lock is an
+mode 0600. phase writes it with crumbkit-durable's `write_atomically`, which
+writes a temporary file, syncs it and renames it over the record, so a reader
+sees a whole record. The lifecycle lock is crumbkit-durable's `PathLock`, an
 exclusive `flock` on `<state_dir>/runs/<workspace-id>.lock`. Each object in
 the record has a state: `planned`, `running`, `stopping` or `stopped`.
 

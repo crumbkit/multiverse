@@ -33,7 +33,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::PhaseError;
 use crate::name::AppName;
 use crate::plan::{Permissions, STATE};
-use crate::record::store::{replace_file, secure_dir, sync_directory, take_lock};
+use crate::record::store::{Unreplaced, replace_file, secure_dir, take_lock};
 
 #[cfg(test)]
 mod tests;
@@ -527,8 +527,6 @@ pub(crate) fn grant(
             source: io::Error::other(error),
         })?;
     bytes.push(b'\n');
-    let temp = dir.join(format!(".{}.json.{}.tmp", scope.stem(), std::process::id()));
-    replace_file(&temp, &target, &bytes)?;
-    sync_directory(&dir)?;
+    replace_file(&target, &bytes).map_err(Unreplaced::into_error)?;
     Ok(grants)
 }

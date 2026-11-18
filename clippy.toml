@@ -55,6 +55,11 @@ disallowed-methods = [
     { path = "std::fs::File::try_lock", reason = "lock through the library's store module, which owns the deadline" },
     { path = "std::fs::File::lock_shared", reason = "lock through the library's store module, which owns the deadline" },
     { path = "std::fs::File::try_lock_shared", reason = "lock through the library's store module, which owns the deadline" },
+    # DUR-1 and DUR-2: crumbkit-durable writes and locks behind the store
+    # modules, crates/multiverse/src/store.rs and crates/phase/src/record/store.rs.
+    { path = "crumbkit_durable::write_atomically", reason = "write through the library's store module" },
+    { path = "crumbkit_durable::PathLock::acquire", reason = "lock through the library's store module, which owns the deadline" },
+    { path = "crumbkit_durable::PathLock::acquire_unless", reason = "lock through the library's store module, which owns the deadline" },
 ]
 
 disallowed-types = [

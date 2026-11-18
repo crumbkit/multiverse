@@ -47,11 +47,13 @@ use crate::environment::Environment;
 #[cfg(test)]
 mod tests;
 
-/// The most bytes of command text that mxv sends the daemon. deadband's
-/// `admit` has no deadline on sending its request, so a daemon that has
-/// stopped reading blocks a request longer than the socket's send buffer,
-/// which is about 8 KiB on macOS. The cut shortens only what `deadband
-/// status` shows.
+/// The most bytes of command text that mxv sends the daemon. deadband
+/// 0.4's `admit` gives the daemon 2 seconds to take the request and send
+/// its first answer, and starts the work without a place when it does not.
+/// The cut keeps the request inside the socket's send buffer, which is
+/// about 8 KiB on macOS, so writing the request never waits for a daemon
+/// that has stopped reading. The cut shortens only what `deadband status`
+/// shows.
 const MOST_COMMAND_BYTES: usize = 4096;
 
 /// The variable that makes mise run one task at a time, so a `mise run` in
