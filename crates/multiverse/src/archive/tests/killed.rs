@@ -912,5 +912,8 @@ fn a_mark_that_names_another_start_for_the_branch_is_refused_and_the_branch_stay
         matches!(repaired, Err(Error::CorruptRecord { .. })),
         "{repaired:?}"
     );
-    assert!(!git(&source, &["branch", "--list", &branch]).is_empty(), "{start}");
+    assert!(
+        !git(&source, &["branch", "--list", &branch]).is_empty(),
+        "{start}"
+    );
 }
