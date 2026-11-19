@@ -309,6 +309,12 @@ pub fn is_keeper(args: &[OsString]) -> bool {
     })
 }
 
+/// The word that follows the program on the command line of each of mxv's
+/// own apps, `mxv-provision` and `mxv-services`. The plan adds the app's
+/// own word, `provision` or `services`, and its arguments.
+#[doc(hidden)]
+pub const OWN_APP_WORDS: [&str; 1] = ["phase"];
+
 /// The words that follow the program on the command line of the app
 /// `mxv-provision`, which creates the resources of a workspace's services:
 /// `mxv phase provision <spec>`. The command is hidden from help, because
@@ -380,6 +386,79 @@ pub fn provision(args: &[OsString]) -> ExitCode {
         }
     }
 }
+
+/// The words that follow the program on the command line of the app
+/// `mxv-services`, which serves the local AWS services of a workspace in
+/// memory: `mxv phase services <kind>=<port>...`. The command is hidden
+/// from help, because only phase starts it, as a host app of the
+/// workspace's plan.
+#[doc(hidden)]
+pub const SERVICES_WORDS: [&str; 2] = ["phase", "services"];
+
+/// Reports whether `args`, the whole command line, starts the app
+/// `mxv-services`.
+#[doc(hidden)]
+#[must_use]
+pub fn is_services(args: &[OsString]) -> bool {
+    args.get(1..3).is_some_and(|words| {
+        words
+            .iter()
+            .zip(SERVICES_WORDS)
+            .all(|(word, services)| word == services)
+    })
+}
+
+/// Serves the listeners that follow `mxv phase services` until TERM or
+/// INT arrives. It writes the address of each listener and then
+/// `mxv-services ready` to standard output, which phase keeps in the app's
+/// log and whose last line the app's readiness check waits for. It writes
+/// a failure to standard error and returns 1. It reads no environment
+/// variable.
+#[doc(hidden)]
+#[must_use = "the exit code is the result of serving"]
+pub fn services(args: &[OsString]) -> ExitCode {
+    use std::io::Write as _;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard output, and mxv-services writes its log there"
+    )]
+    let mut stdout = std::io::stdout().lock();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/mxv/src/lib.rs owns standard error, and mxv-services writes its failure there"
+    )]
+    let mut stderr = std::io::stderr();
+    let words = args.get(1 + SERVICES_WORDS.len()..).unwrap_or_default();
+    let result = services::parse(words)
+        .map_err(|error| error.to_string())
+        .and_then(|listeners| {
+            services::serve(
+                &listeners,
+                |bound| {
+                    for listener in bound {
+                        drop(writeln!(
+                            stdout,
+                            "mxv-services: {} listens on http://{}",
+                            listener.kind, listener.address
+                        ));
+                    }
+                    drop(writeln!(stdout, "{SERVICES_READY}"));
+                },
+                services::signals,
+            )
+            .map_err(|error| error.to_string())
+        });
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            drop(writeln!(stderr, "mxv-services: {error}"));
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// The line that `mxv-services` writes once every listener is bound.
+const SERVICES_READY: &str = multiverse::SERVICES_READY;
 
 /// The environment source of a keeper, which mxv's plans never ask for:
 /// no process of an mxv plan restarts, and the proxy's Caddy restarts with

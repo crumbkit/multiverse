@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/multiverse", "crates/mxv", "crates/phase"]
+members = ["crates/multiverse", "crates/mxv", "crates/phase", "crates/services"]
 
 [workspace.package]
 version = "0.2.0"
@@ -137,6 +137,22 @@ nono = { version = "=0.81.0", default-features = false }
 # native-roots TLS does. Only a macOS sandbox test of phase uses it, to
 # show that a sandboxed process can load them. It has no features.
 rustls-native-certs = { version = "0.8.5", default-features = false }
+
+# dynoxide-rs is Dynoxide, a DynamoDB API on SQLite, which mxv-services
+# embeds to serve a workspace's dynamodb services in memory. The exact pin
+# is 4.0.0, the library of Dynoxide 1.7.0, so an upgrade is a change of its
+# own that the services tests check. Its default features add a
+# command line, an MCP server and an importer, which mxv-services never
+# uses, so the workspace entry turns them off and keeps `native-sqlite`,
+# which builds SQLite into the binary, and `http-server`, which serves the
+# DynamoDB JSON API.
+dynoxide-rs = { version = "=4.0.0", default-features = false, features = ["native-sqlite", "http-server"] }
+
+# tokio runs mxv-services' listeners. Dynoxide's server is an axum server,
+# which needs tokio. `rt` gives the single-threaded runtime, `net` the TCP
+# listeners, `signal` the TERM and INT that stop the process, and `sync`
+# the channels that stop every listener when one fails.
+tokio = { version = "1.54.1", default-features = false, features = ["rt", "net", "signal", "sync"] }
 
 # The lint table is lints/base.toml and lints/library.toml of the Rust
 # standards (BASE-1, LIB-2, LIB-3). A build with CARGO_BUILD_WARNINGS=deny

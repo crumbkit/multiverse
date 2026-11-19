@@ -7,6 +7,28 @@ workspace may need to act on.
 
 ### Changed
 
+- A `dynamodb` service runs in `mxv-services`, a host process that serves
+  DynamoDB in memory with Dynoxide 1.7.0, which mxv embeds, in place of the
+  DynamoDB Local container `mxv-dynamodb`. A manifest whose services are
+  all `dynamodb` needs no Docker. Processes receive the same endpoint,
+  region and placeholder-key variables on the same port, `mxv-dynamodb`.
+  `mxv up` and `mxv status` list `mxv-services` as a process, and
+  `mxv logs mxv-services` prints the address it listens on. Run
+  `mxv down` in a workspace whose DynamoDB Local container runs before its
+  first `up` with this version, so the container gives up the port
+  `mxv-dynamodb` that `mxv-services` listens on. That `up` creates the
+  tables again.
+- A DynamoDB request needs an `X-Amz-Date` or `Date` header beside its
+  `Authorization` header, as the AWS SDKs send them. A hand-written request,
+  such as one from curl, that sent only `Authorization` is refused.
+- An item whose `ttl` attribute has passed is never deleted, and reads
+  return it until `mxv-services` stops.
+- Library: `ServiceBackend::Dynamodb` is now `ServiceBackend::Services`,
+  whose app is `SERVICES_APP`. `ServiceKind::port` names the ledger port of
+  a kind, and `ServiceBackend::is_container` says whether a backend runs in
+  a container. `DYNAMODB_IMAGE`, `ServiceBackend::image` and
+  `ServiceBackend::container_port` are gone. `Runs::with_provisioner` is
+  now `Runs::with_own_command`, whose words stop before `provision`.
 - `mxv remove` refuses with `mxv::remove::in_use` when a process that mxv
   did not start, such as a command from `mxv exec` or `mxv run` or an agent
   session, works in the workspace, and names the process. `--force`

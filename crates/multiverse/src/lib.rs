@@ -104,9 +104,9 @@ pub use crate::runs::{
     Unstoppable, UpOutcome, Volumes, Waited, WorkspaceLock,
 };
 pub use crate::service::{
-    ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES,
-    DYNAMODB_IMAGE, HOST, Index, KeyAttribute, LOCALSTACK_IMAGE, MOST_VISIBILITY_SECONDS,
-    PROVISION_APP, Placeholder, Queue, REGION, RESERVED_PREFIX, Service, ServiceKind, ServiceValue,
+    ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES, HOST, Index,
+    KeyAttribute, LOCALSTACK_IMAGE, MOST_VISIBILITY_SECONDS, PROVISION_APP, Placeholder, Queue,
+    REGION, RESERVED_PREFIX, SERVICES_APP, SERVICES_READY, Service, ServiceKind, ServiceValue,
     Table,
 };
 pub use crate::store::{Created, LOCK_WAIT, MOST_RECORD_BYTES, Records, Store};

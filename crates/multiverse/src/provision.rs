@@ -5,9 +5,10 @@
 //! the [`Spec`] as one JSON argument, once the backends are ready. It
 //! sends plain HTTP/1.0 requests to `127.0.0.1`: the JSON protocols of
 //! DynamoDB, SQS and KMS, and `PUT /<bucket>` for S3. The backends do not
-//! check signatures, so no request is signed. DynamoDB Local refuses a
-//! request without an `Authorization` header, so its requests carry one
-//! that names the placeholder access key `test` and no real signature.
+//! check signatures, so no request is signed. Dynoxide refuses a DynamoDB
+//! request without an `Authorization` header and a date, so its requests
+//! carry a fixed `X-Amz-Date` and an `Authorization` header that names the
+//! placeholder access key `test` and no real signature.
 //!
 //! A resource that exists already counts as created, so a second run
 //! changes nothing. A queue that exists with another visibility timeout
@@ -24,7 +25,7 @@ use serde_json::{Value, json};
 
 use crate::clock;
 use crate::manifest::Manifest;
-use crate::service::{Backend, KeyAttribute, Queue, REGION, Table};
+use crate::service::{KeyAttribute, Queue, REGION, ServiceKind, Table};
 
 #[cfg(test)]
 mod tests;
@@ -59,9 +60,14 @@ fn wait_until(deadline: Instant) -> io::Result<Duration> {
 /// still starting.
 const RETRY_INTERVAL: Duration = Duration::from_millis(500);
 
-/// The `Authorization` header of a DynamoDB Local request. DynamoDB Local
-/// reads only the access key and does not check the signature.
+/// The `Authorization` header of a DynamoDB request. Dynoxide checks only
+/// that the header names a credential, the signed headers and a signature,
+/// and never checks the signature.
 const DYNAMODB_AUTHORIZATION: &str = "AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=0";
+
+/// The `X-Amz-Date` header of a DynamoDB request. Dynoxide refuses a
+/// request without a date, and never compares it with the clock.
+const DYNAMODB_DATE: &str = "20260101T000000Z";
 
 /// The resources of a workspace's services and the host ports of its
 /// backends, which `mxv-provision` receives as one JSON argument.
@@ -69,8 +75,8 @@ const DYNAMODB_AUTHORIZATION: &str = "AWS4-HMAC-SHA256 Credential=test/20260101/
 #[serde(deny_unknown_fields)]
 #[non_exhaustive]
 pub struct Spec {
-    /// The host port of DynamoDB Local, or `None` when no service needs
-    /// it.
+    /// The host port of the dynamodb services, which `mxv-services`
+    /// serves, or `None` when no service needs it.
     pub dynamodb: Option<u16>,
     /// The host port of LocalStack, or `None` when no service needs it.
     pub aws: Option<u16>,
@@ -93,11 +99,11 @@ impl Spec {
     /// backends' host ports from `ports`, by port name.
     pub(crate) fn of(manifest: &Manifest, ports: &BTreeMap<String, u16>) -> Self {
         let mut spec = Self::default();
-        for backend in manifest.backends() {
-            let port = ports.get(backend.app()).copied();
-            match backend {
-                Backend::Dynamodb => spec.dynamodb = port,
-                Backend::Aws => spec.aws = port,
+        for service in manifest.services.values() {
+            let port = ports.get(service.kind.port()).copied();
+            match service.kind {
+                ServiceKind::Dynamodb => spec.dynamodb = port,
+                ServiceKind::S3 | ServiceKind::Sqs | ServiceKind::Kms => spec.aws = port,
             }
         }
         for service in manifest.services.values() {
@@ -160,7 +166,7 @@ pub enum ProvisionError {
         error: String,
     },
     /// A table exists with a shape other than the manifest declares,
-    /// which DynamoDB Local cannot change in place.
+    /// which the provisioning does not change in place.
     Changed {
         /// The resource, such as `table inbox`.
         resource: String,
@@ -205,7 +211,7 @@ impl fmt::Display for ProvisionError {
                 one,
             } => write!(
                 formatter,
-                "the {resource} exists with {what} other than the manifest declares, and DynamoDB Local cannot change {}; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`",
+                "the {resource} exists with {what} other than the manifest declares, and mxv cannot change {} in place; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`",
                 if *one { "it" } else { "them" }
             ),
         }
@@ -370,6 +376,7 @@ fn json_request<'a>(port: u16, target: &'a str, version: &'a str, body: &Value) 
     let mut headers = vec![("X-Amz-Target", target), ("Content-Type", version)];
     if target.starts_with("DynamoDB_") {
         headers.push(("Authorization", DYNAMODB_AUTHORIZATION));
+        headers.push(("X-Amz-Date", DYNAMODB_DATE));
     }
     Request {
         port,

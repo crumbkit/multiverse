@@ -1095,16 +1095,29 @@ services, and starts them before any process that needs them.
 
 | App | What it runs |
 | --- | --- |
-| `mxv-dynamodb` | DynamoDB Local, `amazon/dynamodb-local:3.3.1` pinned by digest, with `-sharedDb -inMemory`, for the `dynamodb` services. |
+| `mxv-services` | A host process that runs mxv itself as `mxv phase services` and serves the `dynamodb` services with Dynoxide 1.7.0, which mxv embeds, on an in-memory SQLite database. It needs no Docker. It listens on the port `mxv-dynamodb` of the workspace's ledger, on 127.0.0.1 only, and its log names the address. |
 | `mxv-aws` | LocalStack, `localstack/localstack:4.14.0` pinned by digest, for the `s3`, `sqs` and `kms` services. Its `SERVICES` lists only the kinds that the manifest declares, and its queue URLs use the path form. A kind added to the manifest replaces the container on the next `up`, which loses LocalStack's in-memory data, and `mxv-provision` then creates every resource again. |
 | `mxv-provision` | A host process that runs mxv itself and creates each declared table, bucket, queue and key. It runs once and exits. |
 
-A workspace runs one DynamoDB Local and one LocalStack, which every
+A workspace runs one `mxv-services` and one LocalStack, which every
 service of its kind shares. Each backend's host port is a port of the
-workspace's port ledger, named after its app, so `mxv show` lists it in
-`ports` and the backend keeps it across runs. `mxv up` waits up to 180
-seconds for each backend to answer, and up to 120 seconds for
-`mxv-provision`; a backend or provisioning that takes longer fails `up`.
+workspace's port ledger: `mxv-dynamodb` for the `dynamodb` services and
+`mxv-aws` for LocalStack. `mxv show` lists them in `ports`, and the
+backends keep them across runs. `mxv up` waits up to 180 seconds for each
+backend to answer, and up to 120 seconds for `mxv-provision`; a backend or
+provisioning that takes longer fails `up`. `mxv-services` is ready once it
+listens, which takes well under a second.
+
+Dynoxide checks that a DynamoDB request carries an `Authorization` header
+with a credential, signed headers and a signature, and an `X-Amz-Date` or
+`Date` header, as the AWS SDKs send them. It never checks the signature, so
+the `test` keys work. A hand-written request, such as one from curl, needs
+both headers.
+
+Dynoxide never deletes an item whose `ttl` attribute has passed. A table
+with a `ttl` keeps its expired items until `mxv-services` stops, and a
+query or scan returns them, so a program that relies on expiry checks the
+attribute itself.
 
 `mxv-provision` sends plain HTTP requests to `127.0.0.1` with no
 signature. It treats a resource that exists already as provisioned, and
@@ -1115,8 +1128,8 @@ place until the backend stops. Its log lists each resource it created or
 found. Each request waits at most until the provisioning's deadline of
 110 seconds, after which the provisioning fails.
 
-DynamoDB Local cannot change a table's keys, attribute types, indexes or
-expiry attribute in place. When a table exists with any of them other than
+`mxv-provision` does not change a table's keys, attribute types, indexes
+or expiry attribute in place. When a table exists with any of them other than
 the manifest declares, `mxv-provision` fails, and its log says to run
 `mxv down`, which drops the backends' in-memory data, and then `mxv up`,
 which creates the table as declared.
@@ -1147,7 +1160,7 @@ checkout whose prefixed names would start with `mxv-` needs `--as`.
 with `permissions` runs under phase's sandbox, which lets it connect only
 to the apps in its `connect` list. mxv adds the backend of each service in
 `needs` to that list, so a sandboxed process reaches its services with no
-further grant. The manifest cannot name `mxv-dynamodb` or `mxv-aws` in
+further grant. The manifest cannot name `mxv-services` or `mxv-aws` in
 `connect` itself, because `connect` names units of the manifest.
 
 ## Stable names for HTTP ports

@@ -12,7 +12,7 @@ use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::phase_plan::{Built, CallerEnvironment, Inputs, MAIN, build};
 use crate::provision::Spec;
-use crate::service::{DYNAMODB_IMAGE, LOCALSTACK_IMAGE};
+use crate::service::LOCALSTACK_IMAGE;
 
 const APP: &str = r#"
 ports = ["api"]
@@ -52,7 +52,7 @@ fn ports() -> BTreeMap<String, u16> {
 fn plan_with(
     text: &str,
     caller: &CallerEnvironment,
-    provisioner: Option<Vec<String>>,
+    own_command: Option<Vec<String>>,
 ) -> Result<Built, crate::phase_plan::Unrunnable> {
     let manifest = Manifest::parse(text, Path::new("/repo/mxv.toml")).unwrap();
     let ports = ports();
@@ -68,21 +68,17 @@ fn plan_with(
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller,
-        provisioner,
+        own_command,
         urls: crate::phase_plan::ProxyUrls::default(),
     })
 }
 
-fn provisioner() -> Option<Vec<String>> {
-    Some(vec![
-        "/bin/mxv".to_owned(),
-        "phase".to_owned(),
-        "provision".to_owned(),
-    ])
+fn own_command() -> Option<Vec<String>> {
+    Some(vec!["/bin/mxv".to_owned(), "phase".to_owned()])
 }
 
 fn plan(text: &str) -> Built {
-    plan_with(text, &CallerEnvironment::default(), provisioner()).unwrap()
+    plan_with(text, &CallerEnvironment::default(), own_command()).unwrap()
 }
 
 fn app(name: &str) -> AppName {
@@ -123,35 +119,34 @@ fn the_services_add_each_backend_and_the_provisioning_before_the_units() {
         .collect();
     assert_eq!(
         names,
-        ["mxv-dynamodb", "mxv-aws", "mxv-provision", "api", "worker"]
+        ["mxv-services", "mxv-aws", "mxv-provision", "api", "worker"]
     );
 }
 
 #[test]
-fn dynamodb_local_runs_in_memory_from_its_pinned_image_on_its_ledger_port() {
+fn dynamodb_runs_in_the_host_app_mxv_services_on_its_ledger_port_until_it_says_it_is_ready() {
     let built = plan(APP);
-    let dynamodb = built.plan.app(&app("mxv-dynamodb")).unwrap();
-    assert_eq!(dynamodb.runner, RunnerKind::Container);
-    assert_eq!(
-        serde_json::to_value(&dynamodb.source).unwrap()["image"]["image"],
-        DYNAMODB_IMAGE
-    );
-    let main = &dynamodb.processes[0];
+    let services = built.plan.app(&app("mxv-services")).unwrap();
+    assert_eq!(services.runner, RunnerKind::Host);
+    assert!(services.depends.is_empty() && services.permissions.is_none());
+    let main = &services.processes[0];
     assert_eq!(
         main.run,
-        ["-jar", "DynamoDBLocal.jar", "-sharedDb", "-inMemory"]
+        ["/bin/mxv", "phase", "services", "dynamodb=41001"]
     );
-    let published: Vec<(&str, u16)> = main
-        .publish
+    assert_eq!(main.port.as_ref().unwrap().as_str(), "mxv-dynamodb");
+    let ports: Vec<(&str, u16)> = services
+        .ports
         .iter()
-        .map(|(port, inside)| (port.as_str(), inside.get()))
+        .map(|(port, number)| (port.as_str(), number.get()))
         .collect();
-    assert_eq!(published, [("mxv-dynamodb", 8000)]);
-    assert_eq!(dynamodb.ports.values().next().unwrap().get(), 41_001);
+    assert_eq!(ports, [("mxv-dynamodb", 41_001)]);
+    assert!(main.publish.is_empty());
     assert!(matches!(
-        main.ready.as_ref().unwrap().check,
-        ProbeCheck::Tcp { .. }
+        &main.ready.as_ref().unwrap().check,
+        ProbeCheck::Log { pattern, .. } if pattern == "^mxv-services ready$"
     ));
+    assert!(main.env.is_empty());
 }
 
 #[test]
@@ -208,7 +203,7 @@ fn the_provisioning_is_a_host_oneshot_that_reruns_and_depends_on_the_backends() 
     let built = plan(APP);
     let provision = built.plan.app(&app("mxv-provision")).unwrap();
     assert_eq!(provision.runner, RunnerKind::Host);
-    assert_eq!(provision.depends, [app("mxv-dynamodb"), app("mxv-aws")]);
+    assert_eq!(provision.depends, [app("mxv-services"), app("mxv-aws")]);
     let main = &provision.processes[0];
     assert_eq!(main.kind, ProcessKind::oneshot(false));
     assert!(main.ready.is_none() && main.port.is_none());
@@ -220,11 +215,11 @@ fn the_provisioning_is_a_host_oneshot_that_reruns_and_depends_on_the_backends() 
 }
 
 #[test]
-fn a_manifest_with_services_and_no_provisioning_command_is_unrunnable() {
+fn a_manifest_with_services_and_no_command_for_mxvs_own_apps_is_unrunnable() {
     let error = plan_with(APP, &CallerEnvironment::default(), None)
         .err()
         .unwrap();
-    assert_eq!(error.unit.as_deref(), Some("mxv-provision"));
+    assert_eq!(error.unit.as_deref(), Some("mxv-services"));
 }
 
 #[test]
@@ -233,7 +228,7 @@ fn a_process_that_needs_services_depends_on_their_backends_and_the_provisioning(
     let worker = built.plan.app(&app("worker")).unwrap();
     assert_eq!(
         worker.depends,
-        [app("mxv-dynamodb"), app("mxv-aws"), app("mxv-provision")]
+        [app("mxv-services"), app("mxv-aws"), app("mxv-provision")]
     );
     assert!(built.plan.app(&app("api")).unwrap().depends.is_empty());
 }
@@ -253,7 +248,7 @@ fn a_sandboxed_process_that_needs_services_may_connect_to_their_backends() {
         .iter()
         .map(String::as_str)
         .collect();
-    assert_eq!(connect, ["mxv-aws", "mxv-dynamodb"]);
+    assert_eq!(connect, ["mxv-aws", "mxv-services"]);
 }
 
 #[test]
@@ -281,7 +276,7 @@ fn a_process_that_needs_services_receives_only_the_aws_variables_that_mxv_sets()
         ]
         .map(|(name, value)| (OsString::from(name), OsString::from(value))),
     );
-    let built = plan_with(APP, &caller, provisioner()).unwrap();
+    let built = plan_with(APP, &caller, own_command()).unwrap();
     let worker = resolved(&built, "worker");
     let aws: BTreeMap<&str, &str> = worker
         .iter()
@@ -319,9 +314,9 @@ fn the_provisioning_and_the_backends_receive_no_variable_of_the_caller() {
         [("AWS_PROFILE", "production"), ("LANG", "C")]
             .map(|(name, value)| (OsString::from(name), OsString::from(value))),
     );
-    let built = plan_with(APP, &caller, provisioner()).unwrap();
+    let built = plan_with(APP, &caller, own_command()).unwrap();
     assert!(resolved(&built, "mxv-provision").is_empty());
-    assert!(resolved(&built, "mxv-dynamodb").is_empty());
+    assert!(resolved(&built, "mxv-services").is_empty());
 }
 
 #[test]

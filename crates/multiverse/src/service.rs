@@ -24,12 +24,13 @@
 //! needs = ["store", "mail", "mail-queue", "keys"]
 //! ```
 //!
-//! Every dynamodb service of a workspace shares one DynamoDB Local
-//! container, the app [`Backend::Dynamodb`]. Every s3, sqs and kms service
-//! shares one LocalStack container, the app [`Backend::Aws`]. Each backend
-//! publishes one port of the workspace's port ledger, named after its app.
-//! The host app [`PROVISION_APP`] creates the declared resources once the
-//! backends are ready.
+//! Every dynamodb service of a workspace shares one in-memory DynamoDB,
+//! which Dynoxide serves in the host app [`SERVICES_APP`], the backend
+//! [`Backend::Services`]. Every s3, sqs and kms service shares one
+//! LocalStack container, the app [`Backend::Aws`]. Each kind listens on
+//! one port of the workspace's port ledger, which [`ServiceKind::port`]
+//! names. The host app [`PROVISION_APP`] creates the declared resources
+//! once the backends are ready.
 //!
 //! A process that lists a service in `needs` starts after the service's
 //! backend and the provisioning, and receives the variables that
@@ -53,8 +54,13 @@ pub const RESERVED_PREFIX: &str = "mxv-";
 /// The name of the host app that creates the declared resources.
 pub const PROVISION_APP: &str = "mxv-provision";
 
-/// The DynamoDB Local image, 3.3.1, pinned by its digest.
-pub const DYNAMODB_IMAGE: &str = "amazon/dynamodb-local:3.3.1@sha256:ff89bd48ff32cd8d9be5fee8873b65b8854dc408f1afe881be6eb00247bc0dab";
+/// The name of the host app that serves the dynamodb services in memory,
+/// which runs mxv itself as `mxv phase services`.
+pub const SERVICES_APP: &str = "mxv-services";
+
+/// The line that [`SERVICES_APP`] writes to its log once it listens on
+/// every port, which its readiness check waits for.
+pub const SERVICES_READY: &str = "mxv-services ready";
 
 /// The LocalStack community image, 4.14.0, pinned by its digest. Later
 /// LocalStack releases need an account token, so an upgrade checks first
@@ -131,8 +137,19 @@ impl ServiceKind {
     #[must_use]
     pub const fn backend(self) -> Backend {
         match self {
-            Self::Dynamodb => Backend::Dynamodb,
+            Self::Dynamodb => Backend::Services,
             Self::S3 | Self::Sqs | Self::Kms => Backend::Aws,
+        }
+    }
+
+    /// Returns the name of the port in the workspace's port ledger that
+    /// the kind's backend serves it on: `mxv-dynamodb` for dynamodb, and
+    /// `mxv-aws`, LocalStack's one port, for s3, sqs and kms.
+    #[must_use]
+    pub const fn port(self) -> &'static str {
+        match self {
+            Self::Dynamodb => "mxv-dynamodb",
+            Self::S3 | Self::Sqs | Self::Kms => "mxv-aws",
         }
     }
 
@@ -167,43 +184,31 @@ impl fmt::Display for ServiceKind {
     }
 }
 
-/// A container that serves the services of a workspace. Its app and its
-/// port in the port ledger share one name.
+/// An app that serves the services of a workspace.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum Backend {
-    /// DynamoDB Local, run as `-sharedDb -inMemory`, which serves every
-    /// dynamodb service.
-    Dynamodb,
-    /// LocalStack, which serves every s3, sqs and kms service.
+    /// The host app [`SERVICES_APP`], which serves every dynamodb service
+    /// in memory with Dynoxide.
+    Services,
+    /// LocalStack, a container, which serves every s3, sqs and kms service.
     Aws,
 }
 
 impl Backend {
-    /// Returns the backend's app name, which is also its port's name.
+    /// Returns the backend's app name.
     #[must_use]
     pub const fn app(self) -> &'static str {
         match self {
-            Self::Dynamodb => "mxv-dynamodb",
+            Self::Services => SERVICES_APP,
             Self::Aws => "mxv-aws",
         }
     }
 
-    /// Returns the image the backend runs.
+    /// Reports whether the backend runs in a container.
     #[must_use]
-    pub const fn image(self) -> &'static str {
-        match self {
-            Self::Dynamodb => DYNAMODB_IMAGE,
-            Self::Aws => LOCALSTACK_IMAGE,
-        }
-    }
-
-    /// Returns the port that the backend listens on inside its container.
-    #[must_use]
-    pub const fn container_port(self) -> u16 {
-        match self {
-            Self::Dynamodb => 8000,
-            Self::Aws => 4566,
-        }
+    pub const fn is_container(self) -> bool {
+        matches!(self, Self::Aws)
     }
 
     /// Returns the backend's endpoint, `http://127.0.0.1:<port>`.
@@ -528,7 +533,7 @@ pub(crate) fn variables<'a>(
         .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
         .collect();
     for service in services {
-        let port = ports.get(service.kind.backend().app()).copied();
+        let port = ports.get(service.kind.port()).copied();
         variables.insert(
             service.kind.endpoint_variable().to_owned(),
             Placeholder::Endpoint.render(port),
@@ -536,6 +541,19 @@ pub(crate) fn variables<'a>(
         variables.extend(service.rendered_env(port));
     }
     variables
+}
+
+/// Returns the ledger ports that `services` are served on, once each, in
+/// the order of their kinds in [`ServiceKind::ALL`].
+pub(crate) fn ports<'a>(services: impl IntoIterator<Item = &'a Service>) -> Vec<&'static str> {
+    let kinds: BTreeSet<ServiceKind> = services.into_iter().map(|service| service.kind).collect();
+    let mut ports: Vec<&'static str> = Vec::new();
+    for kind in kinds {
+        if !ports.contains(&kind.port()) {
+            ports.push(kind.port());
+        }
+    }
+    ports
 }
 
 /// Returns the backends that `services` need, in order.
@@ -628,11 +646,11 @@ pub(crate) fn check_bindings<'a>(
 ) -> Result<(), Clash> {
     let mut bound: BTreeMap<&str, (&str, String)> = BTreeMap::new();
     for (name, service) in services {
-        // Two services of one backend render a placeholder alike, so the
-        // value with the backend's name in place of its port compares them.
-        let backend = service.kind.backend().app();
+        // Two services on one port render a placeholder alike, so the value
+        // with the port's name in place of its number compares them.
+        let port = service.kind.port();
         for (variable, value) in &service.env {
-            let rendered = format!("{backend} {}", value.render(None));
+            let rendered = format!("{port} {}", value.render(None));
             if let Some((first, other)) = bound.insert(variable, (name, rendered.clone()))
                 && other != rendered
             {

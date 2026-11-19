@@ -1,7 +1,9 @@
 //! End-to-end tests of a manifest's local AWS services: `up` starts
-//! DynamoDB Local and LocalStack, provisions the declared resources, and
-//! gives a process that needs the services the AWS SDKs' variables. The
-//! tests skip, with a line that says so, when no docker daemon answers.
+//! `mxv-services`, which serves DynamoDB in memory on the host, and
+//! LocalStack, provisions the declared resources, and gives a process that
+//! needs the services the AWS SDKs' variables. The tests that need
+//! LocalStack skip, with a line that says so, when no docker daemon
+//! answers.
 //! Each test's workspace has a stable id of its own, which labels and
 //! names its containers, and the test removes every container, volume and
 //! network that carries that id, so it never touches another workspace's.
@@ -213,12 +215,12 @@ fn row<'a>(document: &'a Value, name: &str) -> &'a Value {
 }
 
 /// The script of the process `check`, which saves its environment and
-/// reaches each backend with plain HTTP through curl: DynamoDB Local with
-/// an `Authorization` header that carries no real signature, and
-/// LocalStack with no header at all.
+/// reaches each backend with plain HTTP through curl: DynamoDB with a date
+/// and an `Authorization` header that carries no real signature, as an
+/// SDK sends them, and LocalStack with no header at all.
 const CHECK: &str = r#"set -e
 env | sort > env.txt
-curl -sSf -X POST "$AWS_ENDPOINT_URL_DYNAMODB" -H 'Authorization: AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=0' -H 'X-Amz-Target: DynamoDB_20120810.DescribeTimeToLive' -H 'Content-Type: application/x-amz-json-1.0' -d "{\"TableName\":\"$STORE_TABLE\"}" > dynamodb.json
+curl -sSf -X POST "$AWS_ENDPOINT_URL_DYNAMODB" -H 'X-Amz-Date: 20260101T000000Z' -H 'Authorization: AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=0' -H 'X-Amz-Target: DynamoDB_20120810.DescribeTimeToLive' -H 'Content-Type: application/x-amz-json-1.0' -d "{\"TableName\":\"$STORE_TABLE\"}" > dynamodb.json
 curl -sSf -o /dev/null -w '%{http_code}' -I "$AWS_ENDPOINT_URL_S3/$FILES_BUCKET" > s3.txt
 curl -sSf -X POST "$AWS_ENDPOINT_URL_SQS" -H 'X-Amz-Target: AmazonSQS.GetQueueAttributes' -H 'Content-Type: application/x-amz-json-1.0' -d "{\"QueueUrl\":\"$JOBS_URL\",\"AttributeNames\":[\"VisibilityTimeout\"]}" > sqs.json
 curl -sSf -X POST "$AWS_ENDPOINT_URL_KMS" -H 'X-Amz-Target: TrentService.DescribeKey' -H 'Content-Type: application/x-amz-json-1.1' -d "{\"KeyId\":\"$KEY_ALIAS\"}" > kms.json
@@ -308,8 +310,9 @@ fn up_starts_the_backends_provisions_every_resource_and_gives_a_process_only_mxv
         .iter()
         .map(|row| row["name"].as_str().unwrap())
         .collect();
-    assert_eq!(names, ["mxv-dynamodb", "mxv-aws", "mxv-provision", "check"]);
-    assert_eq!(row(&document, "mxv-dynamodb")["kind"], "container");
+    assert_eq!(names, ["mxv-services", "mxv-aws", "mxv-provision", "check"]);
+    assert_eq!(row(&document, "mxv-services")["kind"], "process");
+    assert_eq!(row(&document, "mxv-aws")["kind"], "container");
     assert_eq!(row(&document, "mxv-provision")["state"], "exited");
     assert_eq!(row(&document, "mxv-provision")["code"], 0);
     assert_eq!(row(&document, "check")["state"], "running");
@@ -473,9 +476,6 @@ fn a_kind_added_to_a_running_workspace_replaces_localstack_and_up_provisions_it(
 
 #[test]
 fn a_table_whose_keys_change_fails_up_with_the_provisioning_log_until_down_resets_it() {
-    if !docker_runs("a_table_whose_keys_change") {
-        return;
-    }
     let name = "mxvtest-services-changed";
     let table = |hash: &str| {
         format!(
@@ -514,6 +514,89 @@ fn a_table_whose_keys_change_fails_up_with_the_provisioning_log_until_down_reset
     assert_eq!(exit, 0, "{document}");
     let (exit, document) = setup.json(&["down", "-w", name]);
     assert_eq!(exit, 0, "{document}");
+}
+
+/// The script of the process `check` of [`dynamodb_only`], which saves its
+/// environment and asks DynamoDB for the expiry of its table.
+const CHECK_DYNAMODB: &str = r#"set -e
+env | sort > env.txt
+curl -sSf -X POST "$AWS_ENDPOINT_URL_DYNAMODB" -H 'X-Amz-Date: 20260101T000000Z' -H 'Authorization: AWS4-HMAC-SHA256 Credential=test/20260101/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=0' -H 'X-Amz-Target: DynamoDB_20120810.DescribeTimeToLive' -H 'Content-Type: application/x-amz-json-1.0' -d "{\"TableName\":\"$STORE_TABLE\"}" > dynamodb.json
+echo checked
+trap 'exit 0' TERM
+sleep 600 & wait"#;
+
+/// Returns a manifest with one dynamodb service and the process `check`,
+/// which needs it.
+fn dynamodb_only() -> String {
+    format!(
+        r#"[service.store]
+kind = "dynamodb"
+tables.mxv-test-items = {{ hash = "pk:S", ttl = "expires" }}
+env = {{ STORE_TABLE = "{{table.mxv-test-items}}" }}
+
+[processes.check]
+argv = ["sh", "-c", {script}]
+needs = ["store"]
+ready = {{ log = "^checked$", timeout_seconds = 60 }}
+"#,
+        script = toml_string(CHECK_DYNAMODB)
+    )
+}
+
+#[test]
+fn up_serves_dynamodb_from_the_host_app_mxv_services_and_down_stops_it() {
+    let name = "mxvtest-services-native";
+    let setup = Setup::new(name, &dynamodb_only());
+
+    let (exit, document) = setup.json(&["up", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    let names: Vec<&str> = document["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["mxv-services", "mxv-provision", "check"]);
+    assert_eq!(row(&document, "mxv-services")["kind"], "process");
+    assert_eq!(row(&document, "mxv-services")["state"], "running");
+    assert_eq!(row(&document, "mxv-provision")["code"], 0);
+    assert_eq!(row(&document, "check")["state"], "running");
+
+    let port = setup.port("mxv-dynamodb");
+    let served = log_of(&setup, "mxv-services");
+    assert!(
+        served.contains(&format!(
+            "mxv-services: dynamodb listens on http://127.0.0.1:{port}"
+        )) && served.contains("mxv-services ready"),
+        "{served}"
+    );
+    let environment = saved_environment(&setup);
+    let value = |variable: &str| {
+        environment
+            .iter()
+            .find(|(name, _)| name == variable)
+            .map(|(_, value)| value.clone())
+    };
+    assert_eq!(
+        value("AWS_ENDPOINT_URL_DYNAMODB"),
+        Some(format!("http://127.0.0.1:{port}"))
+    );
+    assert_eq!(value("AWS_ACCESS_KEY_ID").as_deref(), Some("test"));
+    assert_eq!(value("STORE_TABLE").as_deref(), Some("mxv-test-items"));
+    let ttl: Value =
+        serde_json::from_str(&fs::read_to_string(setup.checkout().join("dynamodb.json")).unwrap())
+            .unwrap();
+    assert_eq!(ttl["TimeToLiveDescription"]["TimeToLiveStatus"], "ENABLED");
+    assert_eq!(ttl["TimeToLiveDescription"]["AttributeName"], "expires");
+
+    let (exit, document) = setup.json(&["down", "-w", name]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, status) = setup.json(&["status", "-w", name]);
+    assert_eq!(row(&status, "mxv-services")["state"], "stopped", "{status}");
+    assert!(
+        std::net::TcpStream::connect(("127.0.0.1", port)).is_err(),
+        "port {port} still answers after down"
+    );
 }
 
 #[cfg(target_os = "macos")]

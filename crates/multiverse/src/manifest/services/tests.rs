@@ -77,12 +77,12 @@ fn a_manifest_with_services_adds_each_backend_to_the_port_ledger_and_its_apps() 
     let manifest = parse(SERVICES).unwrap();
     assert_eq!(
         manifest.backends().into_iter().collect::<Vec<_>>(),
-        [Backend::Dynamodb, Backend::Aws]
+        [Backend::Services, Backend::Aws]
     );
     assert_eq!(manifest.ledger_ports(), ["api", "mxv-dynamodb", "mxv-aws"]);
     assert_eq!(
         manifest.service_apps(),
-        ["mxv-dynamodb", "mxv-aws", "mxv-provision"]
+        ["mxv-services", "mxv-aws", "mxv-provision"]
     );
 }
 
