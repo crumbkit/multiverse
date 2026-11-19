@@ -46,6 +46,26 @@
 //! ready = { log = "^worker ready", timeout_seconds = 300 }
 //! ```
 //!
+//! A process's `starmap` names the starmap file that declares the
+//! variables it reads, for tools such as jumpgate that read the manifest:
+//!
+//! ```toml
+//! [processes.cli]
+//! argv = ["./target/debug/cli"]
+//! cwd = "cli"
+//! starmap = "cli/starmap.toml"
+//! ```
+//!
+//! The path is relative to the top of the checkout, whatever the
+//! process's `cwd`. A leading `./` and repeated or trailing `/` are
+//! dropped, and an empty path, a path that starts with `/` and a path with
+//! a `..` name fail with [`ManifestProblem::Invalid`]. A read against a
+//! checkout, such as [`Manifest::read`], also checks that the file is a
+//! regular file inside the checkout, and fails with
+//! [`ManifestProblem::StarmapFile`] otherwise. mxv never reads the file. A
+//! process without the key names none, and such tools then read
+//! `<cwd>/starmap.toml`.
+//!
 //! A process's `build` is a command that `mxv up` and `mxv restart` run
 //! before the process starts, under a place from the machine's job limiter,
 //! as [`crate::Runs::build`] describes. No shell reads it.
@@ -390,6 +410,14 @@ pub struct Process {
     /// The extra host names that the proxy serves as more hosts of the
     /// route whose port the process listens on.
     pub hosts: Vec<String>,
+    /// The starmap file that declares the variables the process reads, or
+    /// `None` when the process names none, and tools such as jumpgate then
+    /// read `<cwd>/starmap.toml`. Its path is relative to the top of the
+    /// checkout, whatever the process's `cwd`, and holds no `..`. A merged
+    /// manifest holds it as an absolute path below the directory that its
+    /// file's paths are relative to. mxv checks that the file exists and
+    /// never reads it.
+    pub starmap: Option<PathBuf>,
 }
 
 /// A program and its arguments, as separate values that no shell reads.
@@ -679,6 +707,48 @@ pub enum ManifestProblem {
         /// What clashes, in a sentence.
         message: String,
     },
+    /// The file that a process's `starmap` key names is missing, is a
+    /// symbolic link, is not a regular file, reaches outside its checkout
+    /// through a linked directory, or cannot be checked.
+    StarmapFile {
+        /// The process's name, as its manifest writes it.
+        unit: String,
+        /// The file, relative to the checkout, as the manifest names it
+        /// once normalised.
+        file: PathBuf,
+        /// What mxv found at the file's path.
+        found: StarmapFound,
+    },
+}
+
+/// What mxv found at the path of a process's starmap file that is not a
+/// regular file inside the checkout.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StarmapFound {
+    /// No file is at the path.
+    Missing,
+    /// The path is a symbolic link, or reaches outside the checkout
+    /// through a linked directory.
+    Link,
+    /// The path is a directory or another kind of file that is not a
+    /// regular file.
+    NotAFile,
+    /// The path's file type cannot be read.
+    Unreadable,
+}
+
+impl StarmapFound {
+    /// Returns the value's name in an error's fields, such as `missing`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Link => "link",
+            Self::NotAFile => "not_a_file",
+            Self::Unreadable => "unreadable",
+        }
+    }
 }
 
 impl fmt::Display for ManifestError {
@@ -720,6 +790,23 @@ impl fmt::Display for ManifestError {
                 "{place}: the workspace's merged manifest has two units or two ports named `{name}`, one from this file and one from {}",
                 other.display()
             ),
+            ManifestProblem::StarmapFile { unit, file, found } => {
+                let what = match found {
+                    StarmapFound::Missing => "does not exist",
+                    StarmapFound::Link => {
+                        "is a symbolic link or reaches outside the checkout through a linked directory, and a starmap file is a regular file inside the checkout"
+                    }
+                    StarmapFound::NotAFile => "is not a regular file",
+                    StarmapFound::Unreadable => {
+                        "cannot be checked, because its file type cannot be read"
+                    }
+                };
+                write!(
+                    formatter,
+                    "{place}: the starmap file {} of `{unit}` {what}",
+                    file.display()
+                )
+            }
         }
     }
 }
@@ -837,6 +924,8 @@ struct RawProcess {
     /// The extra host names of the route.
     #[serde(default)]
     hosts: Vec<Spanned<String>>,
+    /// The starmap file that declares the variables the process reads.
+    starmap: Option<Spanned<String>>,
 }
 
 /// The permissions of a process as TOML holds them. A key that is not one
@@ -1299,7 +1388,7 @@ impl Manifest {
         checkout: &Path,
         joined: &Joined,
     ) -> Result<Self, ManifestError> {
-        let manifest = Self::parse_joining(text, path, joined)?;
+        let manifest = Self::parse_in(text, path, joined, Some(checkout))?;
         manifest.check_cwds(checkout, path)?;
         Ok(manifest)
     }
@@ -1477,6 +1566,18 @@ impl Manifest {
     ///
     /// Returns the errors of [`Manifest::parse`].
     pub fn parse_joining(text: &str, path: &Path, joined: &Joined) -> Result<Self, ManifestError> {
+        Self::parse_in(text, path, joined, None)
+    }
+
+    /// Parses the manifest `text` as [`Manifest::parse_joining`] does, and
+    /// when `checkout` names the directory that its paths are relative to,
+    /// checks that each process's starmap file is a regular file there.
+    fn parse_in(
+        text: &str,
+        path: &Path,
+        joined: &Joined,
+        checkout: Option<&Path>,
+    ) -> Result<Self, ManifestError> {
         let errors = Errors { path, text };
         let warnings = check_top_level(&errors, text)?;
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
@@ -1528,7 +1629,10 @@ impl Manifest {
                 raw_process,
                 &known,
                 &names,
-                &joined.checkouts,
+                &Root {
+                    checkouts: &joined.checkouts,
+                    checkout,
+                },
             )?;
             let own: Vec<&Spanned<String>> = raw_process
                 .env
@@ -1690,6 +1794,7 @@ impl Manifest {
                     needs: process.needs.clone(),
                     build: process.build.clone(),
                     hosts: process.hosts.clone(),
+                    starmap: process.starmap.clone(),
                 };
                 (rename(name), renamed)
             })
@@ -2286,16 +2391,28 @@ fn check_secret(
     })
 }
 
+/// The directory that a manifest's paths are relative to, for the checks
+/// of its processes' paths.
+struct Root<'a> {
+    /// The folders of the workspace's checkouts, for a workspace manifest
+    /// of several checkouts, or empty.
+    checkouts: &'a [String],
+    /// The directory on disk, when the manifest was read against one, or
+    /// `None` when it was parsed alone.
+    checkout: Option<&'a Path>,
+}
+
 /// Checks one raw process against the declared `ports` and process
-/// `names`, and returns it.
+/// `names`, and its paths against `root`, and returns it.
 fn check_process(
     errors: &Errors<'_>,
     name: &Spanned<String>,
     raw: &RawProcess,
     ports: &[String],
     names: &BTreeSet<&str>,
-    checkouts: &[String],
+    root: &Root<'_>,
 ) -> Result<Process, ManifestError> {
+    let checkouts = root.checkouts;
     let process = name.get_ref();
     if !is_unit_name(process) {
         return Err(errors.invalid(
@@ -2339,6 +2456,11 @@ fn check_process(
         }
         None => PathBuf::from("."),
     };
+    let starmap = raw
+        .starmap
+        .as_ref()
+        .map(|starmap| check_starmap(errors, process, starmap, root))
+        .transpose()?;
     let declared = |port: &Spanned<String>| {
         if ports.contains(port.get_ref()) {
             Ok(port.get_ref().clone())
@@ -2429,7 +2551,124 @@ fn check_process(
         needs: Vec::new(),
         build,
         hosts: Vec::new(),
+        starmap,
     })
+}
+
+/// Checks the `starmap` value `raw` of the process `process` against the
+/// path rules, and when `root` names a directory on disk, checks that the
+/// file is a regular file inside it. Returns the normalised path.
+fn check_starmap(
+    errors: &Errors<'_>,
+    process: &str,
+    raw: &Spanned<String>,
+    root: &Root<'_>,
+) -> Result<PathBuf, ManifestError> {
+    let names = match starmap_problem(raw.get_ref(), root.checkouts) {
+        Ok(names) => names,
+        Err(reason) => {
+            let rule = if root.checkouts.is_empty() {
+                "a path relative to the checkout, such as `cli/starmap.toml`".to_owned()
+            } else {
+                format!(
+                    "a path relative to the workspace's directory inside one of its checkouts, such as `{}/starmap.toml`",
+                    root.checkouts.first().map_or("api", String::as_str)
+                )
+            };
+            return Err(errors.invalid(
+                &raw.span(),
+                format!(
+                    "the starmap file {:?} of `{process}` {reason}; a starmap file is {rule}",
+                    raw.get_ref()
+                ),
+            ));
+        }
+    };
+    let file: PathBuf = names.iter().collect();
+    if let Some(checkout) = root.checkout {
+        // A workspace manifest's file must stay inside the checkout that
+        // its first name is.
+        let inside = match names.first() {
+            Some(folder) if !root.checkouts.is_empty() => checkout.join(folder),
+            _ => checkout.to_path_buf(),
+        };
+        if let Err(found) = starmap_file_found(&checkout.join(&file), &inside) {
+            return Err(errors.at(
+                Some(&raw.span()),
+                ManifestProblem::StarmapFile {
+                    unit: process.to_owned(),
+                    file,
+                    found,
+                },
+            ));
+        }
+    }
+    Ok(file)
+}
+
+/// Returns the names of the `starmap` value `value`, without the empty
+/// and `.` names that a leading `./` and repeated or trailing `/` make, or
+/// why the value breaks the path rules: it is empty once normalised,
+/// starts with `/` or holds a `..` name. A workspace manifest of several
+/// checkouts, whose folders are `checkouts`, must name a file inside one
+/// of them. jumpgate applies the same rules.
+fn starmap_problem<'a>(value: &'a str, checkouts: &[String]) -> Result<Vec<&'a str>, String> {
+    if value.starts_with('/') {
+        return Err("is absolute".to_owned());
+    }
+    let names: Vec<&str> = value
+        .split('/')
+        .filter(|name| !name.is_empty() && *name != ".")
+        .collect();
+    if names.contains(&"..") {
+        return Err("holds `..`".to_owned());
+    }
+    let Some(first) = names.first() else {
+        return Err("is empty".to_owned());
+    };
+    if !checkouts.is_empty() && !checkouts.iter().any(|folder| folder == first) {
+        return Err(format!(
+            "lies in none of the workspace's checkouts, {}",
+            checkouts
+                .iter()
+                .map(|folder| format!("`{folder}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(names)
+}
+
+/// Checks that `file` is a regular file, is not a symbolic link, and stays
+/// inside the directory `inside` once the links of its parent directories
+/// are resolved, or returns what is there instead.
+fn starmap_file_found(file: &Path, inside: &Path) -> Result<(), StarmapFound> {
+    let metadata = match fs::symlink_metadata(file) {
+        Ok(metadata) => metadata,
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            return Err(StarmapFound::Missing);
+        }
+        Err(_) => return Err(StarmapFound::Unreadable),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(StarmapFound::Link);
+    }
+    if !metadata.file_type().is_file() {
+        return Err(StarmapFound::NotAFile);
+    }
+    let (Ok(resolved), Ok(root)) = (file.canonicalize(), inside.canonicalize()) else {
+        return Err(StarmapFound::Unreadable);
+    };
+    if resolved.starts_with(&root) {
+        Ok(())
+    } else {
+        Err(StarmapFound::Link)
+    }
 }
 
 /// What a process's permissions are checked against.

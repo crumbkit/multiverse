@@ -590,3 +590,76 @@ fn the_approval_scope_lists_the_checkouts_repositories_in_order() {
         "{scope}"
     );
 }
+
+#[test]
+fn each_checkouts_starmap_file_is_absolute_below_its_own_checkout_in_the_merged_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    for folder in ["api", "web"] {
+        fs::create_dir_all(workspace.path.join(folder).join("cli")).unwrap();
+        write(workspace.path.join(folder).join("cli/starmap.toml"), "");
+        write(
+            workspace.path.join(folder).join("mxv.toml"),
+            "[processes.cli]\nargv = [\"true\"]\nstarmap = \"./cli/starmap.toml\"\n",
+        );
+    }
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        manifest.processes["api-cli"].starmap,
+        Some(workspace.path.join("api/cli/starmap.toml"))
+    );
+    assert_eq!(
+        manifest.processes["web-cli"].starmap,
+        Some(workspace.path.join("web/cli/starmap.toml"))
+    );
+}
+
+#[test]
+fn a_workspace_manifests_starmap_file_is_absolute_below_the_workspace_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("web/starmap.toml"), "");
+    write(
+        workspace.manifest_file(),
+        "[processes.proxy]\nargv = [\"caddy\"]\nstarmap = \"web/starmap.toml\"\n",
+    );
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        manifest.processes["proxy"].starmap,
+        Some(workspace.path.join("web/starmap.toml"))
+    );
+}
+
+#[test]
+fn a_workspace_manifests_starmap_file_in_no_checkout_fails_as_invalid_with_its_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("starmap.toml"), "");
+    write(
+        workspace.manifest_file(),
+        "[processes.proxy]\nargv = [\"caddy\"]\nstarmap = \"starmap.toml\"\n",
+    );
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(error.line, Some(3), "{error:?}");
+    assert!(
+        matches!(&error.problem, ManifestProblem::Invalid { message } if message.contains("none of the workspace's checkouts")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_single_checkouts_starmap_file_stays_relative_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    let checkout = workspace.path.join("app");
+    write(checkout.join("starmap.toml"), "");
+    write(
+        checkout.join("mxv.toml"),
+        "[processes.cli]\nargv = [\"true\"]\nstarmap = \"starmap.toml\"\n",
+    );
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        manifest.processes["cli"].starmap.as_deref(),
+        Some(Path::new("starmap.toml"))
+    );
+}

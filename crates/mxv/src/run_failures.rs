@@ -41,6 +41,9 @@ pub const MANIFEST_UNREADABLE: Code = Code::from_spelling("mxv::manifest::unread
 /// The code of two manifests of a workspace with several checkouts that
 /// declare the same merged name.
 pub const MANIFEST_NAME_CLASH: Code = Code::from_spelling("mxv::manifest::name_clash");
+/// The code of a process's `starmap` file that is missing, is a symbolic
+/// link, is not a regular file, or reaches outside its checkout.
+pub const MANIFEST_STARMAP_FILE: Code = Code::from_spelling("mxv::manifest::starmap_file");
 /// The code of a process name that the workspace does not know.
 pub const PROCESS_NOT_FOUND: Code = Code::from_spelling("mxv::process::not_found");
 /// The code of a process that exited before it was ready.
@@ -88,6 +91,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     MANIFEST_INVALID,
     MANIFEST_UNREADABLE,
     MANIFEST_NAME_CLASH,
+    MANIFEST_STARMAP_FILE,
     PROCESS_NOT_FOUND,
     PROCESS_EXITED,
     PROCESS_NOT_READY,
@@ -399,6 +403,7 @@ impl Failure for RunFailure {
                 ManifestProblem::NameClash { .. } | ManifestProblem::ServiceClash { .. } => {
                     MANIFEST_NAME_CLASH
                 }
+                ManifestProblem::StarmapFile { .. } => MANIFEST_STARMAP_FILE,
                 // The library marks the problem non-exhaustive, so a
                 // problem that a later version adds reads as invalid until
                 // mxv gives it a code of its own.
@@ -467,43 +472,7 @@ impl Failure for RunFailure {
                 shown(workspace),
                 shown(checkout)
             )),
-            Self::Manifest(error) => match &error.problem {
-                ManifestProblem::UnknownKey { key } => Recovery::hint(format!(
-                    "remove or rename `{key}` in {}, because the manifest schema does not declare it",
-                    shown(&error.path)
-                )),
-                ManifestProblem::Newer { .. } => {
-                    Recovery::hint("upgrade mxv to a version that reads this manifest version")
-                }
-                ManifestProblem::Reserved { section } => Recovery::hint(format!(
-                    "remove the section `{section}` from {}, because this version of mxv does not run it",
-                    shown(&error.path)
-                )),
-                ManifestProblem::Unreadable { .. } => {
-                    Recovery::hint(format!("make {} readable", shown(&error.path)))
-                }
-                ManifestProblem::UnitName { name } => Recovery::hint(format!(
-                    "rename the unit `{name}` in {} to 1 to 64 lowercase letters, digits, `-` and `_`, starting with a letter or a digit",
-                    shown(&error.path)
-                )),
-                ManifestProblem::NameClash { name, other } => Recovery::hint(format!(
-                    "rename `{name}` in {} or in {}, or give one of the checkouts another folder, whose name prefixes its names, with `--as`",
-                    shown(&error.path),
-                    shown(other)
-                )),
-                ManifestProblem::ServiceClash { name, .. } => Recovery::hint(format!(
-                    "declare `{name}` the same way in every service of the workspace, or rename it in one of them, in {}",
-                    shown(&error.path)
-                )),
-                _ if error.line.is_some() => Recovery::hint(format!(
-                    "fix the line of {} that the message names",
-                    shown(&error.path)
-                )),
-                _ => Recovery::hint(format!(
-                    "fix what the message names in {}",
-                    shown(&error.path)
-                )),
-            },
+            Self::Manifest(error) => manifest_recovery(error),
             Self::UnknownProcess { workspace, .. } => {
                 Recovery::Run(Call::new(&["status"]).value("workspace", workspace))
             }
@@ -751,6 +720,52 @@ impl RunFailure {
     }
 }
 
+/// Returns the recovery of a manifest that cannot be used.
+fn manifest_recovery(error: &ManifestError) -> Recovery {
+    match &error.problem {
+        ManifestProblem::UnknownKey { key } => Recovery::hint(format!(
+            "remove or rename `{key}` in {}, because the manifest schema does not declare it",
+            shown(&error.path)
+        )),
+        ManifestProblem::Newer { .. } => {
+            Recovery::hint("upgrade mxv to a version that reads this manifest version")
+        }
+        ManifestProblem::Reserved { section } => Recovery::hint(format!(
+            "remove the section `{section}` from {}, because this version of mxv does not run it",
+            shown(&error.path)
+        )),
+        ManifestProblem::Unreadable { .. } => {
+            Recovery::hint(format!("make {} readable", shown(&error.path)))
+        }
+        ManifestProblem::UnitName { name } => Recovery::hint(format!(
+            "rename the unit `{name}` in {} to 1 to 64 lowercase letters, digits, `-` and `_`, starting with a letter or a digit",
+            shown(&error.path)
+        )),
+        ManifestProblem::NameClash { name, other } => Recovery::hint(format!(
+            "rename `{name}` in {} or in {}, or give one of the checkouts another folder, whose name prefixes its names, with `--as`",
+            shown(&error.path),
+            shown(other)
+        )),
+        ManifestProblem::ServiceClash { name, .. } => Recovery::hint(format!(
+            "declare `{name}` the same way in every service of the workspace, or rename it in one of them, in {}",
+            shown(&error.path)
+        )),
+        ManifestProblem::StarmapFile { unit, file, .. } => Recovery::hint(format!(
+            "add {} as a regular file in the checkout, or change or remove the `starmap` key of `{unit}` in {}",
+            file.display(),
+            shown(&error.path)
+        )),
+        _ if error.line.is_some() => Recovery::hint(format!(
+            "fix the line of {} that the message names",
+            shown(&error.path)
+        )),
+        _ => Recovery::hint(format!(
+            "fix what the message names in {}",
+            shown(&error.path)
+        )),
+    }
+}
+
 /// Returns the values at fault in a manifest that cannot be used.
 fn manifest_fields(error: &ManifestError) -> Vec<Field<'_>> {
     let mut fields = vec![Field::new("path", shown(&error.path))];
@@ -774,6 +789,11 @@ fn manifest_fields(error: &ManifestError) -> Vec<Field<'_>> {
         ManifestProblem::ServiceClash { name, message } => {
             fields.push(Field::new("name", name));
             fields.push(Field::new("message", message));
+        }
+        ManifestProblem::StarmapFile { unit, file, found } => {
+            fields.push(Field::new("unit", unit));
+            fields.push(Field::new("file", file.display().to_string()));
+            fields.push(Field::new("found", found.as_str()));
         }
         _ => {}
     }
