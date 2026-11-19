@@ -53,7 +53,7 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "DEADBAND_SOCKET",
-        purpose: "The path of the socket of deadband, the machine's job limiter, which `mxv up` and `mxv restart` ask for a place before a process's `build`, and `mxv run` before a task. When it is unset or empty, mxv uses `deadband.sock` in `DEADBAND_SOCKET_DIR` when that is set. Otherwise, on macOS, it uses the per-user temporary directory, and then `TMPDIR`. When no daemon answers, the build or task starts at once.",
+        purpose: "The path of the socket of deadband, the machine's job limiter, which `mxv up` and `mxv restart` ask for a place before a process's `build`, and `mxv run` before a task. When it is unset or empty, mxv uses `deadband.sock` in `DEADBAND_SOCKET_DIR` when that is set. Otherwise, on macOS, it uses the per-user temporary directory, and then `TMPDIR`, and when none of those is set it uses `/tmp/deadband-<uid>/deadband.sock`. When no daemon answers, the build or task starts at once.",
     },
     Variable {
         name: "DEADBAND_SOCKET_DIR",
@@ -61,15 +61,11 @@ pub const VARIABLES: &[Variable] = &[
     },
     Variable {
         name: "TMPDIR",
-        purpose: "The temporary directory, which holds deadband's socket when `DEADBAND_SOCKET` and `DEADBAND_SOCKET_DIR` are unset and the system has no per-user temporary directory (on macOS the per-user directory comes first). When it is unset or empty, mxv uses `/tmp/deadband-<USER>.sock`.",
-    },
-    Variable {
-        name: "USER",
-        purpose: "The person's user name, which names deadband's socket in `/tmp` when neither `DEADBAND_SOCKET` nor `TMPDIR` is set. When it is unset or empty, mxv uses `/tmp/deadband.sock`.",
+        purpose: "The temporary directory, which holds deadband's socket when `DEADBAND_SOCKET` and `DEADBAND_SOCKET_DIR` are unset and the system has no per-user temporary directory (on macOS the per-user directory comes first). When it is unset or empty, mxv uses `/tmp/deadband-<uid>/deadband.sock`, where `<uid>` is the user's numeric id.",
     },
     Variable {
         name: "DEADBAND_HELD",
-        purpose: "Set by deadband for a job that it granted. When it is set, a `build` or a task runs at once without asking for another place, because the job that started mxv already holds one. When it is unset or empty, mxv asks.",
+        purpose: "Set by deadband for a job that it granted. When it is set to anything but 0, a `build` or a task runs at once without asking for another place, because the job that started mxv already holds one. When it is unset, empty or 0, mxv asks.",
     },
     Variable {
         name: "DEADBAND_BYPASS",
@@ -163,7 +159,6 @@ const DEADBAND_VARIABLES: &[&str] = &[
     "DEADBAND_SOCKET",
     "DEADBAND_SOCKET_DIR",
     "TMPDIR",
-    "USER",
     "DEADBAND_HELD",
     "DEADBAND_BYPASS",
     "HOME",

@@ -1,0 +1,28 @@
+# multiverse runs no app of its own: mxv is a command, and its proxy is a
+# daemon that mxv starts itself with `mxv proxy start`, so there is no
+# `[processes.*]` or `[containers.*]` unit to declare. This file declares
+# the tasks that the pull-request lane in AGENTS.md runs with cargo, which
+# `mxv run <name>` runs in a workspace's checkout of this repository. Each
+# task takes one place from deadband. The rest of the lane needs environment
+# variables or other tools, which a task cannot set.
+#
+# mxv asks the deadband daemon for a place before a build or a task, and it
+# starts the build or task at once when no daemon answers. The need below
+# names that daemon's socket as an optional dependency, which the tasks of
+# this file consume, and it is the table that jumpgate reads. mxv itself
+# ignores a `[needs.*]` table.
+
+[needs.deadband]
+repo = "github.com/crumbkit/deadband"
+from = "deadband-socket"
+as = "DEADBAND_SOCKET"
+optional = true
+
+[tasks.fmt]
+argv = ["cargo", "fmt", "--check"]
+
+[tasks.clippy]
+argv = ["cargo", "clippy", "--locked", "--workspace", "--all-targets", "--all-features"]
+
+[tasks.test]
+argv = ["cargo", "nextest", "run", "--locked", "--workspace", "--all-features"]
