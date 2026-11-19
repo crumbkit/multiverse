@@ -750,8 +750,12 @@ fn manifest_recovery(error: &ManifestError) -> Recovery {
             "declare `{name}` the same way in every service of the workspace, or rename it in one of them, in {}",
             shown(&error.path)
         )),
+        // The file's path is relative to the directory that the manifest's
+        // paths start from, which is the workspace directory for the
+        // workspace manifest of several checkouts, so the hint names that
+        // directory and never the checkout.
         ManifestProblem::StarmapFile { unit, file, .. } => Recovery::hint(format!(
-            "add {} as a regular file in the checkout, or change or remove the `starmap` key of `{unit}` in {}",
+            "create the regular file {} below the directory that the paths of {} are relative to, or change or remove the `starmap` key of `{unit}` in that manifest",
             file.display(),
             shown(&error.path)
         )),

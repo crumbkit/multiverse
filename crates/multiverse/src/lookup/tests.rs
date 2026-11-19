@@ -663,3 +663,52 @@ fn a_single_checkouts_starmap_file_stays_relative_to_it() {
         Some(Path::new("starmap.toml"))
     );
 }
+
+/// Returns the error or the manifest of a workspace of the checkouts `api`
+/// and `web` whose workspace manifest names `web/link/starmap.toml`, where
+/// `web/link` is a symbolic link to `target`.
+fn starmap_through_link(
+    target: &str,
+) -> (
+    tempfile::TempDir,
+    Result<Option<crate::Manifest>, crate::ManifestError>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/starmap.toml"), "");
+    fs::create_dir_all(workspace.path.join("web/specs")).unwrap();
+    write(workspace.path.join("web/specs/starmap.toml"), "");
+    std::os::unix::fs::symlink(target, workspace.path.join("web/link")).unwrap();
+    write(
+        workspace.manifest_file(),
+        "[processes.proxy]\nargv = [\"caddy\"]\nstarmap = \"web/link/starmap.toml\"\n",
+    );
+    let read = workspace.manifest();
+    (dir, read)
+}
+
+#[test]
+fn a_workspace_manifests_starmap_file_that_a_link_moves_into_another_checkout_is_refused_as_a_link()
+{
+    let (_dir, read) = starmap_through_link("../api");
+    let error = read.unwrap_err();
+    assert_eq!(error.line, Some(3), "{error:?}");
+    assert_eq!(
+        error.problem,
+        ManifestProblem::StarmapFile {
+            unit: "proxy".to_owned(),
+            file: "web/link/starmap.toml".into(),
+            found: crate::StarmapFound::Link,
+        }
+    );
+}
+
+#[test]
+fn a_workspace_manifests_starmap_file_whose_link_stays_inside_its_checkout_is_accepted() {
+    let (dir, read) = starmap_through_link("specs");
+    let manifest = read.unwrap().unwrap();
+    assert_eq!(
+        manifest.processes["proxy"].starmap,
+        Some(dir.path().join("triage/web/link/starmap.toml"))
+    );
+}
