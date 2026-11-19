@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use crate::manifest::{
     DEFAULT_READY_TIMEOUT, Joined, Manifest, ManifestError, ManifestProblem, Permissions,
-    Published, ReadyCheck, TaskName, Unit,
+    Published, ReadyCheck, StarmapFound, TaskName, Unit,
 };
 
 fn parse(text: &str) -> Result<Manifest, ManifestError> {
@@ -1703,5 +1703,185 @@ fn a_sign_in_command_with_a_control_character_fails() {
     assert!(
         matches!(&problem, ManifestProblem::Invalid { message } if message.contains("control character")),
         "{problem:?}"
+    );
+}
+
+/// Returns a manifest of the one process `cli` whose third line sets
+/// `starmap` to `value`, written as TOML.
+fn with_starmap(value: &str) -> String {
+    format!("[processes.cli]\nargv = [\"true\"]\nstarmap = {value}\ncwd = \"cli\"\n")
+}
+
+#[test]
+fn a_starmap_key_names_one_file_relative_to_the_checkout_whatever_the_cwd() {
+    let manifest = parse(&with_starmap("\"cli/starmap.toml\"")).unwrap();
+    let cli = &manifest.processes["cli"];
+    assert_eq!(cli.cwd, Path::new("cli"));
+    assert_eq!(cli.starmap.as_deref(), Some(Path::new("cli/starmap.toml")));
+}
+
+#[test]
+fn a_starmap_value_loses_its_leading_dot_slash_and_its_repeated_and_trailing_slashes() {
+    let manifest = parse(&with_starmap("\"./cli//starmap.toml/\"")).unwrap();
+    assert_eq!(
+        manifest.processes["cli"].starmap.as_deref(),
+        Some(Path::new("cli/starmap.toml"))
+    );
+}
+
+#[test]
+fn a_process_without_a_starmap_key_holds_none() {
+    let manifest = parse(APP).unwrap();
+    assert_eq!(manifest.processes["web"].starmap, None);
+}
+
+#[test]
+fn a_starmap_value_that_is_not_a_string_fails_as_invalid_with_its_line() {
+    let (line, problem) = problem(&with_starmap("3"));
+    assert_eq!(line, Some(3));
+    assert!(
+        matches!(problem, ManifestProblem::Invalid { .. }),
+        "{problem:?}"
+    );
+}
+
+#[test]
+fn an_empty_absolute_or_parent_starmap_value_fails_as_invalid_with_the_process_and_its_line() {
+    for (value, reason) in [
+        ("\"\"", "is empty"),
+        ("\".\"", "is empty"),
+        ("\"./\"", "is empty"),
+        ("\"/cli/starmap.toml\"", "is absolute"),
+        ("\"cli/../starmap.toml\"", "holds `..`"),
+        ("\"../starmap.toml\"", "holds `..`"),
+    ] {
+        let (line, problem) = problem(&with_starmap(value));
+        assert_eq!(line, Some(3), "{value}");
+        assert!(
+            matches!(&problem, ManifestProblem::Invalid { message } if message.contains(reason) && message.contains("`cli`")),
+            "{value}: {problem:?}"
+        );
+    }
+}
+
+#[test]
+fn a_starmap_key_on_a_container_or_a_task_fails_as_an_unknown_key_with_its_line() {
+    let (line, problem) =
+        problem("[containers.db]\nimage = \"postgres:16.4\"\nstarmap = \"starmap.toml\"\n");
+    assert_eq!(line, Some(3));
+    assert!(
+        matches!(&problem, ManifestProblem::UnknownKey { key } if key == "starmap"),
+        "{problem:?}"
+    );
+    let (line, problem) =
+        self::problem("[tasks.test]\nargv = [\"true\"]\nstarmap = \"starmap.toml\"\n");
+    assert_eq!(line, Some(3));
+    assert!(
+        matches!(&problem, ManifestProblem::UnknownKey { key } if key == "starmap"),
+        "{problem:?}"
+    );
+}
+
+#[test]
+fn parsing_without_a_checkout_accepts_a_starmap_file_that_does_not_exist() {
+    let manifest = parse(&with_starmap("\"cli/missing.toml\"")).unwrap();
+    assert_eq!(
+        manifest.processes["cli"].starmap.as_deref(),
+        Some(Path::new("cli/missing.toml"))
+    );
+}
+
+/// Parses `text` as the `mxv.toml` of `checkout`, as a read from disk
+/// does.
+fn parse_in(checkout: &Path, text: &str) -> Result<Manifest, ManifestError> {
+    Manifest::parse_at(
+        text,
+        &checkout.join("mxv.toml"),
+        checkout,
+        &Joined::default(),
+    )
+}
+
+/// Returns a temporary checkout with the directory `cli`.
+fn checkout() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir(dir.path().join("cli")).unwrap();
+    dir
+}
+
+/// Asserts that `error` is the starmap file problem of `cli` on line 3
+/// for `file`, found as `found`.
+fn assert_starmap_file(error: &ManifestError, file: &str, found: StarmapFound) {
+    assert_eq!(error.line, Some(3), "{error:?}");
+    assert_eq!(
+        error.problem,
+        ManifestProblem::StarmapFile {
+            unit: "cli".to_owned(),
+            file: PathBuf::from(file),
+            found,
+        }
+    );
+}
+
+#[test]
+fn reading_a_checkout_accepts_a_starmap_file_that_is_a_regular_file() {
+    let dir = checkout();
+    crate::testing::write(dir.path().join("cli/starmap.toml"), "");
+    let manifest = parse_in(dir.path(), &with_starmap("\"cli/starmap.toml\"")).unwrap();
+    assert_eq!(
+        manifest.processes["cli"].starmap.as_deref(),
+        Some(Path::new("cli/starmap.toml"))
+    );
+}
+
+#[test]
+fn reading_a_checkout_refuses_a_starmap_file_that_does_not_exist() {
+    let dir = checkout();
+    let error = parse_in(dir.path(), &with_starmap("\"cli/starmap.toml\"")).unwrap_err();
+    assert_starmap_file(&error, "cli/starmap.toml", StarmapFound::Missing);
+    assert!(
+        error
+            .to_string()
+            .ends_with(":3: the starmap file cli/starmap.toml of `cli` does not exist"),
+        "{error}"
+    );
+}
+
+#[test]
+fn reading_a_checkout_refuses_a_starmap_file_that_is_a_symbolic_link_inside_the_checkout() {
+    let dir = checkout();
+    crate::testing::write(dir.path().join("cli/real.toml"), "");
+    std::os::unix::fs::symlink("real.toml", dir.path().join("cli/starmap.toml")).unwrap();
+    let error = parse_in(dir.path(), &with_starmap("\"cli/starmap.toml\"")).unwrap_err();
+    assert_starmap_file(&error, "cli/starmap.toml", StarmapFound::Link);
+}
+
+#[test]
+fn reading_a_checkout_refuses_a_starmap_file_that_is_a_directory() {
+    let dir = checkout();
+    let error = parse_in(dir.path(), &with_starmap("\"cli\"")).unwrap_err();
+    assert_starmap_file(&error, "cli", StarmapFound::NotAFile);
+}
+
+#[test]
+fn reading_a_checkout_refuses_a_starmap_file_below_a_linked_directory_that_leaves_the_checkout() {
+    let dir = checkout();
+    let outside = tempfile::tempdir().unwrap();
+    crate::testing::write(outside.path().join("starmap.toml"), "");
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("cli/shared")).unwrap();
+    let error = parse_in(dir.path(), &with_starmap("\"cli/shared/starmap.toml\"")).unwrap_err();
+    assert_starmap_file(&error, "cli/shared/starmap.toml", StarmapFound::Link);
+}
+
+#[test]
+fn reading_a_checkout_accepts_a_starmap_file_below_a_linked_directory_inside_the_checkout() {
+    let dir = checkout();
+    std::fs::create_dir(dir.path().join("specs")).unwrap();
+    crate::testing::write(dir.path().join("specs/starmap.toml"), "");
+    std::os::unix::fs::symlink("../specs", dir.path().join("cli/shared")).unwrap();
+    let manifest = parse_in(dir.path(), &with_starmap("\"cli/shared/starmap.toml\"")).unwrap();
+    assert_eq!(
+        manifest.processes["cli"].starmap.as_deref(),
+        Some(Path::new("cli/shared/starmap.toml"))
     );
 }

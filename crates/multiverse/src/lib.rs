@@ -76,8 +76,8 @@ pub use crate::lookup::{ManifestInputs, ManifestSource, TaskHome, checkout_prefi
 pub use crate::manifest::{
     Command, Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,
     MANIFEST_VERSION, MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError,
-    ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Secret, Task, TaskName,
-    Unit,
+    ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Secret, StarmapFound,
+    Task, TaskName, Unit,
 };
 pub use crate::marker::{MARKER_FILE, Marker, ensure as ensure_marker};
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};

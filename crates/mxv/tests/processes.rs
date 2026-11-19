@@ -959,6 +959,102 @@ fn a_reserved_section_in_the_manifest_fails_with_the_reserved_code() {
     assert_eq!(document["fields"]["section"], "actions");
 }
 
+/// Returns a manifest whose process `cli` names the starmap file
+/// `cli/starmap.toml` on line 4, and whose process `worker` depends on it.
+fn with_starmap() -> String {
+    "[processes.cli]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\nstarmap = \"cli/starmap.toml\"\n\n[processes.worker]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\ndepends_on = [\"cli\"]\n".to_owned()
+}
+
+#[test]
+fn up_refuses_a_missing_starmap_file_with_its_unit_file_and_line_until_the_file_is_added() {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", &with_starmap());
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::manifest::starmap_file",
+        "{document}"
+    );
+    assert_eq!(document["fields"]["unit"], "cli", "{document}");
+    assert_eq!(document["fields"]["file"], "cli/starmap.toml", "{document}");
+    assert_eq!(document["fields"]["found"], "missing", "{document}");
+    assert_eq!(document["fields"]["line"], 4, "{document}");
+    assert!(!setup.started("cli"), "{document}");
+    assert!(!setup.started("worker"), "{document}");
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    assert_eq!(
+        status["summary"]["manifest_error_code"], "mxv::manifest::starmap_file",
+        "{status}"
+    );
+
+    fs::create_dir_all(checkout.join("cli")).unwrap();
+    write(&checkout.join("cli/starmap.toml"), "");
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(row(&document, "cli")["state"], "running", "{document}");
+}
+
+/// Starts the processes of [`with_starmap`] with their starmap file, then
+/// deletes the file when `delete` holds, and checks that `status` lists
+/// both processes as running and `down` stops both. Returns the `status`
+/// document.
+fn status_and_down_after_up(delete: bool) -> Value {
+    let setup = Setup::new();
+    let checkout = setup.workspace("triage", &with_starmap());
+    fs::create_dir_all(checkout.join("cli")).unwrap();
+    write(&checkout.join("cli/starmap.toml"), "");
+    let (exit, up) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{up}");
+    let pids: Vec<u64> = ["cli", "worker"]
+        .iter()
+        .map(|name| row(&up, name)["pid"].as_u64().unwrap())
+        .collect();
+    if delete {
+        fs::remove_file(checkout.join("cli/starmap.toml")).unwrap();
+    }
+
+    let (exit, status) = setup.json(&["status", "-w", "triage"]);
+    assert_eq!(exit, 0, "{status}");
+    assert_eq!(row(&status, "cli")["state"], "running", "{status}");
+    assert_eq!(row(&status, "worker")["state"], "running", "{status}");
+
+    let (exit, down) = setup.json(&["down", "-w", "triage"]);
+    assert_eq!(exit, 0, "{down}");
+    for pid in pids {
+        assert!(
+            !group_exists(pid),
+            "the group {pid} still runs after down: {down}"
+        );
+    }
+    assert!(
+        setup
+            .states("triage")
+            .iter()
+            .all(|(_, state)| state != "running"),
+        "{down}"
+    );
+    status
+}
+
+#[test]
+fn a_starmap_file_deleted_while_its_process_runs_blocks_neither_status_nor_down() {
+    let status = status_and_down_after_up(true);
+    assert_eq!(
+        status["summary"]["manifest_error_code"], "mxv::manifest::starmap_file",
+        "{status}"
+    );
+}
+
+#[test]
+fn status_and_down_list_and_stop_the_processes_whose_starmap_file_is_present() {
+    let status = status_and_down_after_up(false);
+    assert!(
+        status["summary"]["manifest_error_code"].is_null(),
+        "{status}"
+    );
+}
+
 #[test]
 fn up_of_a_workspace_without_a_manifest_fails_and_status_lists_no_process() {
     let setup = Setup::new();

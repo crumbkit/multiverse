@@ -590,3 +590,125 @@ fn the_approval_scope_lists_the_checkouts_repositories_in_order() {
         "{scope}"
     );
 }
+
+#[test]
+fn each_checkouts_starmap_file_is_absolute_below_its_own_checkout_in_the_merged_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    for folder in ["api", "web"] {
+        fs::create_dir_all(workspace.path.join(folder).join("cli")).unwrap();
+        write(workspace.path.join(folder).join("cli/starmap.toml"), "");
+        write(
+            workspace.path.join(folder).join("mxv.toml"),
+            "[processes.cli]\nargv = [\"true\"]\nstarmap = \"./cli/starmap.toml\"\n",
+        );
+    }
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        manifest.processes["api-cli"].starmap,
+        Some(workspace.path.join("api/cli/starmap.toml"))
+    );
+    assert_eq!(
+        manifest.processes["web-cli"].starmap,
+        Some(workspace.path.join("web/cli/starmap.toml"))
+    );
+}
+
+#[test]
+fn a_workspace_manifests_starmap_file_is_absolute_below_the_workspace_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("web/starmap.toml"), "");
+    write(
+        workspace.manifest_file(),
+        "[processes.proxy]\nargv = [\"caddy\"]\nstarmap = \"web/starmap.toml\"\n",
+    );
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        manifest.processes["proxy"].starmap,
+        Some(workspace.path.join("web/starmap.toml"))
+    );
+}
+
+#[test]
+fn a_workspace_manifests_starmap_file_in_no_checkout_fails_as_invalid_with_its_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("starmap.toml"), "");
+    write(
+        workspace.manifest_file(),
+        "[processes.proxy]\nargv = [\"caddy\"]\nstarmap = \"starmap.toml\"\n",
+    );
+    let error = workspace.manifest().unwrap_err();
+    assert_eq!(error.line, Some(3), "{error:?}");
+    assert!(
+        matches!(&error.problem, ManifestProblem::Invalid { message } if message.contains("none of the workspace's checkouts")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_single_checkouts_starmap_file_stays_relative_to_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    let checkout = workspace.path.join("app");
+    write(checkout.join("starmap.toml"), "");
+    write(
+        checkout.join("mxv.toml"),
+        "[processes.cli]\nargv = [\"true\"]\nstarmap = \"starmap.toml\"\n",
+    );
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        manifest.processes["cli"].starmap.as_deref(),
+        Some(Path::new("starmap.toml"))
+    );
+}
+
+/// Returns the error or the manifest of a workspace of the checkouts `api`
+/// and `web` whose workspace manifest names `web/link/starmap.toml`, where
+/// `web/link` is a symbolic link to `target`.
+fn starmap_through_link(
+    target: &str,
+) -> (
+    tempfile::TempDir,
+    Result<Option<crate::Manifest>, crate::ManifestError>,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/starmap.toml"), "");
+    fs::create_dir_all(workspace.path.join("web/specs")).unwrap();
+    write(workspace.path.join("web/specs/starmap.toml"), "");
+    std::os::unix::fs::symlink(target, workspace.path.join("web/link")).unwrap();
+    write(
+        workspace.manifest_file(),
+        "[processes.proxy]\nargv = [\"caddy\"]\nstarmap = \"web/link/starmap.toml\"\n",
+    );
+    let read = workspace.manifest();
+    (dir, read)
+}
+
+#[test]
+fn a_workspace_manifests_starmap_file_that_a_link_moves_into_another_checkout_is_refused_as_a_link()
+{
+    let (_dir, read) = starmap_through_link("../api");
+    let error = read.unwrap_err();
+    assert_eq!(error.line, Some(3), "{error:?}");
+    assert_eq!(
+        error.problem,
+        ManifestProblem::StarmapFile {
+            unit: "proxy".to_owned(),
+            file: "web/link/starmap.toml".into(),
+            found: crate::StarmapFound::Link,
+        }
+    );
+}
+
+#[test]
+fn a_workspace_manifests_starmap_file_whose_link_stays_inside_its_checkout_is_accepted() {
+    let (dir, read) = starmap_through_link("specs");
+    let manifest = read.unwrap().unwrap();
+    assert_eq!(
+        manifest.processes["proxy"].starmap,
+        Some(dir.path().join("triage/web/link/starmap.toml"))
+    );
+}
