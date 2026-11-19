@@ -40,7 +40,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::manifest::{
-    Joined, MANIFEST_FILE, Manifest, ManifestError, ManifestProblem, Task, TaskName,
+    Joined, MANIFEST_FILE, Manifest, ManifestError, ManifestProblem, Secret, Task, TaskName,
 };
 use crate::name::MOST_NAME_BYTES;
 use crate::record::{Checkout, Workspace};
@@ -568,6 +568,67 @@ impl Workspace {
         Ok(homes)
     }
 
+    /// Returns the text that scopes a person's approval of this workspace's
+    /// check commands: the repositories of its checkouts, in order of path.
+    #[must_use]
+    pub fn approval_scope(&self) -> String {
+        let mut sources: Vec<String> = self
+            .checkouts
+            .iter()
+            .map(|checkout| checkout.source.display().to_string())
+            .collect();
+        sources.sort();
+        sources.join("\n")
+    }
+
+    /// Returns each secret that the workspace's manifest files declare,
+    /// with the directory its check runs in, in name order. A workspace
+    /// with several checkouts reads the workspace manifest and each
+    /// checkout's own `mxv.toml`, and a secret that two files declare
+    /// with the same check and sign-in command appears once. A name that
+    /// two files declare with different commands is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`ManifestError`] of a file.
+    pub fn secrets(&self) -> Result<Vec<(String, Secret, PathBuf)>, ManifestError> {
+        let mut files: Vec<(Manifest, PathBuf)> = Vec::new();
+        if self.has_several_checkouts() {
+            if let Some(manifest) = self.workspace_manifest()? {
+                files.push((manifest, self.path.clone()));
+            }
+            for checkout in &self.checkouts {
+                if let Some(manifest) = Manifest::read(&checkout.path)? {
+                    files.push((manifest, checkout.path.clone()));
+                }
+            }
+        } else if let Some(manifest) = self.manifest()? {
+            files.push((manifest, self.manifest_root().to_path_buf()));
+        }
+        let mut found: Vec<(String, Secret, PathBuf)> = Vec::new();
+        for (manifest, dir) in files {
+            for (name, secret) in manifest.secrets {
+                match found.iter().find(|(known, _, _)| *known == name) {
+                    None => found.push((name, secret, dir.clone())),
+                    Some((_, known, _)) if *known == secret => {}
+                    Some(_) => {
+                        return Err(ManifestError {
+                            path: dir,
+                            line: None,
+                            problem: ManifestProblem::Invalid {
+                                message: format!(
+                                    "the secret {name} is declared with different commands in two manifests"
+                                ),
+                            },
+                        });
+                    }
+                }
+            }
+        }
+        found.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(found)
+    }
+
     /// Returns the workspace manifest alone, with its paths checked
     /// against [`Workspace::manifest_root`] and, for a workspace with
     /// several checkouts, against the names that the checkouts' own
@@ -706,6 +767,7 @@ fn emptied(manifest: &Manifest) -> Manifest {
     empty.routes.clear();
     empty.services.clear();
     empty.tasks.clear();
+    empty.secrets.clear();
     empty.warnings.clear();
     empty.disposable.clear();
     empty.clone_on_new.clear();

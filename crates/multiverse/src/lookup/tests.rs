@@ -528,3 +528,65 @@ fn several_checkouts_keep_each_files_tasks_apart_and_the_merged_manifest_holds_n
     assert!(homes.iter().all(|home| home.tasks.len() == 1));
     assert!(workspace.manifest().unwrap().unwrap().tasks.is_empty());
 }
+
+const AWS: &str = "[secrets.aws]\ncheck = [\"aws\", \"sts\"]\nsign_in = \"aws sso login\"\n";
+
+#[test]
+fn a_workspace_with_several_checkouts_reads_the_secrets_of_every_manifest_in_name_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), AWS);
+    write(
+        workspace.path.join("web/mxv.toml"),
+        "[secrets.op]\ncheck = [\"op\", \"read\"]\nsign_in = \"op signin\"\n",
+    );
+    let secrets = workspace.secrets().unwrap();
+    let names: Vec<&str> = secrets.iter().map(|(name, _, _)| name.as_str()).collect();
+    assert_eq!(names, ["aws", "op"]);
+    assert_eq!(secrets[0].2, workspace.path.join("api"));
+    assert_eq!(secrets[1].2, workspace.path.join("web"));
+}
+
+#[test]
+fn a_secret_that_two_manifests_declare_alike_appears_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), AWS);
+    write(workspace.path.join("web/mxv.toml"), AWS);
+    assert_eq!(workspace.secrets().unwrap().len(), 1);
+}
+
+#[test]
+fn a_secret_name_that_two_manifests_declare_differently_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["api", "web"]);
+    write(workspace.path.join("api/mxv.toml"), AWS);
+    write(
+        workspace.path.join("web/mxv.toml"),
+        "[secrets.aws]\ncheck = [\"other\"]\nsign_in = \"aws sso login\"\n",
+    );
+    let error = workspace.secrets().unwrap_err();
+    assert!(
+        matches!(&error.problem, ManifestProblem::Invalid { message } if message.contains("`aws`") || message.contains("aws")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn a_workspace_with_no_manifest_declares_no_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(workspace(dir.path()).secrets().unwrap().is_empty());
+}
+
+#[test]
+fn the_approval_scope_lists_the_checkouts_repositories_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["web", "api"]);
+    let scope = workspace.approval_scope();
+    let lines: Vec<&str> = scope.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert!(
+        lines[0].ends_with("api") && lines[1].ends_with("web"),
+        "{scope}"
+    );
+}

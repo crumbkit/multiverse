@@ -953,10 +953,10 @@ fn an_empty_log_pattern_fails_up_as_an_invalid_manifest_with_the_line_of_the_key
 #[test]
 fn a_reserved_section_in_the_manifest_fails_with_the_reserved_code() {
     let setup = Setup::new();
-    setup.workspace("triage", "[secrets.db]\nsource = \"file\"\n");
+    setup.workspace("triage", "[actions.db]\nsource = \"file\"\n");
     let (_, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(document["code"], "mxv::manifest::reserved");
-    assert_eq!(document["fields"]["section"], "secrets");
+    assert_eq!(document["fields"]["section"], "actions");
 }
 
 #[test]

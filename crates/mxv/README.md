@@ -465,8 +465,8 @@ An `argv` of `cargo run` compiles inside the process, which would hold a place
 for the server's whole life, so mxv gives it none and prints one warning for
 each such process.
 
-The sections `secrets` and `actions` are reserved for later versions and
-fail with `mxv::manifest::reserved`. A manifest larger than 64 KiB fails
+The section `actions` is reserved for a later version and fails with
+`mxv::manifest::reserved`. A manifest larger than 64 KiB fails
 with `mxv::manifest::invalid`.
 
 Another tool may keep its own tables in the same file. mxv checks that the
@@ -637,8 +637,7 @@ manifest fails with `mxv::manifest::invalid` and a hint to add it to
 dependency must name it in `connect`. A sandboxed process cannot reach any
 host off the machine until phase runs its allowlist proxy, so a name in
 `connect` that is not a unit of the manifest fails. `permissions` has no
-`secrets` key, because mxv has no secrets yet, and that key fails with
-`mxv::manifest::unknown_key`.
+`secrets` key, and that key fails with `mxv::manifest::unknown_key`.
 
 A write grant is only as safe as whatever later runs the directory's
 contents outside the sandbox. For example, a sandboxed process that may
@@ -893,8 +892,7 @@ words name units: `mxv up [-w WORKSPACE] [UNIT]...`, `mxv down`,
 - `mxv up` and `mxv restart` print a line under a container whose secret
   files they found running: `info:` when `up` rewrote them, and `warning:`
   when it could not, so the container still runs with its earlier files.
-  mxv's manifest declares no secrets yet, so neither line appears until it
-  does. `mxv up` also prints an `info:` line under a running host process
+  A manifest that declares no container secret files shows neither line. `mxv up` also prints an `info:` line under a running host process
   that it restarted because its part of the plan changed, as [Sandboxed
   processes](#sandboxed-processes) describes. The JSON holds these lines
   in each row's `notes`.
@@ -1272,6 +1270,49 @@ route also receives `MXV_HOST` and `MXV_URL` for that route. The URL carries
 the HTTPS port unless it is 443. A variable of the manifest with the same name
 wins. Containers receive none, and neither does a workspace without a served
 route, such as one whose host label another workspace keeps.
+
+## Credentials and the preflight
+
+A manifest declares each credential that its work needs as a `[secrets.<name>]`
+table. The table holds no value. It holds the command that uses the credential
+and the command line that obtains it:
+
+```toml
+[secrets.aws]
+check = ["aws", "sts", "get-caller-identity", "--profile", "work"]
+sign_in = "aws sso login --profile work"
+
+[secrets.op]
+check = ["op", "read", "op://Private/deploy-token/credential"]
+sign_in = "op signin --account my.1password.com"
+```
+
+`check` is a program and its arguments, run without a shell, and it should be
+the real command that uses the credential. A status command such as `op
+whoami` can succeed while a read fails, so the check of a 1Password secret is
+an `op read` of one item. mxv discards the check's output, so the value that
+a read prints is never printed, stored or passed on. A check that exits with 0
+works. A check that exits with another code, cannot start, or runs for more
+than 20 seconds does not work, and mxv stops it at 20 seconds.
+
+`mxv preflight` runs each check of the workspace's manifest files and prints
+every secret with its result. It lists each sign-in that is needed in one
+message with the exact `sign_in` command line. It exits with 0 whether or not
+a sign-in is needed, and its `state` is `ready` or `sign_in_needed`. `mxv new`,
+`mxv restore` and `mxv up` run the same checks and print the same message as
+one warning, so a person signs in before the work stalls. `mxv new --dry-run` runs no check.
+
+A check is a command that the repository declares, so mxv runs it only after
+a person approved that exact command line. At a terminal, `mxv preflight`
+lists each command that no approval covers and asks `[y/N]`. A yes adds the
+command lines to `$XDG_STATE_HOME/mxv/preflight-approved`, and the approval
+covers every workspace of the same repositories that declares the same
+command. Without a terminal,
+or with `--no-input`, nothing is approved. `new`, `restore` and `up` never ask and never run an
+unapproved check. Their warning names it, and its `preflight` result gives
+the reason `not_approved`. A workspace with several checkouts reads the
+workspace manifest and each checkout's own `mxv.toml`, and lists a secret once
+when two files declare it with the same `check` and `sign_in`.
 
 ## The workspace manifest
 

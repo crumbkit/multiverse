@@ -36,6 +36,7 @@ mod mirror;
 mod name;
 mod phase_plan;
 mod ports;
+mod preflight;
 mod process;
 mod provision;
 mod proxy;
@@ -75,12 +76,14 @@ pub use crate::lookup::{ManifestInputs, ManifestSource, TaskHome, checkout_prefi
 pub use crate::manifest::{
     Command, Container, DEFAULT_READY_TIMEOUT, EnvValue, Joined, LogPattern, MANIFEST_FILE,
     MANIFEST_VERSION, MOST_MANIFEST_BYTES, MOST_READY_SECONDS, Manifest, ManifestError,
-    ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Task, TaskName, Unit,
+    ManifestProblem, Permissions, Process, Published, Ready, ReadyCheck, Secret, Task, TaskName,
+    Unit,
 };
 pub use crate::marker::{MARKER_FILE, Marker, ensure as ensure_marker};
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
 pub use crate::ports::DEFAULT_PORT_RANGE;
+pub use crate::preflight::{Approvals, CHECK_TIMEOUT, Checked, Outcome, Preflight};
 pub use crate::process::process_table;
 pub use crate::provision::{ProvisionError, Spec as ProvisionSpec, provision};
 pub use crate::proxy::{

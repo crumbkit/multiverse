@@ -5,6 +5,7 @@ mxv/add/v1            output  document  The workspace with the checkout that the
 mxv/list/v1           output  document  One page of the workspaces, in name order, and the number of workspaces.
 mxv/show/v1           output  document  The workspaces with the given names and their sizes on disk, and a failure for each name that no workspace has.
 mxv/cd/v1             output  document  The directory of the workspace or of one of its checkouts, for `cd "$(mxv cd <NAME>)"`.
+mxv/preflight/v1      output  document  Each secret that the workspace's manifest declares, whether its check command worked, and for each one that did not, the command line that signs in.
 mxv/up/v1             output  document  The selected units and their dependencies, in the order they started, each running.
 mxv/down/v1           output  document  The units that the run stopped, in the order it stopped them, and a failure for each process group that outlived SIGKILL.
 mxv/restart/v1        output  document  The restarted units and their dependencies, in the order they started, each running.
@@ -23,4 +24,3 @@ mxv/restore/v1        output  document  The workspace that the restore rebuilt a
 mxv/repair/v1         output  document  What the repair of one name's broken records, or the sweep of what no record names, did, or would do on a dry run.
 mxv/remove/v1         output  document  What the run removed, deleted and kept, or would on a dry run.
 mxv/clean/v1          output  document  Each workspace that the run considered, with the disposable directories it deleted, or would delete on a dry run, and the bytes they took, or why it kept them, and a failure for each workspace whose directories could not be deleted.
-mxv/reclaim/v1        output  document  Each workspace that the run considered, with what it stopped or cleaned, or would on a dry run, the bytes that frees, and why the workspace counts as idle or why the run kept it, and a failure for each workspace that could not be measured, stopped or cleaned.

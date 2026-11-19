@@ -520,7 +520,7 @@ fn question(repository: &str, paths: &[PathBuf], growth: &Growth) -> String {
 /// Writes `text`, a question, to `prompt`, reads one line from `input`,
 /// and reports whether the answer is `y` or `yes`, in any case and with
 /// any surrounding spaces. An answer that cannot be read is no.
-fn answer(text: &str, prompt: &mut dyn Write, input: &mut dyn BufRead) -> bool {
+pub(crate) fn answer(text: &str, prompt: &mut dyn Write, input: &mut dyn BufRead) -> bool {
     let _ = prompt.write_all(text.as_bytes());
     let _ = prompt.flush();
     let mut reply = String::new();
@@ -539,6 +539,7 @@ pub(crate) fn up(
 ) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     ask_first(output, &context)?;
+    crate::preflight::announce(environment, &context.workspace);
     let lock = context.lock_live()?;
     context.mark(&lock)?;
     if context.processes.is_empty()

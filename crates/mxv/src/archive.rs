@@ -1624,6 +1624,7 @@ pub(crate) fn restore(
             multiverse::SyncMode::Start,
             served,
         );
+        crate::preflight::announce(environment, &workspace);
     }
     let lost_pins = restored.lost_pins.clone();
     // A restore from origin may start a checkout at another commit than

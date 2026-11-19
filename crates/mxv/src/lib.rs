@@ -15,6 +15,7 @@ mod config;
 mod environment;
 mod exec;
 mod failures;
+mod preflight;
 mod processes;
 mod proxy;
 mod reclaim;
@@ -151,6 +152,10 @@ where
         Verb::List(args) => crumbkit::finish(output, verbs::LIST, verbs::list(environment, &args)),
         Verb::Show(args) => crumbkit::finish(output, verbs::SHOW, verbs::show(environment, &args)),
         Verb::Cd(args) => crumbkit::finish(output, verbs::CD, verbs::cd(environment, &args)),
+        Verb::Preflight(args) => {
+            let result = preflight::preflight(environment, &args, output.no_input());
+            crumbkit::finish(output, preflight::PREFLIGHT, result)
+        }
         // `remove` reads `--dry-run` and asks for confirmation through
         // `&mut output`, so it runs before `finish`.
         Verb::Remove(args) => proxy::serving(

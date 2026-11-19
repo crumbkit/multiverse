@@ -18,6 +18,7 @@ use crumbkit_usage::{
 
 use crate::archive::{ARCHIVE, ArchiveArgs, RESTORE, RestoreArgs};
 use crate::clean::CLEAN;
+use crate::preflight::PREFLIGHT;
 use crate::processes::{DOWN, LOGS, PORTS_RESET, RESTART, STATUS, UP};
 use crate::proxy::{
     CHECK as PROXY_CHECK, INSTALL as PROXY_INSTALL, START as PROXY_START, STATUS as PROXY_STATUS,
@@ -56,7 +57,7 @@ pub const TOOL: Tool = Tool::new().help(HELP);
 const HELP: Help = Help::new()
     .root_verbs(
         &[
-            "new", "add", "list", "show", "cd", "up", "down", "restart", "status", "logs",
+            "new", "add", "list", "show", "cd", "preflight", "up", "down", "restart", "status", "logs",
             "exec", "run", "archive", "restore", "repair", "remove", "clean", "reclaim", "pin",
             "unpin",
         ],
@@ -65,7 +66,10 @@ const HELP: Help = Help::new()
     .groups(&[Group::new(
         &[],
         &[
-            Goal::new("Work in a workspace", &["new", "add", "list", "show", "cd"]),
+            Goal::new(
+                "Work in a workspace",
+                &["new", "add", "list", "show", "cd", "preflight"],
+            ),
             Goal::new(
                 "Run a workspace's app",
                 &["up", "down", "restart", "status", "logs", "exec", "run", "ports"],
@@ -120,6 +124,13 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::read_only())
             .document(CD),
+        Leaf::new(&["preflight"])
+            .examples(&[Example::new(
+                &["-w", "reading-list"],
+                "Run the check of each secret that the manifest of the workspace reading-list declares, and list every sign-in that is needed",
+            )])
+            .effects(Effects::additive().idempotent().open_world())
+            .document(PREFLIGHT),
         Leaf::new(&["up"])
             .examples(&[Example::new(
                 &["-w", "reading-list", "web"],
@@ -368,6 +379,10 @@ pub(crate) enum Verb {
     Show(ShowArgs),
     /// Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it.
     Cd(CdArgs),
+    /// Check that each secret the manifest declares works, and list every sign-in that is needed.
+    ///
+    /// A manifest declares a secret as `[secrets.<name>]` with a `check` command and a `sign_in` command line. Preflight runs each check, which should be the real command that uses the credential, such as `aws sts get-caller-identity --profile work` or an `op read` of one item, because a status command such as `op whoami` can succeed while a read fails. It discards each check's output, so no value of a credential is printed, stored or passed on, and it stops a check that runs longer than 20 seconds. The result names every secret whose check did not work, each with its `sign_in` command line, in one message. A check is a command that the repository declares, so mxv runs it only after a person approved that command line: at a terminal `mxv preflight` lists the unapproved commands and asks, and an approval covers every workspace of the same repositories that declares the same command. `mxv new`, `mxv restore` and `mxv up` run only approved checks and print the same message as one warning, and it also names each check that was not run for want of approval.
+    Preflight(PreflightArgs),
     /// Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready.
     ///
     /// Before anything builds, stops or starts, mxv compares the permissions of the selected host units and the units they depend on with what a person has granted to the repository. A unit asks for more when it is new, when its permissions hold an entry that the grant lacks, or when it would run outside the sandbox and its grant is sandboxed. At a terminal, mxv lists what each unit asks for and asks before it goes on, and a yes adds it to the grant that every workspace of the repository shares. Without a terminal, or with --no-input, it fails with mxv::permissions::not_granted and builds, stops and starts nothing. No flag or variable approves a grant.
@@ -882,6 +897,14 @@ pub(crate) struct ProcessesArgs {
     /// The units, which default to every unit
     #[arg(value_name = "UNIT")]
     pub(crate) processes: Vec<String>,
+}
+
+/// The arguments of `mxv preflight`.
+#[derive(Debug, Args)]
+pub(crate) struct PreflightArgs {
+    /// The workspace, which defaults to the one that holds the current directory
+    #[arg(short, long, value_name = "WORKSPACE")]
+    pub(crate) workspace: Option<String>,
 }
 
 /// The arguments of `mxv status`.
