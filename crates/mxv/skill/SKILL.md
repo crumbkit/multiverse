@@ -34,7 +34,7 @@ workspace that holds the current directory. Pass `-w NAME` from anywhere else.
 A manifest's `[secrets.<name>]` tables give a `check` command and a `sign_in`
 command line. `mxv new`, `mxv restore` and `mxv up` warn once with every
 sign-in that is needed. Pass that list on at once, then run
-`mxv preflight` after they sign in. Only a person approves checks, at a terminal.
+`mxv preflight` after they sign in. Only a person approves checks.
 
 ## Resume a workspace and read its state
 
@@ -52,9 +52,9 @@ sign-in that is needed. Pass that list on at once, then run
 
 - `mxv archive -w NAME` puts a finished workspace away and keeps each
   checkout's commit, and `mxv restore NAME` rebuilds it at those commits.
-  `mxv list --archived` lists the archives.
-- `mxv remove NAME` removes a workspace's clones, with the branch that each
-  clone holds, its directory and its record. It refuses while a checkout holds unpushed or uncommitted work.
+  `mxv list --archived` lists the archives. `mxv sweep` archives workspaces
+  whose change merged.
+- `mxv remove NAME` removes a workspace's clones, branches and record. It refuses while a checkout holds unpushed or uncommitted work.
 
 ## Complete mxv's commands in a shell
 

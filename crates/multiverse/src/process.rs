@@ -1,8 +1,12 @@
 //! The process table that mxv's `clean` and `reclaim` read, as phase reads
-//! it (PROC-1).
+//! it, and the runner of the programs other than git that the library
+//! starts: the check commands of a manifest's secrets, `gh` and `board`
+//! (PROC-1).
 
+use std::io::Read as _;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::thread;
 use std::time::Duration;
 
 use phase::host::ProcessError;
@@ -49,6 +53,9 @@ pub(crate) enum Ran {
     Exited {
         /// Whether it exited with 0.
         success: bool,
+        /// What it wrote to standard output, which is empty unless the
+        /// caller asked to keep it.
+        stdout: Vec<u8>,
     },
     /// The program could not be started, such as one that is not installed.
     Unstartable,
@@ -56,13 +63,22 @@ pub(crate) enum Ran {
     TimedOut,
 }
 
+/// The most bytes of a command's standard output that [`run_command`] keeps.
+const MOST_KEPT_BYTES: u64 = 64 * 1024;
+
 /// Runs `words`, a program and its arguments that no shell reads, in `dir`
 /// with an empty standard input, and waits at most `deadline`. Its standard
-/// output and standard error are discarded.
+/// error is discarded, and its standard output is discarded unless
+/// `keep_stdout` is set, in which case the first 64 KiB are returned.
 ///
 /// This is the module that starts the programs other than git: the check
-/// commands of a manifest's secrets (PROC-1).
-pub(crate) fn run_command(words: &[String], dir: &Path, deadline: Duration) -> Ran {
+/// commands of a manifest's secrets, `gh` and `board` (PROC-1).
+pub(crate) fn run_command(
+    words: &[String],
+    dir: &Path,
+    deadline: Duration,
+    keep_stdout: bool,
+) -> Ran {
     let Some((program, arguments)) = words.split_first() else {
         return Ran::Unstartable;
     };
@@ -75,7 +91,11 @@ pub(crate) fn run_command(words: &[String], dir: &Path, deadline: Duration) -> R
         .args(arguments)
         .current_dir(dir)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(if keep_stdout {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stderr(Stdio::null());
     #[expect(
         clippy::disallowed_methods,
@@ -89,9 +109,19 @@ pub(crate) fn run_command(words: &[String], dir: &Path, deadline: Duration) -> R
     let Ok(mut child): Result<std::process::Child, _> = spawned else {
         return Ran::Unstartable;
     };
+    let reader = child.stdout.take().map(|stream| {
+        thread::spawn(move || {
+            let mut kept = Vec::new();
+            let _ = stream.take(MOST_KEPT_BYTES).read_to_end(&mut kept);
+            kept
+        })
+    });
     match child.wait_timeout(deadline) {
         Ok(Some(status)) => Ran::Exited {
             success: status.success(),
+            stdout: reader
+                .and_then(|reader| reader.join().ok())
+                .unwrap_or_default(),
         },
         Ok(None) | Err(_) => {
             // The child is killed and reaped, so no zombie remains. A kill of

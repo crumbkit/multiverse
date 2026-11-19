@@ -26,6 +26,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv repair`](#mxv-repair): Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans list what no record names
 - [`mxv remove`](#mxv-remove): Remove a workspace's clones with their branches, its directory and its record
 - [`mxv clean`](#mxv-clean): Delete the disposable directories, such as target/ and node\_modules/, of idle workspaces
+- [`mxv sweep`](#mxv-sweep): Archive the workspaces whose change has merged, delete their build output and docker volumes, and report the disk space that this freed
 - [`mxv reclaim`](#mxv-reclaim): Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
 - [`mxv pin`](#mxv-pin): Keep mxv reclaim from stopping a workspace
 - [`mxv unpin`](#mxv-unpin): Let mxv reclaim stop a workspace again while it is idle
@@ -58,10 +59,12 @@ New holds the workspace's lock from before it writes the record until it has cop
 ### Arguments
 
 - `<NAME>`: The workspace's name, which also names its directory and its branch. Required.
-- `--repo <PATH>`: A git repository to check out, or a directory inside it; repeat it or use commas for several. Required. Takes more than one value.
-- `--as <FOLDER>`: The folder of the checkout of the --repo right before it, which defaults to the repository's name. Takes more than one value.
-- `--no-clone`: Clone none of the repositories' ignored directories, such as node\_modules/, into the new checkouts
-- `--manifest <FILE>`: Copy FILE into the new workspace as its workspace manifest, \<ROOT\>/\<NAME\>/mxv.toml, in place of a template
+- `--repo <PATH>`: A git repository, or a directory in it, to check out; repeat it or use commas. Required. Takes more than one value.
+- `--as <FOLDER>`: The folder of the --repo before it, which defaults to the repository's name. Takes more than one value.
+- `--no-clone`: Clone no ignored directory, such as node\_modules/
+- `--manifest <FILE>`: Copy FILE in as the workspace manifest
+- `--board-mount <MOUNT>`: Update board mount BOARD:PATH when swept. Takes more than one value.
+- `--no-sweep`: Skip the sweep of merged workspaces
 - `--dry-run`: Report what the command would change, and change nothing
 
 ### Examples
@@ -688,6 +691,39 @@ mxv clean --all --dry-run
 Effects: destructive, idempotent, closed-world.
 
 Writes: reports each item and exits 1 when any item fails.
+
+## `mxv sweep`
+
+Archive the workspaces whose change has merged, delete their build output and docker volumes, and report the disk space that this freed.
+
+A workspace counts as merged when it is live, no checkout has uncommitted changes, a stash or a detached `HEAD`, at least one checkout holds a commit of its own, and each such checkout's branch is merged. A branch is merged when, after `git fetch` of origin, its commits are all in the branch that the checkout started from and origin's branch of the same name holds the checkout's `HEAD`, or when `gh pr list` shows a pull request of that branch, merged into the branch that the checkout started from, whose head is the checkout's `HEAD`, which is how a squash merge appears. A branch that nobody pushed to origin and that only moved along its base, such as after `git pull`, is not merged. When the fetch fails or `gh` is not signed in, mxv keeps the workspace. The archive is the archive of `mxv archive --delete-volumes`: it keeps each checkout's commit for `mxv restore`, stops the workspace's units, deletes its directory, build output and docker volumes, and refuses what `mxv archive` refuses, such as a workspace that a shell or editor works in, which stays and has a row that says why. After each archive, mxv runs `board -C <board> mount update <path>` for each board mount that `mxv new --board-mount` recorded for the workspace, and a failed update prints a warning that names the command to run again. `mxv new` runs the same sweep before it makes a workspace, without a question, unless `--no-sweep` is given. That sweep keeps the workspace whose name `mxv new` was given, and it starts no new decision 45 seconds after it began, so each workspace that it has not reached by then stays for a later `mxv sweep`. A decision that has started runs to the end of its own fetch and `gh` deadlines.
+
+### Arguments
+
+- `--dry-run`: Report what the command would change, and change nothing
+- `--yes`: Proceed without asking for confirmation
+
+### Examples
+
+Print which merged workspaces sweeping would archive and the space that this frees.
+
+```sh
+mxv sweep --dry-run
+```
+
+### Columns
+
+- `name`: The workspace's name.
+- `state`: `archived` when the run archived the workspace, `would_archive` on a dry run, or `kept`.
+- `freed`: The bytes that the workspace's directory took before the archive deleted it, or take on a dry run, and 0 for a workspace that the run kept. The archive keeps the ignored files of its checkouts in a tar outside the directory, so the disk frees a little less.
+- `reason`: Why the run kept the workspace, or null.
+
+### Columns that `--long` adds
+
+- `board_mounts`: Each board mount whose update the run ran, such as `/repos/multiverse in /Users/you/board`.
+- `mount_failures`: Each board mount update that failed, with the command that runs it again.
+
+Effects: destructive, idempotent, closed-world.
 
 ## `mxv reclaim`
 

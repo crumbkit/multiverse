@@ -1,0 +1,178 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "mxv/sweep/v1",
+  "description": "Each live workspace that the run considered, whether it archived the workspace, would archive it on a dry run, or kept it for the reason that the row gives, and the bytes that each archive freed.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "description": "The id of this document.",
+      "const": "mxv/sweep/v1"
+    },
+    "dry_run": {
+      "description": "Present, and true, when the run was a dry run that changed nothing.",
+      "const": true
+    },
+    "data": {
+      "description": "The rows of the page, up to the limit.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/SweepRow"
+      }
+    },
+    "total": {
+      "description": "The number of rows that matched, of which data holds one page. It is absent when the tool did not count the rows.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "truncated": {
+      "description": "True when the document leaves out rows that matched, because of the limit or the output budget, and false when data holds every row.",
+      "type": "boolean"
+    },
+    "next": {
+      "description": "The next steps, in the order the text prints them. It is absent when there are none.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "description": "The sentence or phrase that the text prints for the step.",
+            "type": "string"
+          },
+          "commands": {
+            "description": "The commands that carry out the step, in order.",
+            "type": "array",
+            "items": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "call": {
+                      "description": "A command line of this tool.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "call"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "run": {
+                      "description": "A command line of another program.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "run"
+                  ],
+                  "additionalProperties": false
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "text",
+          "commands"
+        ],
+        "additionalProperties": false
+      }
+    },
+    "cut": {
+      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "The over-budget code.",
+          "type": "string"
+        },
+        "budget": {
+          "description": "The most bytes that the run printed on standard output.",
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "code",
+        "budget"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "data",
+    "truncated"
+  ],
+  "$defs": {
+    "SweepRow": {
+      "description": "One workspace, as `mxv sweep` prints it.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The workspace's name.",
+          "type": "string"
+        },
+        "state": {
+          "description": "`archived` when the run archived the workspace, `would_archive` on\na dry run, or `kept`.",
+          "$ref": "#/$defs/SweepState"
+        },
+        "freed": {
+          "description": "The bytes that the workspace's directory took before the archive\ndeleted it, or take on a dry run, and 0 for a workspace that the run\nkept. The archive keeps the ignored files of its checkouts in a tar\noutside the directory, so the disk frees a little less.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "reason": {
+          "description": "Why the run kept the workspace, or null.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "board_mounts": {
+          "description": "Each board mount whose update the run ran, such as\n`/repos/multiverse in /Users/you/board`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "mount_failures": {
+          "description": "Each board mount update that failed, with the command that runs it\nagain.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "name",
+        "state",
+        "freed",
+        "reason"
+      ]
+    },
+    "SweepState": {
+      "description": "What `mxv sweep` does with one workspace.",
+      "oneOf": [
+        {
+          "description": "The run archived the workspace.",
+          "type": "string",
+          "const": "archived"
+        },
+        {
+          "description": "A dry run would archive the workspace.",
+          "type": "string",
+          "const": "would_archive"
+        },
+        {
+          "description": "The run keeps the workspace, for the reason that the row gives.",
+          "type": "string",
+          "const": "kept"
+        }
+      ]
+    }
+  }
+}

@@ -32,6 +32,7 @@ mod lifecycle;
 mod lookup;
 mod manifest;
 mod marker;
+mod merged;
 mod mirror;
 mod name;
 mod phase_plan;
@@ -80,6 +81,7 @@ pub use crate::manifest::{
     Unit,
 };
 pub use crate::marker::{MARKER_FILE, Marker, ensure as ensure_marker};
+pub use crate::merged::{GitHub, HELPER_DEADLINE, PullRequests, Verdict, update_board_mount};
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, Unrunnable};
 pub use crate::ports::DEFAULT_PORT_RANGE;
@@ -94,7 +96,7 @@ pub use crate::proxy::{
     line_for as hosts_line, missing as missing_hosts,
 };
 pub use crate::record::{
-    AGENTS_FILE, BackendKind, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
+    AGENTS_FILE, BackendKind, BoardMount, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
     MULTI_CHECKOUT_RECORD_VERSION, Made, RECORD_VERSION, Reclaimed, WORKTREE_RECORD_VERSION,
     Workspace, WorkspaceKind, WorkspaceState, agents_text,
 };

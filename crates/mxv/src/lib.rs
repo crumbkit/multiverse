@@ -23,6 +23,7 @@ mod repair;
 mod rows;
 mod run;
 mod run_failures;
+mod sweep;
 #[cfg(test)]
 mod testing;
 mod units;
@@ -141,10 +142,8 @@ where
         Err(stop) => return stop.exit_code(),
     };
     match cli.verb {
-        Verb::New(args) => {
-            let result = verbs::new(&output, environment, &args);
-            crumbkit::finish(output, verbs::NEW, result)
-        }
+        Verb::New(args) => sweep::new(output, environment, &args),
+        Verb::Sweep(args) => sweep::run(output, environment, &args),
         Verb::Add(args) => {
             let result = verbs::add(&output, environment, &args);
             crumbkit::finish(output, verbs::ADD, result)
