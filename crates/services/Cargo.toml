@@ -1,0 +1,26 @@
+[package]
+name = "mxv-services"
+description = "Serves a workspace's local AWS services in one process, in memory, on loopback ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["workspace", "dynamodb", "local", "development"]
+categories = ["development-tools"]
+include = ["src/**/*.rs", "README.md", "LICENSE-APACHE", "LICENSE-MIT"]
+
+# The package is published as `mxv-services`, and code imports it as
+# `services`.
+[lib]
+name = "services"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Dynoxide serves the DynamoDB JSON API from an in-memory SQLite database.
+dynoxide-rs = { workspace = true }
+# The runtime that runs the listeners until TERM or INT arrives.
+tokio = { workspace = true }

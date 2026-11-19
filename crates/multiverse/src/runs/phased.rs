@@ -29,7 +29,7 @@ use crate::manifest::{Manifest, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, Inputs, MAIN, Unrunnable};
 use crate::record::Workspace;
-use crate::service::PROVISION_APP;
+use crate::service::{Backend, PROVISION_APP, SERVICES_APP};
 use crate::store::{self, Store};
 
 /// How long `up` gives phase to build each selected checkout, and how long
@@ -557,7 +557,7 @@ impl Runs {
             ports: &workspace.ports,
             grace: self.grace,
             caller: &self.caller,
-            provisioner: self.provisioner.clone(),
+            own_command: self.own_command.clone(),
             urls: self.proxy_urls_of(workspace),
         }
     }
@@ -634,14 +634,14 @@ impl Runs {
             (Some(Unit::Container(_)), _) => Kind::Container,
             (Some(Unit::Process(_)), _) => Kind::Process,
             (None, Some(row)) if row.runner == RunnerKind::Container => Kind::Container,
-            // A backend of the services runs in a container whether or not
-            // phase still has its row, as after `down`.
+            // A backend of the services that runs in a container is one
+            // whether or not phase still has its row, as after `down`.
             (None, _)
                 if manifest.is_some_and(|manifest| {
                     manifest
                         .backends()
                         .iter()
-                        .any(|backend| backend.app() == name)
+                        .any(|backend| backend.is_container() && backend.app() == name)
                 }) =>
             {
                 Kind::Container
@@ -1113,12 +1113,14 @@ impl Runs {
     }
 
     /// Returns the log file that phase's keeper gives the host process
-    /// `unit`, which is a process of `manifest` or [`PROVISION_APP`] when
-    /// the manifest declares services, or `None` for a container, whose
+    /// `unit`, which is a process of `manifest` or one of mxv's own host
+    /// apps, [`PROVISION_APP`] or [`SERVICES_APP`], when the manifest
+    /// declares services that need it, or `None` for a container, whose
     /// log comes from `docker logs`.
     fn phase_log(&self, id: &WorkspaceId, manifest: &Manifest, unit: &str) -> Option<PathBuf> {
-        let provisions = unit == PROVISION_APP && !manifest.services.is_empty();
-        if !provisions && !manifest.processes.contains_key(unit) {
+        let own = (unit == PROVISION_APP && !manifest.services.is_empty())
+            || (unit == SERVICES_APP && manifest.backends().contains(&Backend::Services));
+        if !own && !manifest.processes.contains_key(unit) {
             return None;
         }
         Some(

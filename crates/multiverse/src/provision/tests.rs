@@ -12,13 +12,14 @@ use crate::manifest::Manifest;
 use crate::provision::{ProvisionError, Spec, create_table_body, provision};
 
 /// One request that the fake backend received: the method and path, the
-/// `X-Amz-Target` header, whether it carried an `Authorization` header,
-/// and the body.
+/// `X-Amz-Target` header, whether it carried an `Authorization` header
+/// and an `X-Amz-Date` header, and the body.
 #[derive(Clone, Debug)]
 struct Received {
     line: String,
     target: String,
     authorized: bool,
+    dated: bool,
     body: String,
 }
 
@@ -44,6 +45,7 @@ impl FakeBackend {
                 let mut length = 0;
                 let mut target = String::new();
                 let mut authorized = false;
+                let mut dated = false;
                 loop {
                     let mut header = String::new();
                     reader.read_line(&mut header).unwrap();
@@ -56,6 +58,7 @@ impl FakeBackend {
                         "content-length" => length = value.parse().unwrap(),
                         "x-amz-target" => target = value.to_owned(),
                         "authorization" => authorized = true,
+                        "x-amz-date" => dated = true,
                         _ => {}
                     }
                 }
@@ -65,6 +68,7 @@ impl FakeBackend {
                     line: line.trim_end().to_owned(),
                     target,
                     authorized,
+                    dated,
                     body: String::from_utf8(body).unwrap(),
                 };
                 let (status, text) = answer(&request);
@@ -300,15 +304,13 @@ fn provisioning_an_empty_backend_creates_each_resource_and_turns_on_the_tables_e
 }
 
 #[test]
-fn only_dynamodb_requests_carry_an_authorization_header_and_none_is_signed() {
+fn only_dynamodb_requests_carry_an_authorization_header_and_a_date_and_none_is_signed() {
     let backend = FakeBackend::start(creates_everything);
     provision(&spec(backend.port, backend.port), deadline(), &mut |_| {}).unwrap();
     for request in backend.received() {
-        assert_eq!(
-            request.authorized,
-            request.target.starts_with("DynamoDB_"),
-            "{request:?}"
-        );
+        let dynamodb = request.target.starts_with("DynamoDB_");
+        assert_eq!(request.authorized, dynamodb, "{request:?}");
+        assert_eq!(request.dated, dynamodb, "{request:?}");
     }
 }
 
@@ -344,7 +346,7 @@ fn a_table_that_exists_with_another_key_schema_fails_and_says_to_run_down_then_u
     );
     assert_eq!(
         error.to_string(),
-        "the table inbox exists with keys, attribute types or indexes other than the manifest declares, and DynamoDB Local cannot change them; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`"
+        "the table inbox exists with keys, attribute types or indexes other than the manifest declares, and mxv cannot change them in place; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`"
     );
 }
 
@@ -362,7 +364,7 @@ fn a_table_whose_expiry_is_on_another_attribute_fails_and_says_to_run_down_then_
     let error = provision(&spec(backend.port, backend.port), deadline(), &mut |_| {}).unwrap_err();
     assert_eq!(
         error.to_string(),
-        "the table inbox exists with expiry on `gone` other than the manifest declares, and DynamoDB Local cannot change it; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`"
+        "the table inbox exists with expiry on `gone` other than the manifest declares, and mxv cannot change it in place; run `mxv down`, which drops the backends' in-memory data, and then `mxv up`"
     );
 }
 

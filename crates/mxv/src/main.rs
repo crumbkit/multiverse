@@ -34,6 +34,11 @@ fn main() -> ExitCode {
     if mxv::is_provisioner(&args) {
         return mxv::provision(&args);
     }
+    // phase starts the app `mxv-services` as `mxv phase services`, which
+    // writes no usage line and reads only its arguments.
+    if mxv::is_services(&args) {
+        return mxv::services(&args);
+    }
     // The guard writes this run's line to the usage log when `main`
     // returns, after the output is flushed (CLI-7).
     let _log = crumbkit_usage::start();

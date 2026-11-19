@@ -253,7 +253,7 @@ impl Environment {
                     program.clone(),
                     crate::KEEPER_WORDS.iter().map(OsString::from).collect(),
                 )
-                .with_provisioner(program, &crate::PROVISION_WORDS);
+                .with_own_command(program, &crate::OWN_APP_WORDS);
         }
         Ok(runs)
     }

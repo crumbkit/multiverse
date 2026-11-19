@@ -343,6 +343,16 @@ Two writers own host entry states. The engine owns them during `up`, `restart` a
 | Set to empty, on a launch | `Journal::launching` | The process dies after the write and before the launch. | The entry says `Planned` and the completion is gone. | The next `up` runs the oneshot again. | None |
 | Set to empty, on a `down` that selects it | `Journal::clear_completion`, from `phase/src/engine/run/stop.rs` | The process dies before the write. | The completion stays. | `down` runs again. | None |
 
+## The services app
+
+`mxv-services` (`services/src/lib.rs`, started by `mxv phase services` in `mxv/src/lib.rs`) is a host app that phase runs for a manifest with a dynamodb service, one process for each running workspace. It keeps every table and item in memory and writes nothing to disk, so its states are stopped and running, and no crash point leaves a file behind. A crash or a stop loses every table, and the next `up` provisions them again, because `mxv-provision` runs again after a backend restarts.
+
+| Transition | Owner | Crash point | State left | Recovery | Fault test |
+| --- | --- | --- | --- | --- | --- |
+| Stopped to running | `services::serve`, from the keeper's launch | A listener's port is taken, or the process dies before it writes `mxv-services ready`. | No listener. phase's readiness check fails, or phase reports the port as taken before the launch. | `up` fails and names the app's log. `mxv ports reset` gives the workspace new ports. | `serve_fails_before_ready_when_a_port_is_taken` in `services/src/tests.rs` holds the port and kills nothing. |
+| Running to stopped | `services::serve` returns when TERM or INT arrives, from `mxv down` or a verb's stop | The process ignores the signal past the grace. | The keeper sends `KILL`. The memory is gone. | The next `up` starts it empty and provisions every resource again. | `up_serves_dynamodb_from_the_host_app_mxv_services_and_down_stops_it` in `mxv/tests/services.rs` stops it with `down` and kills nothing. |
+| Running to stopped, by a crash | The process dies. | Any. | The app is exited, and phase does not restart it. The memory is gone. | The next `up` starts it and runs `mxv-provision` again. | None |
+
 ## Keepers
 
 The keeper has no state enum. Its life is the control flow of `phase/src/engine/keeper/supervise.rs`. `KeeperExit` (`phase/src/engine/keeper.rs`) is its exit code. The keeper's states are spawned, waiting for `go`, handshaken, supervising, in backoff, stopping and exited. It communicates through its standard input and output and through `TERM` and `INT`, and it has no control socket.

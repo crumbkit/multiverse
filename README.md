@@ -6,12 +6,15 @@ branched from the latest main, an `AGENTS.md` that tells an agent how to work th
 empty `.deadband-workspace` from which deadband names the workspace of a job run inside
 it, and a record from which an archived workspace can be restored.
 
-The repository holds three crates:
+The repository holds four crates:
 
 - [`multiverse`](crates/multiverse), the library.
 - [`mxv`](crates/mxv), the command built on the library.
 - [`phase`](crates/phase), published as `mxv-phase`, the library that runs a
   workspace's apps for `mxv`.
+- [`services`](crates/services), published as `mxv-services`, the library
+  that serves a workspace's local DynamoDB in memory for `mxv`, with no
+  Docker.
 
 ## Quick start
 
