@@ -1199,7 +1199,7 @@ fn check_runnable(
         workspace_dir: None,
         grace: crate::runs::STOP_GRACE,
         caller: &crate::phase_plan::CallerEnvironment::default(),
-        provisioner: Some(crate::phase_plan::checking_provisioner()),
+        own_command: Some(crate::phase_plan::checking_own_command()),
         urls: crate::phase_plan::ProxyUrls::default(),
     };
     match crate::phase_plan::build(&inputs) {
@@ -1743,17 +1743,17 @@ impl Manifest {
     }
 
     /// Returns the ports that the workspace's port ledger holds for the
-    /// manifest: its own ports, then the port of each backend, which is
-    /// named after the backend's app.
+    /// manifest: its own ports, then the port of each kind of its
+    /// services, which [`crate::ServiceKind::port`] names, once each.
     #[must_use]
     pub fn ledger_ports(&self) -> Vec<String> {
         self.ports
             .iter()
             .cloned()
             .chain(
-                self.backends()
+                crate::service::ports(self.services.values())
                     .into_iter()
-                    .map(|backend| backend.app().to_owned()),
+                    .map(str::to_owned),
             )
             .collect()
     }

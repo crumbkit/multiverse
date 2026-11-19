@@ -62,11 +62,7 @@ fn plan_of(manifest: &Manifest, caller: &CallerEnvironment) -> Built {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller,
-        provisioner: Some(vec![
-            "/bin/mxv".to_owned(),
-            "phase".to_owned(),
-            "provision".to_owned(),
-        ]),
+        own_command: Some(vec!["/bin/mxv".to_owned(), "phase".to_owned()]),
         urls: ProxyUrls::default(),
     })
     .unwrap()
@@ -479,7 +475,7 @@ fn a_merged_manifest_maps_onto_apps_and_ports_whose_names_do_not_clash() {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
-        provisioner: None,
+        own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
     })
     .unwrap();
@@ -543,7 +539,7 @@ fn a_process_whose_directory_is_outside_every_root_is_unrunnable() {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
-        provisioner: None,
+        own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
     }) else {
         panic!("a directory outside every root built a plan");
@@ -580,7 +576,7 @@ fn placed_at(cwd: &str) -> Result<(Source, Option<PathBuf>), crate::phase_plan::
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
-        provisioner: None,
+        own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
     })?;
     let plan = built.plan.app(&app("api")).unwrap();
@@ -648,7 +644,7 @@ fn a_process_with_permissions_gives_its_app_its_writes_listen_ports_and_connecti
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
-        provisioner: None,
+        own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
     })
     .unwrap();
@@ -682,7 +678,7 @@ fn the_plan_of_an_existing_manifest_and_so_its_digest_are_unchanged() {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
-        provisioner: None,
+        own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
     })
     .unwrap();
@@ -717,7 +713,7 @@ fn the_requested_permissions_of_host_units_need_no_ports_and_match_the_plan() {
             workspace_dir: None,
             grace: Duration::from_secs(5),
             caller: &caller,
-            provisioner: None,
+            own_command: None,
             urls: crate::phase_plan::ProxyUrls::default(),
         },
         &units,
@@ -790,7 +786,7 @@ fn a_merged_manifest_gives_each_checkouts_permissions_its_prefixed_port_and_unit
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
-        provisioner: None,
+        own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
     })
     .unwrap();
@@ -849,7 +845,7 @@ fn unrunnable_write(write: &str) -> crate::phase_plan::Unrunnable {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &caller,
-        provisioner: None,
+        own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
     }) else {
         panic!("the write path {write} built a plan");
@@ -916,7 +912,7 @@ fn task_plan_with(dir: &Path, own_ports: &BTreeMap<String, String>) -> Built {
             workspace_dir: None,
             grace: Duration::from_secs(5),
             caller: &caller,
-            provisioner: None,
+            own_command: None,
             urls: crate::phase_plan::ProxyUrls::default(),
         },
         &TaskEntry {
@@ -1043,7 +1039,7 @@ fn routed_plan(urls: ProxyUrls, text: &str) -> Built {
         workspace_dir: None,
         grace: Duration::from_secs(5),
         caller: &CallerEnvironment::default(),
-        provisioner: None,
+        own_command: None,
         urls,
     })
     .unwrap()
@@ -1167,7 +1163,7 @@ fn a_task_receives_the_domain_and_each_route_but_no_host_or_url_of_its_own() {
             workspace_dir: None,
             grace: Duration::from_secs(5),
             caller: &CallerEnvironment::default(),
-            provisioner: None,
+            own_command: None,
             urls: urls_of("triage", 443, &[]),
         },
         &TaskEntry {

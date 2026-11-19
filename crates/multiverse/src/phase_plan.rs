@@ -263,11 +263,12 @@ pub(crate) struct Inputs<'a> {
     pub(crate) grace: Duration,
     /// The caller's environment.
     pub(crate) caller: &'a CallerEnvironment,
-    /// The command that provisions the services, such as the mxv program
-    /// and `phase provision`, to which the plan adds the resources as one
-    /// JSON argument, or `None` when it is unknown. A manifest with
+    /// The command that starts mxv's own apps, such as the mxv program and
+    /// `phase`, or `None` when it is unknown. `mxv-provision` adds
+    /// `provision` and the resources as one JSON argument, and
+    /// `mxv-services` adds `services` and its listeners. A manifest with
     /// services cannot run without it.
-    pub(crate) provisioner: Option<Vec<String>>,
+    pub(crate) own_command: Option<Vec<String>>,
     /// The names that the proxy serves for the workspace's routes, which
     /// give each host process and task its URL variables.
     pub(crate) urls: ProxyUrls,
@@ -275,12 +276,8 @@ pub(crate) struct Inputs<'a> {
 
 /// Returns the command that a manifest's check builds its plan with, which
 /// stands in for the mxv program that `up` names.
-pub(crate) fn checking_provisioner() -> Vec<String> {
-    vec![
-        "/mxv".to_owned(),
-        "phase".to_owned(),
-        "provision".to_owned(),
-    ]
+pub(crate) fn checking_own_command() -> Vec<String> {
+    vec!["/mxv".to_owned(), "phase".to_owned()]
 }
 
 /// Returns the directories that a process of `workspace`'s merged manifest

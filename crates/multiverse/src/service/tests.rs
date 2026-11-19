@@ -131,11 +131,16 @@ fn a_process_receives_the_common_variables_each_endpoint_it_needs_and_each_servi
 }
 
 #[test]
-fn dynamodb_runs_on_dynamodb_local_and_the_other_kinds_share_localstack() {
-    assert_eq!(ServiceKind::Dynamodb.backend(), Backend::Dynamodb);
+fn dynamodb_runs_in_mxv_services_on_its_own_port_and_the_other_kinds_share_localstack() {
+    assert_eq!(ServiceKind::Dynamodb.backend(), Backend::Services);
+    assert_eq!(Backend::Services.app(), "mxv-services");
+    assert!(!Backend::Services.is_container());
+    assert_eq!(ServiceKind::Dynamodb.port(), "mxv-dynamodb");
     for kind in [ServiceKind::S3, ServiceKind::Sqs, ServiceKind::Kms] {
         assert_eq!(kind.backend(), Backend::Aws);
+        assert_eq!(kind.port(), "mxv-aws");
     }
+    assert!(Backend::Aws.is_container());
     let services = [
         Service::new(ServiceKind::Kms),
         Service::new(ServiceKind::Dynamodb),

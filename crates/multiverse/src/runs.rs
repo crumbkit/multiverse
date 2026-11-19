@@ -500,9 +500,9 @@ pub struct Runs {
     /// The environment that mxv's `main` read, which phase's keepers and
     /// host processes receive part of.
     caller: CallerEnvironment,
-    /// The command that provisions a workspace's services, or `None`
-    /// until [`Runs::with_provisioner`] names it.
-    provisioner: Option<Vec<String>>,
+    /// The command that starts mxv's own apps, `mxv-provision` and
+    /// `mxv-services`, or `None` until [`Runs::with_own_command`] names it.
+    own_command: Option<Vec<String>>,
     /// The directory of the workspace records and the proxy's HTTPS address,
     /// from which plans name the proxy's routes, or `None` until
     /// [`Runs::with_proxy_urls`] names them.
@@ -526,7 +526,7 @@ impl Runs {
             lock_wait: LOCK_WAIT,
             build_wait: phased::BUILD_WAIT,
             caller: CallerEnvironment::default(),
-            provisioner: None,
+            own_command: None,
             proxy_urls: None,
         }
     }
@@ -542,16 +542,18 @@ impl Runs {
     }
 
     /// Returns these run files with `program`, followed by the words of
-    /// `leading`, as the command of the app `mxv-provision`, which creates
-    /// the resources of a workspace's services, such as mxv itself and
-    /// `phase provision`. The command receives the resources as one more
-    /// argument. `up` cannot start a manifest with services until the
-    /// command is named.
+    /// `leading`, as the command that starts mxv's own apps, such as mxv
+    /// itself and `phase`. The app `mxv-provision`, which creates the
+    /// resources of a workspace's services, adds `provision` and the
+    /// resources as one argument. The app `mxv-services`, which serves the
+    /// services, adds `services` and a `<kind>=<port>` argument for each
+    /// kind it serves. `up` cannot start a manifest with services until
+    /// the command is named.
     #[must_use]
-    pub fn with_provisioner(mut self, program: &Path, leading: &[&str]) -> Self {
+    pub fn with_own_command(mut self, program: &Path, leading: &[&str]) -> Self {
         let mut command = vec![program.to_string_lossy().into_owned()];
         command.extend(leading.iter().map(|word| (*word).to_owned()));
-        self.provisioner = Some(command);
+        self.own_command = Some(command);
         self
     }
 

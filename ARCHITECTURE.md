@@ -4,15 +4,16 @@ multiverse gives each piece of work its own workspace of git checkouts, ports an
 
 ## Crates
 
-The dependency direction is `mxv` to `multiverse` to `phase`. `phase` never depends on the other two.
+The dependency direction is `mxv` to `multiverse` to `phase`. `phase` never depends on the other two. `mxv` also depends on `mxv-services`, which depends on no other crate of the workspace.
 
 | Crate | Package | Owns |
 | --- | --- | --- |
-| `crates/mxv` | `mxv` | The command line, output, environment snapshot, confirmations, deadband admission, `clean`, `reclaim`, and the `mxv phase keep` and `mxv phase provision` entry points. |
+| `crates/mxv` | `mxv` | The command line, output, environment snapshot, confirmations, deadband admission, `clean`, `reclaim`, and the `mxv phase keep`, `mxv phase provision` and `mxv phase services` entry points. |
 | `crates/multiverse` | `multiverse` | Workspace records, git operations, mirrors, manifests, the port ledger, archives, restores, and the translation of a manifest into a phase plan. |
 | `crates/phase` | `mxv-phase`, library name `phase` | Starting and stopping processes and containers, keepers, readiness, run records, logs, the sandbox and the process table. |
+| `crates/services` | `mxv-services`, library name `services` | Serving a workspace's dynamodb services in memory on loopback ports with the embedded Dynoxide, for the host app `mxv-services`. |
 
-`mxv` also uses `crumbkit` for its command conventions and `crumbkit-usage` for its local usage log. `phase` uses `nono` for the sandbox behind its default `sandbox` feature.
+`mxv` also uses `crumbkit` for its command conventions and `crumbkit-usage` for its local usage log. `phase` uses `nono` for the sandbox behind its default `sandbox` feature. `services` uses `dynoxide-rs` and `tokio`.
 
 Three modules have a single job that the rest of `multiverse` goes through. `crates/multiverse/src/git.rs` starts git. `crates/multiverse/src/store.rs` writes durable files. `crates/multiverse/src/ports.rs` opens sockets to allocate ports.
 
