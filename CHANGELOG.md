@@ -5,6 +5,20 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Added
+
+- A manifest declares the credentials its work needs as `[secrets.<name>]`
+  tables with a `check` command and a `sign_in` command line. `mxv preflight`
+  runs each check, which should be the real command that uses the credential,
+  and lists every sign-in that is needed in one message. `mxv new`,
+  `mxv restore` and `mxv up` print that message as one warning once the
+  workspace exists. A check command comes from the repository, so mxv runs it
+  only after a person approved that command line at a terminal through
+  `mxv preflight`, and the warning names each check that was not run. mxv
+  discards each check's output, so no credential value is printed, stored or
+  passed on. A manifest that used `[secrets]` before this release
+  failed with `mxv::manifest::reserved`, and now needs the new form.
+
 ### Changed
 
 - A `dynamodb` service runs in `mxv-services`, a host process that serves

@@ -181,17 +181,15 @@ fn an_unknown_key_of_a_readiness_check_fails_and_names_the_key_and_its_line() {
 }
 
 #[test]
-fn each_reserved_section_fails_with_its_name_and_line() {
-    for section in ["secrets", "actions"] {
-        let (line, problem) = problem(&format!("ports = []\n\n[{section}.db]\nimage = \"x\"\n"));
-        assert_eq!(line, Some(3), "{section}");
-        assert_eq!(
-            problem,
-            ManifestProblem::Reserved {
-                section: section.to_owned()
-            }
-        );
-    }
+fn the_reserved_section_actions_fails_with_its_name_and_line() {
+    let (line, problem) = problem("ports = []\n\n[actions.db]\nimage = \"x\"\n");
+    assert_eq!(line, Some(3));
+    assert_eq!(
+        problem,
+        ManifestProblem::Reserved {
+            section: "actions".to_owned()
+        }
+    );
 }
 
 #[test]
@@ -1659,5 +1657,51 @@ fn a_renamed_manifest_keeps_the_hosts_of_its_units() {
     assert_eq!(
         renamed.processes["app-web"].hosts,
         ["local.app.example.com", "alt.app.example.com"]
+    );
+}
+
+#[test]
+fn a_secret_declares_its_check_command_and_its_sign_in_command() {
+    let manifest = parse(
+        "[secrets.aws]\ncheck = [\"aws\", \"sts\", \"get-caller-identity\"]\nsign_in = \"aws sso login --profile work\"\n",
+    )
+    .unwrap();
+    let secret = &manifest.secrets["aws"];
+    assert_eq!(secret.check.words(), ["aws", "sts", "get-caller-identity"]);
+    assert_eq!(secret.sign_in, "aws sso login --profile work");
+}
+
+#[test]
+fn a_secret_without_a_sign_in_command_fails_at_its_line() {
+    let (line, problem) = problem("[secrets.aws]\ncheck = [\"true\"]\n");
+    assert_eq!(line, Some(1));
+    assert!(
+        matches!(problem, ManifestProblem::Invalid { .. }),
+        "{problem:?}"
+    );
+}
+
+#[test]
+fn a_secret_with_an_empty_check_fails_and_names_the_secret() {
+    let (_, problem) = problem("[secrets.aws]\ncheck = []\nsign_in = \"x\"\n");
+    assert!(
+        matches!(&problem, ManifestProblem::Invalid { message } if message.contains("`aws`")),
+        "{problem:?}"
+    );
+}
+
+#[test]
+fn a_secret_with_an_unknown_key_fails_with_that_key() {
+    let (_, problem) =
+        problem("[secrets.aws]\ncheck = [\"true\"]\nsign_in = \"x\"\nvalue = \"hunter2\"\n");
+    assert!(matches!(problem, ManifestProblem::UnknownKey { key } if key == "value"));
+}
+
+#[test]
+fn a_sign_in_command_with_a_control_character_fails() {
+    let (_, problem) = problem("[secrets.aws]\ncheck = [\"true\"]\nsign_in = \"x\\u001b[2Jy\"\n");
+    assert!(
+        matches!(&problem, ManifestProblem::Invalid { message } if message.contains("control character")),
+        "{problem:?}"
     );
 }

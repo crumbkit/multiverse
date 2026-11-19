@@ -13,6 +13,7 @@ Create, archive and restore task workspaces that span several git repositories
 - [`mxv list`](#mxv-list): List the workspaces
 - [`mxv show`](#mxv-show): Show workspaces by name, in the order given
 - [`mxv cd`](#mxv-cd): Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
+- [`mxv preflight`](#mxv-preflight): Check that each secret the manifest declares works, and list every sign-in that is needed
 - [`mxv up`](#mxv-up): Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready
 - [`mxv down`](#mxv-down): Stop a workspace's units with SIGTERM, then SIGKILL after 10 seconds
 - [`mxv restart`](#mxv-restart): Build a workspace's units through deadband, then stop them and start them again
@@ -245,6 +246,26 @@ mxv cd reading-list
 ```
 
 Effects: read-only, closed-world.
+
+## `mxv preflight`
+
+Check that each secret the manifest declares works, and list every sign-in that is needed.
+
+A manifest declares a secret as `[secrets.<name>]` with a `check` command and a `sign_in` command line. Preflight runs each check, which should be the real command that uses the credential, such as `aws sts get-caller-identity --profile work` or an `op read` of one item, because a status command such as `op whoami` can succeed while a read fails. It discards each check's output, so no value of a credential is printed, stored or passed on, and it stops a check that runs longer than 20 seconds. The result names every secret whose check did not work, each with its `sign_in` command line, in one message. A check is a command that the repository declares, so mxv runs it only after a person approved that command line: at a terminal `mxv preflight` lists the unapproved commands and asks, and an approval covers every workspace of the same repositories that declares the same command. `mxv new`, `mxv restore` and `mxv up` run only approved checks and print the same message as one warning, and it also names each check that was not run for want of approval.
+
+### Arguments
+
+- `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
+
+### Examples
+
+Run the check of each secret that the manifest of the workspace reading-list declares, and list every sign-in that is needed.
+
+```sh
+mxv preflight -w reading-list
+```
+
+Effects: additive, idempotent, open-world.
 
 ## `mxv up`
 

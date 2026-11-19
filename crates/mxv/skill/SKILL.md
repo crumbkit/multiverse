@@ -9,9 +9,9 @@ An mxv workspace gives a task its own clone of each repository, on a new branch
 from the freshly fetched origin, and its own host ports. Work in one workspace
 cannot change the source repository or another workspace.
 
-Create a workspace when a task changes code in one or more repositories, or
-when it runs an app that another session may also be running. A task that only
-reads a repository can use the existing checkout.
+Create a workspace when a task changes code, or runs an app that another
+session may also be running. A task that only reads a repository can use the
+existing checkout.
 
 Create one with `mxv new NAME --repo PATH`, repeating `--repo` for each
 repository. Each repository becomes a folder inside the workspace directory.
@@ -28,6 +28,13 @@ workspace that holds the current directory. Pass `-w NAME` from anywhere else.
 | Run a job that finishes, such as tests | `mxv run TASK` | mxv runs a task from `[tasks.<name>]` in `mxv.toml` or a mise task of a checkout, and exits with its exit code. A repository with mise tasks needs no `mxv.toml`. `mxv run` with no task lists the tasks. |
 | Run an ad hoc command, such as one test or a script | `mxv exec -- COMMAND` | mxv runs the command on the host with the workspace's ports and every service's variables, in the current directory when that is inside a checkout. It needs no running unit and no `mxv.toml`, and it starts no services, so run `mxv up` first when the command talks to them. `mxv exec --repo FOLDER -- COMMAND` runs it at the top of that checkout. |
 | Run one command inside a running unit | `mxv exec UNIT -- COMMAND` | The command gets a host process's directory, variables and sandbox, or runs inside the container. The unit must already be running. |
+
+## Check sign-ins before work starts
+
+A manifest's `[secrets.<name>]` tables give a `check` command and a `sign_in`
+command line. `mxv new`, `mxv restore` and `mxv up` warn once with every
+sign-in that is needed. Pass that list on at once, then run
+`mxv preflight` after they sign in. Only a person approves checks, at a terminal.
 
 ## Resume a workspace and read its state
 
@@ -47,21 +54,19 @@ workspace that holds the current directory. Pass `-w NAME` from anywhere else.
   checkout's commit, and `mxv restore NAME` rebuilds it at those commits.
   `mxv list --archived` lists the archives.
 - `mxv remove NAME` removes a workspace's clones, with the branch that each
-  clone holds, its directory and its record. It refuses while a checkout holds unpushed or
-  uncommitted work, so push that work first.
+  clone holds, its directory and its record. It refuses while a checkout holds unpushed or uncommitted work.
 
 ## Complete mxv's commands in a shell
 
-`mxv completion install` writes the shell completion for mxv's commands where
-your shell loads it, with `--shell bash|zsh|fish` when `SHELL` does not name it.
+`mxv completion install` writes the completion where your shell loads it, with
+`--shell bash|zsh|fish` when `SHELL` does not name it.
 
 ## Run heavy jobs through deadband
 
 `mxv up`, `mxv restart`, `mxv run` and `mxv exec -- COMMAND` ask deadband for a
-place themselves, so never wrap them in `deadband run`. When mxv runs inside
-`deadband run`, its builds lose deadband's thread limits and can use every
-core. `mxv exec --no-gate -- COMMAND`
-asks deadband nothing, for a light or interactive command.
+place themselves, so never wrap them in `deadband run`; inside it, builds lose
+deadband's thread limits. `mxv exec --no-gate -- COMMAND` asks deadband
+nothing, for a light or interactive command.
 `mxv exec UNIT -- COMMAND` does not ask deadband, so run a heavy command with
 `mxv exec -- COMMAND` instead. On a machine that runs deadband, start every
 other heavy job with `deadband run --label <label> -- <command>`.

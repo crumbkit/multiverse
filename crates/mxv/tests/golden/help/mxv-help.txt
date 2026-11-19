@@ -8,6 +8,7 @@ Work in a workspace
   list        List the workspaces
   show        Show workspaces by name, in the order given
   cd          Print the directory of a workspace or of one of its checkouts, so `cd "$(mxv cd NAME)"` resumes it
+  preflight   Check that each secret the manifest declares works, and list every sign-in that is needed
 
 Run a workspace's app
   up          Build a workspace's units through deadband, then start them from its mxv.toml, in dependency order, and wait until each is ready

@@ -314,7 +314,7 @@ pub(crate) fn new(
     // command such as `mxv remove` cannot delete the checkouts while they
     // are made. A name that a workspace already holds is reported before
     // the lock, so it does not wait for another command that holds it.
-    let _lock = if mode == Mode::Change {
+    let lock = if mode == Mode::Change {
         if let Some(found) = workspaces.find(&name).map_err(MxvFailure::from)? {
             return Err(taken(&name, &found).into());
         }
@@ -341,7 +341,13 @@ pub(crate) fn new(
                 )?
             };
             let from = copied.as_ref().map(|copied| copied.from.as_path());
-            Ok(NewRow::new(&workspace, &root, cloned, from).with_warnings(&warnings))
+            let row = NewRow::new(&workspace, &root, cloned, from).with_warnings(&warnings);
+            // The checks may take a while, so the lock is released first.
+            drop(lock);
+            if mode == Mode::Change {
+                crate::preflight::announce(environment, &workspace);
+            }
+            Ok(row)
         }
         NewOutcome::NameTaken(found) => Err(taken(&name, &found).into()),
         NewOutcome::PathTaken(path) => Err(MxvFailure::DirectoryTaken { path }.into()),

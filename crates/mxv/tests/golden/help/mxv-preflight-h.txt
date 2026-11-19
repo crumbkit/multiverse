@@ -1,0 +1,13 @@
+Check that each secret the manifest declares works, and list every sign-in that is needed
+
+Usage: mxv preflight [OPTIONS]
+
+Options:
+  -w, --workspace <WORKSPACE>  The workspace, which defaults to the one that holds the current directory
+  -h, --help                   Print help (see more with '--help')
+
+Examples:
+  mxv preflight -w reading-list
+
+Effects: additive, idempotent, open-world.
+Global flags: --json, --no-input. `mxv preflight --help` describes them.

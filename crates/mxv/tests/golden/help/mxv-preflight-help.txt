@@ -1,0 +1,24 @@
+Check that each secret the manifest declares works, and list every sign-in that is needed.
+
+A manifest declares a secret as `[secrets.<name>]` with a `check` command and a `sign_in` command line. Preflight runs each check, which should be the real command that uses the credential, such as `aws sts get-caller-identity --profile work` or an `op read` of one item, because a status command such as `op whoami` can succeed while a read fails. It discards each check's output, so no value of a credential is printed, stored or passed on, and it stops a check that runs longer than 20 seconds. The result names every secret whose check did not work, each with its `sign_in` command line, in one message. A check is a command that the repository declares, so mxv runs it only after a person approved that command line: at a terminal `mxv preflight` lists the unapproved commands and asks, and an approval covers every workspace of the same repositories that declares the same command. `mxv new`, `mxv restore` and `mxv up` run only approved checks and print the same message as one warning, and it also names each check that was not run for want of approval.
+
+Usage: mxv preflight [OPTIONS]
+
+Options:
+  -w, --workspace <WORKSPACE>
+          The workspace, which defaults to the one that holds the current directory
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv preflight -w reading-list
+          Run the check of each secret that the manifest of the workspace reading-list declares, and list every sign-in that is needed
+
+Effects: additive, idempotent, open-world.

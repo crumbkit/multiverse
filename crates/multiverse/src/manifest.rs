@@ -4,8 +4,10 @@
 //!
 //! The manifest is parsed strictly: a key that the schema does not declare
 //! fails with [`ManifestProblem::UnknownKey`], which names the key and its
-//! line. The top-level sections `secrets` and `actions` are reserved for
-//! later versions and fail with [`ManifestProblem::Reserved`].
+//! line. The top-level section `actions` is reserved for a later version
+//! and fails with [`ManifestProblem::Reserved`]. A `[secrets.<name>]` table
+//! declares a credential with the `check` command that uses it and the
+//! `sign_in` command line that obtains it.
 //!
 //! Processes and containers share one set of names, and either may depend
 //! on the other.
@@ -154,6 +156,10 @@ pub struct Manifest {
     ///
     /// [`Workspace::task_homes`]: crate::Workspace::task_homes
     pub tasks: BTreeMap<TaskName, Task>,
+    /// The credentials the workspace's work needs, by name, each with the
+    /// command that proves it works and the command that signs in when it
+    /// does not. `mxv preflight` runs each check.
+    pub secrets: BTreeMap<String, Secret>,
     /// One sentence for each top-level table that mxv ignores although
     /// its name is close to one of mxv's own, such as `[proceses.web]`,
     /// or is phase's `[process.*]`, with the file and line in front.
@@ -183,6 +189,22 @@ impl fmt::Display for TaskName {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(&self.0)
     }
+}
+
+/// A credential that a workspace's work needs, declared under
+/// `[secrets.<name>]`. The manifest holds no value: it holds the command
+/// that uses the credential and the command that obtains it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Secret {
+    /// A command that uses the credential for real, such as `aws sts
+    /// get-caller-identity` or `op read` of one item. It succeeds when the
+    /// credential works. mxv discards its output, because a read command
+    /// prints the value.
+    pub check: Command,
+    /// The full command line the person runs to sign in, such as
+    /// `aws sso login --profile work`.
+    pub sign_in: String,
 }
 
 /// A command that `mxv run` runs, declared under `[tasks.<name>]`.
@@ -752,10 +774,21 @@ struct RawManifest {
     /// The tasks.
     #[serde(default)]
     tasks: BTreeMap<Spanned<String>, RawTask>,
-    /// Reserved for secrets.
-    secrets: Option<Spanned<IgnoredAny>>,
+    /// The credentials the work needs.
+    #[serde(default)]
+    secrets: BTreeMap<Spanned<String>, RawSecret>,
     /// Reserved for actions.
     actions: Option<Spanned<IgnoredAny>>,
+}
+
+/// One secret as TOML holds it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSecret {
+    /// The command that uses the credential.
+    check: Spanned<Vec<String>>,
+    /// The command line that signs in.
+    sign_in: Spanned<String>,
 }
 
 /// One task as TOML holds it.
@@ -920,8 +953,8 @@ impl Errors<'_> {
 const PHASE_TABLES: &[&str] = &["app", "release", "build", "process", "needs"];
 
 /// Checks that `raw`'s `version` is 1 or greater and no greater than
-/// [`MANIFEST_VERSION`], and that it holds none of the reserved tables
-/// `secrets` and `actions`.
+/// [`MANIFEST_VERSION`], and that it holds none of the reserved table
+/// `actions`.
 fn check_version_and_reserved(errors: &Errors<'_>, raw: &RawManifest) -> Result<(), ManifestError> {
     if let Some(version) = &raw.version {
         match *version.get_ref() {
@@ -940,15 +973,13 @@ fn check_version_and_reserved(errors: &Errors<'_>, raw: &RawManifest) -> Result<
             _ => {}
         }
     }
-    for (section, value) in [("secrets", &raw.secrets), ("actions", &raw.actions)] {
-        if let Some(value) = value {
-            return Err(errors.at(
-                Some(&value.span()),
-                ManifestProblem::Reserved {
-                    section: section.to_owned(),
-                },
-            ));
-        }
+    if let Some(value) = &raw.actions {
+        return Err(errors.at(
+            Some(&value.span()),
+            ManifestProblem::Reserved {
+                section: "actions".to_owned(),
+            },
+        ));
     }
     Ok(())
 }
@@ -1554,6 +1585,7 @@ impl Manifest {
             let (task_name, task) = check_task(&errors, name, raw_task, &services, joined)?;
             tasks.insert(task_name, task);
         }
+        let secrets = check_secrets(&errors, &raw.secrets)?;
         let globs = |raw: &[Spanned<String>],
                      parse: fn(&str) -> Result<PathGlob, BadGlob>,
                      key: &str| {
@@ -1589,6 +1621,7 @@ impl Manifest {
             clone_on_new: globs(&raw.clone_on_new, PathGlob::parse_clone, "clone_on_new")?,
             services,
             tasks,
+            secrets,
             warnings,
         };
         check_cycle(&errors, &raw, &manifest)?;
@@ -1691,6 +1724,7 @@ impl Manifest {
             clone_on_new: self.clone_on_new.clone(),
             services: self.services.clone(),
             tasks: self.tasks.clone(),
+            secrets: self.secrets.clone(),
             warnings: self.warnings.clone(),
         }
     }
@@ -2194,6 +2228,62 @@ fn check_task(
             gate: raw.gate.unwrap_or(true),
         },
     ))
+}
+
+/// Checks each raw secret, and returns them by name.
+fn check_secrets(
+    errors: &Errors<'_>,
+    raw: &BTreeMap<Spanned<String>, RawSecret>,
+) -> Result<BTreeMap<String, Secret>, ManifestError> {
+    let mut secrets = BTreeMap::new();
+    for (name, raw_secret) in raw {
+        secrets.insert(
+            name.get_ref().clone(),
+            check_secret(errors, name, raw_secret)?,
+        );
+    }
+    Ok(secrets)
+}
+
+/// Checks one raw secret, and returns it.
+fn check_secret(
+    errors: &Errors<'_>,
+    name: &Spanned<String>,
+    raw: &RawSecret,
+) -> Result<Secret, ManifestError> {
+    let secret = name.get_ref();
+    if !is_unit_name(secret) {
+        return Err(errors.invalid(
+            &name.span(),
+            format!(
+                "`{secret}` is not a secret name, which holds 1 to 64 letters, digits, '-' and '_'"
+            ),
+        ));
+    }
+    let check = Command::new(raw.check.get_ref().clone()).ok_or_else(|| {
+        errors.invalid(
+            &raw.check.span(),
+            format!("the secret `{secret}` has an empty check, which needs at least the program"),
+        )
+    })?;
+    if raw.sign_in.get_ref().trim().is_empty() {
+        return Err(errors.invalid(
+            &raw.sign_in.span(),
+            format!("the secret `{secret}` has an empty sign_in, which needs the command line to sign in"),
+        ));
+    }
+    // mxv prints the line on a terminal, so a control character such as an
+    // escape could rewrite what a person reads.
+    if raw.sign_in.get_ref().chars().any(char::is_control) {
+        return Err(errors.invalid(
+            &raw.sign_in.span(),
+            format!("the sign_in of the secret `{secret}` holds a control character"),
+        ));
+    }
+    Ok(Secret {
+        check,
+        sign_in: raw.sign_in.get_ref().clone(),
+    })
 }
 
 /// Checks one raw process against the declared `ports` and process
