@@ -457,6 +457,7 @@ Computed afresh on each read:
 - `Identity` (`phase/src/record/process.rs`) is computed when a process is examined.
 - `CleanState` (`mxv/src/clean.rs`), `ReclaimState` and `Verdict` (`mxv/src/reclaim.rs`), and `BranchState`, `StateName` and `DirectoryFate` (`mxv/src/rows.rs`) are report rows.
 - `Leftover` (`multiverse/src/workspaces.rs`) is computed on each `add`.
+- The `id` of the rows of `mxv list`, `mxv show` and `mxv new` (`mxv/src/rows.rs`) is read from the workspace record or the archive, and a read never mints it.
 
 Results of one call:
 

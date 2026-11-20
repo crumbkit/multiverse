@@ -32,6 +32,12 @@ pub(crate) struct WorkspaceRow {
     branch: String,
     /// The workspace's directory, which `mxv cd` prints.
     path: String,
+    /// The workspace's stable id: 32 lowercase hex digits that mxv mints
+    /// when it creates the workspace and never changes. Null for a record
+    /// that an mxv before stable ids wrote and no mxv has written since, for
+    /// a record that mxv cannot read, and for an archive that holds no id.
+    /// Reading a record never mints its id.
+    id: Option<String>,
     /// The top-level directory of each repository that the workspace checks
     /// out.
     repositories: Vec<String>,
@@ -114,6 +120,10 @@ pub(crate) struct PlacedRow {
     /// workspace's record, so it stays where the workspace was created when
     /// the root changes later.
     path: String,
+    /// The workspace's stable id: 32 lowercase hex digits that mxv mints
+    /// when it creates the workspace and never changes. Null for a record
+    /// that an mxv before stable ids wrote and no mxv has written since.
+    id: Option<String>,
     /// The workspace root that the run used, in which `new` creates a
     /// workspace's directory.
     root: String,
@@ -210,7 +220,7 @@ impl Row for PlacedRow {
     const COLUMNS: &'static [&'static str] =
         &["name", "branch", "path", "root", "root_source", "ports"];
     const LONG_COLUMNS: &'static [&'static str] =
-        &["kind", "manifest", "manifest_path", "repositories"];
+        &["id", "kind", "manifest", "manifest_path", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -224,6 +234,7 @@ impl PlacedRow {
             name: row.name,
             branch: row.branch,
             path: row.path,
+            id: row.id,
             root: root.path.display().to_string(),
             root_source: root.source,
             repositories: row.repositories,
@@ -278,7 +289,7 @@ impl Row for WorkspaceRow {
     ];
     const PROBLEM: Option<crumbkit::Problem<Self>> = Some(crumbkit::Problem::field("problem"));
     const LONG_COLUMNS: &'static [&'static str] =
-        &["kind", "manifest", "manifest_path", "repositories"];
+        &["id", "kind", "manifest", "manifest_path", "repositories"];
     // A person copies the name and the repair into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name", "repair"];
 }
@@ -357,6 +368,7 @@ impl From<&Workspace> for WorkspaceRow {
                 |checkout| checkout.branch.clone(),
             ),
             path: workspace.path.display().to_string(),
+            id: workspace.id.as_ref().map(|id| id.as_str().to_owned()),
             repositories: workspace
                 .checkouts
                 .iter()
@@ -393,6 +405,7 @@ impl WorkspaceRow {
             name: broken.name.clone(),
             branch: String::new(),
             path: String::new(),
+            id: None,
             repositories: Vec::new(),
             kind: None,
             manifest: None,
@@ -544,6 +557,7 @@ impl Row for ShowRow {
         "warnings",
     ];
     const LONG_COLUMNS: &'static [&'static str] = &[
+        "id",
         "kind",
         "manifest",
         "manifest_path",
@@ -641,7 +655,7 @@ impl Row for NewRow {
         "manifest_from",
         "warnings",
     ];
-    const LONG_COLUMNS: &'static [&'static str] = &["kind", "manifest_path", "repositories"];
+    const LONG_COLUMNS: &'static [&'static str] = &["id", "kind", "manifest_path", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }

@@ -633,6 +633,106 @@ fn list_reports_a_corrupt_record_and_still_lists_the_other_workspaces() {
     assert_eq!(listed["data"][1]["repair"], "");
 }
 
+/// Returns the JSON record of the workspace `name` in the state directory.
+fn record(setup: &Setup, name: &str) -> Value {
+    let path = setup
+        .root()
+        .join(format!("state/mxv/workspaces/{name}.json"));
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+#[test]
+fn list_json_prints_the_stable_id_that_the_workspace_record_holds() {
+    let setup = Setup::new();
+    created(&setup, "reading-list");
+    let id = record(&setup, "reading-list")["id"].clone();
+    assert!(id.is_string(), "the record holds no id: {id}");
+    let (exit, listed) = setup.json(&["list", "--full"]);
+    assert_eq!(exit, 0, "{listed}");
+    assert_eq!(listed["data"][0]["id"], id, "{listed}");
+}
+
+#[test]
+fn list_json_fields_name_and_id_prints_the_id() {
+    let setup = Setup::new();
+    created(&setup, "reading-list");
+    let id = record(&setup, "reading-list")["id"].clone();
+    let (exit, listed) = setup.json(&["list", "--fields", "name,id"]);
+    assert_eq!(exit, 0, "{listed}");
+    assert_eq!(
+        listed["data"][0],
+        serde_json::json!({"name": "reading-list", "id": id}),
+        "{listed}"
+    );
+}
+
+#[test]
+fn show_json_prints_the_same_id_as_list() {
+    let setup = Setup::new();
+    created(&setup, "reading-list");
+    let (exit, listed) = setup.json(&["list", "--full"]);
+    assert_eq!(exit, 0, "{listed}");
+    let (exit, shown) = setup.json(&["show", "reading-list", "--full"]);
+    assert_eq!(exit, 0, "{shown}");
+    assert!(shown["data"][0]["id"].is_string(), "{shown}");
+    assert_eq!(shown["data"][0]["id"], listed["data"][0]["id"]);
+}
+
+#[test]
+fn new_json_prints_the_id_that_it_wrote_in_the_record() {
+    let setup = Setup::new();
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", "app", "--full"]);
+    assert_eq!(exit, 0, "{document}");
+    let id = record(&setup, "reading-list")["id"].clone();
+    assert!(id.is_string(), "the record holds no id: {id}");
+    assert_eq!(document["data"]["id"], id, "{document}");
+}
+
+#[test]
+fn a_record_without_an_id_lists_with_a_null_id_and_list_leaves_the_record_unchanged() {
+    let setup = Setup::new();
+    created(&setup, "reading-list");
+    let path = setup.root().join("state/mxv/workspaces/reading-list.json");
+    let mut legacy = record(&setup, "reading-list");
+    legacy.as_object_mut().unwrap().remove("id");
+    write_text(&path, &serde_json::to_string_pretty(&legacy).unwrap());
+    let before = fs::read(&path).unwrap();
+    let (exit, listed) = setup.json(&["list", "--full"]);
+    assert_eq!(exit, 0, "{listed}");
+    assert_eq!(listed["data"][0]["name"], "reading-list", "{listed}");
+    assert_eq!(listed["data"][0]["id"], Value::Null, "{listed}");
+    assert_eq!(fs::read(&path).unwrap(), before, "list rewrote the record");
+}
+
+#[test]
+fn an_unreadable_record_lists_with_a_null_id() {
+    let setup = Setup::new();
+    created(&setup, "reading-list");
+    write_text(
+        &setup.root().join("state/mxv/workspaces/broken.json"),
+        "not json",
+    );
+    let (exit, listed) = setup.json(&["list", "--full"]);
+    assert_eq!(exit, 1, "{listed}");
+    assert_eq!(listed["data"][0]["name"], "broken", "{listed}");
+    let row = listed["data"][0].as_object().unwrap();
+    assert_eq!(row.get("id"), Some(&Value::Null), "{listed}");
+}
+
+#[test]
+fn the_default_list_table_has_no_id_column() {
+    let setup = Setup::new();
+    created(&setup, "reading-list");
+    let header = |args: &[&str]| -> Vec<String> {
+        let (exit, text) = setup.text(args);
+        assert_eq!(exit, 0, "{text}");
+        let first = text.lines().next().unwrap_or_default().to_owned();
+        first.split_whitespace().map(str::to_owned).collect()
+    };
+    assert!(!header(&["list"]).contains(&"ID".to_owned()));
+    assert!(header(&["list", "--long"]).contains(&"ID".to_owned()));
+}
+
 #[test]
 fn a_workspace_whose_checkouts_are_all_gone_names_remove_which_removes_it() {
     let setup = Setup::new();

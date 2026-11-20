@@ -94,6 +94,7 @@ mxv new triage --repo app --repo web --dry-run
 
 ### Columns that `--long` adds
 
+- `id`: The workspace's stable id: 32 lowercase hex digits that mxv mints when it creates the workspace and never changes. Null for a record that an mxv before stable ids wrote and no mxv has written since.
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
 - `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
@@ -139,6 +140,7 @@ mxv add -w triage --repo web --dry-run
 
 ### Columns that `--long` adds
 
+- `id`: The workspace's stable id: 32 lowercase hex digits that mxv mints when it creates the workspace and never changes. Null for a record that an mxv before stable ids wrote and no mxv has written since.
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
 - `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
 - `repositories`: The top-level directory of each repository that the workspace checks out.
@@ -181,6 +183,7 @@ mxv list
 
 ### Columns that `--long` adds
 
+- `id`: The workspace's stable id: 32 lowercase hex digits that mxv mints when it creates the workspace and never changes. Null for a record that an mxv before stable ids wrote and no mxv has written since, for a record that mxv cannot read, and for an archive that holds no id. Reading a record never mints its id.
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones. Null in a row whose record mxv cannot read.
 - `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, `merged` for the files of a workspace with several checkouts, or `none` for a bare workspace. Null in a row whose record mxv cannot read.
 - `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
@@ -218,6 +221,7 @@ mxv show reading-list
 
 ### Columns that `--long` adds
 
+- `id`: The workspace's stable id: 32 lowercase hex digits that mxv mints when it creates the workspace and never changes. Null for a record that an mxv before stable ids wrote and no mxv has written since.
 - `kind`: How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
 - `manifest`: Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, `merged` for the files of a workspace with several checkouts, or `none` for a bare workspace.
 - `manifest_path`: The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.
