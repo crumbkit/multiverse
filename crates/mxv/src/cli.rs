@@ -624,11 +624,18 @@ pub(crate) struct NewArgs {
     pub(crate) repos: Repos,
 
     /// Clone no ignored directory, such as node_modules/
-    #[arg(long)]
+    #[arg(
+        long,
+        long_help = "Clone none of the repositories' ignored directories, such as node_modules/, into the new checkouts"
+    )]
     pub(crate) no_clone: bool,
 
     /// Copy FILE in as the workspace manifest
-    #[arg(long, value_name = "FILE")]
+    #[arg(
+        long,
+        value_name = "FILE",
+        long_help = "Copy FILE into the new workspace as its workspace manifest, <ROOT>/<NAME>/mxv.toml, in place of a template"
+    )]
     pub(crate) manifest: Option<PathBuf>,
 
     /// Update board mount BOARD:PATH when swept

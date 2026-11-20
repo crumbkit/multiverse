@@ -75,7 +75,6 @@ impl PullRequests for GitHub {
 
 /// Whether a workspace's change has merged.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
 pub enum Verdict {
     /// Every checkout that holds commits of its own is merged.
     Merged,

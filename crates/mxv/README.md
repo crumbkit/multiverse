@@ -2077,6 +2077,40 @@ out of time to check it, and a later `mxv sweep` decides it. A decision that
 has started runs to the end, which the fetch's deadline of 120 seconds for
 each checkout and the 30-second deadline of `gh` bound.
 
+The sweep decides each workspace before it archives it, and the archive does
+not decide again under the workspace's lock. Each row reports what the archive
+did:
+
+- A change made in the workspace between the decision and the archive goes
+  into the archive's work-in-progress commits. The row's `uncommitted` lists
+  the checkouts that hold such work, the sweep prints a warning, and `mxv
+  restore NAME` puts the work back uncommitted.
+- The row's `warnings` lists what the archive could not read or finish, and
+  the sweep prints each one.
+- A workspace that another run archived first has the state
+  `already_archived`, and the sweep counts no freed space for it.
+- An archive that fails while the workspace's directory exists keeps the
+  workspace, and the row's reason names the failure.
+- An archive that fails after it deleted the workspace's directory counts as
+  archived. The sweep still updates the board mounts, and the row's reason
+  names the failure. `mxv archive -w NAME` finishes the archive.
+
+A kill or a failed write leaves these states, and each has a recovery:
+
+- When mxv is killed before an archive starts, the workspace stays live, and
+  the next sweep decides it again.
+- When mxv is killed during an archive, the archive's own recovery applies:
+  `mxv archive -w NAME` carries it on, and `mxv repair NAME` abandons it, as
+  the repair table above says.
+- When mxv is killed between the archive and the board mount update, the
+  archive stands and the mount keeps its old commit. Run `board -C BOARD
+  mount update PATH` by hand.
+- When `mxv new` is killed after it creates the workspace and before it
+  records the board mounts, or when that write fails, the workspace exists
+  with no board mounts. `mxv new` reports a failed write. A later sweep
+  archives the workspace without updating a mount, so run `board -C BOARD
+  mount update PATH` by hand after the change merges.
+
 ## Disk space
 
 Build output, such as Rust's `target/` and Node's `node_modules/`, takes

@@ -61,8 +61,8 @@ New holds the workspace's lock from before it writes the record until it has cop
 - `<NAME>`: The workspace's name, which also names its directory and its branch. Required.
 - `--repo <PATH>`: A git repository, or a directory in it, to check out; repeat it or use commas. Required. Takes more than one value.
 - `--as <FOLDER>`: The folder of the --repo before it, which defaults to the repository's name. Takes more than one value.
-- `--no-clone`: Clone no ignored directory, such as node\_modules/
-- `--manifest <FILE>`: Copy FILE in as the workspace manifest
+- `--no-clone`: Clone none of the repositories' ignored directories, such as node\_modules/, into the new checkouts
+- `--manifest <FILE>`: Copy FILE into the new workspace as its workspace manifest, \<ROOT\>/\<NAME\>/mxv.toml, in place of a template
 - `--board-mount <MOUNT>`: Update board mount BOARD:PATH when swept. Takes more than one value.
 - `--no-sweep`: Skip the sweep of merged workspaces
 - `--dry-run`: Report what the command would change, and change nothing
@@ -714,12 +714,14 @@ mxv sweep --dry-run
 ### Columns
 
 - `name`: The workspace's name.
-- `state`: `archived` when the run archived the workspace, `would_archive` on a dry run, or `kept`.
-- `freed`: The bytes that the workspace's directory took before the archive deleted it, or take on a dry run, and 0 for a workspace that the run kept. The archive keeps the ignored files of its checkouts in a tar outside the directory, so the disk frees a little less.
-- `reason`: Why the run kept the workspace, or null.
+- `state`: `archived` when the run archived the workspace, `would_archive` on a dry run, `already_archived` when an earlier run had archived it, or `kept`.
+- `freed`: The bytes that the workspace's directory took before the archive deleted it, or take on a dry run, and 0 for a workspace that the run kept or that an earlier run had archived. The archive keeps the ignored files of its checkouts in a tar outside the directory, so the disk frees a little less.
+- `reason`: Why the run kept the workspace, or what failed after the archive deleted the workspace's directory, or null.
 
 ### Columns that `--long` adds
 
+- `uncommitted`: The folder of each checkout whose uncommitted work the archive kept as work-in-progress commits. `mxv restore` puts the work back uncommitted.
+- `warnings`: What the archive could not read or finish, one sentence for each.
 - `board_mounts`: Each board mount whose update the run ran, such as `/repos/multiverse in /Users/you/board`.
 - `mount_failures`: Each board mount update that failed, with the command that runs it again.
 

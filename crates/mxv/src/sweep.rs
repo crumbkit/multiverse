@@ -41,6 +41,9 @@ pub(crate) enum SweepState {
     Archived,
     /// A dry run would archive the workspace.
     WouldArchive,
+    /// An earlier run had archived the workspace already, so this run
+    /// changed nothing and freed nothing.
+    AlreadyArchived,
     /// The run keeps the workspace, for the reason that the row gives.
     Kept,
 }
@@ -53,18 +56,29 @@ pub(crate) struct SweepRow {
     #[row(column, uncut)]
     pub(crate) name: String,
     /// `archived` when the run archived the workspace, `would_archive` on
-    /// a dry run, or `kept`.
+    /// a dry run, `already_archived` when an earlier run had archived it,
+    /// or `kept`.
     #[row(column)]
     pub(crate) state: SweepState,
     /// The bytes that the workspace's directory took before the archive
     /// deleted it, or take on a dry run, and 0 for a workspace that the run
-    /// kept. The archive keeps the ignored files of its checkouts in a tar
-    /// outside the directory, so the disk frees a little less.
+    /// kept or that an earlier run had archived. The archive keeps the
+    /// ignored files of its checkouts in a tar outside the directory, so
+    /// the disk frees a little less.
     #[row(column)]
     pub(crate) freed: Size,
-    /// Why the run kept the workspace, or null.
+    /// Why the run kept the workspace, or what failed after the archive
+    /// deleted the workspace's directory, or null.
     #[row(column)]
     pub(crate) reason: Option<String>,
+    /// The folder of each checkout whose uncommitted work the archive kept
+    /// as work-in-progress commits. `mxv restore` puts the work back
+    /// uncommitted.
+    #[row(long)]
+    pub(crate) uncommitted: Vec<String>,
+    /// What the archive could not read or finish, one sentence for each.
+    #[row(long)]
+    pub(crate) warnings: Vec<String>,
     /// Each board mount whose update the run ran, such as
     /// `/repos/multiverse in /Users/you/board`.
     #[row(long)]
@@ -76,16 +90,44 @@ pub(crate) struct SweepRow {
 }
 
 impl SweepRow {
-    /// Returns the row of a workspace that the run keeps.
-    fn kept(workspace: &Workspace, reason: String) -> Self {
+    /// Returns the row of `workspace` in `state`, whose directory took
+    /// `bytes`, with no reason, warning or board mount.
+    fn new(workspace: &Workspace, state: SweepState, bytes: u64) -> Self {
         Self {
             name: workspace.name.to_string(),
-            state: SweepState::Kept,
-            freed: Size(0),
-            reason: Some(reason),
+            state,
+            freed: Size(bytes),
+            reason: None,
+            uncommitted: Vec::new(),
+            warnings: Vec::new(),
             board_mounts: Vec::new(),
             mount_failures: Vec::new(),
         }
+    }
+
+    /// Returns the row of a workspace that the run keeps.
+    fn kept(workspace: &Workspace, reason: String) -> Self {
+        Self {
+            reason: Some(reason),
+            ..Self::new(workspace, SweepState::Kept, 0)
+        }
+    }
+
+    /// Runs the update of each board mount of `workspace`, records each
+    /// update in the row, and warns about each update that failed.
+    fn update_board_mounts(&mut self, workspace: &Workspace) {
+        for mount in &workspace.board_mounts {
+            let text = format!("{} in {}", mount.path, mount.board.display());
+            match update_board_mount(mount) {
+                Ok(()) => self.board_mounts.push(text),
+                Err(why) => self.mount_failures.push(format!(
+                    "{text}: {why}; run `board -C {} mount update {}` to retry",
+                    mount.board.display(),
+                    mount.path
+                )),
+            }
+        }
+        crate::warn(&self.mount_failures);
     }
 }
 
@@ -255,13 +297,6 @@ fn archive_merged(
                 rows.push(SweepRow::kept(&workspace, reason));
                 continue;
             }
-            _ => {
-                rows.push(SweepRow::kept(
-                    &workspace,
-                    "its merge verdict is unknown".to_owned(),
-                ));
-                continue;
-            }
         }
         let bytes = workspaces
             .disk_usage(&workspace)
@@ -269,46 +304,14 @@ fn archive_merged(
         if planned {
             freed = freed.saturating_add(bytes);
             archived += 1;
-            rows.push(SweepRow {
-                name: workspace.name.to_string(),
-                state: SweepState::WouldArchive,
-                freed: Size(bytes),
-                reason: None,
-                board_mounts: Vec::new(),
-                mount_failures: Vec::new(),
-            });
+            rows.push(SweepRow::new(&workspace, SweepState::WouldArchive, bytes));
             continue;
         }
-        let args = ArchiveArgs::unattended(workspace.name.as_str());
-        if let Err(error) = archive::archive(output, environment, &args, served) {
-            rows.push(SweepRow::kept(
-                &workspace,
-                format!("the archive refused: {error}"),
-            ));
-            continue;
+        let row = archive_one(output, environment, &workspace, bytes, served);
+        if row.state == SweepState::Archived {
+            freed = freed.saturating_add(bytes);
+            archived += 1;
         }
-        freed = freed.saturating_add(bytes);
-        archived += 1;
-        let mut row = SweepRow {
-            name: workspace.name.to_string(),
-            state: SweepState::Archived,
-            freed: Size(bytes),
-            reason: None,
-            board_mounts: Vec::new(),
-            mount_failures: Vec::new(),
-        };
-        for mount in &workspace.board_mounts {
-            let text = format!("{} in {}", mount.path, mount.board.display());
-            match update_board_mount(mount) {
-                Ok(()) => row.board_mounts.push(text),
-                Err(why) => row.mount_failures.push(format!(
-                    "{text}: {why}; run `board -C {} mount update {}` to retry",
-                    mount.board.display(),
-                    mount.path
-                )),
-            }
-        }
-        crate::warn(&row.mount_failures);
         rows.push(row);
     }
     Ok((
@@ -319,4 +322,59 @@ fn archive_merged(
             planned,
         },
     ))
+}
+
+/// Archives the merged `workspace`, whose directory takes `bytes`, then
+/// updates its board mounts, and returns its row.
+///
+/// An archive that fails while the workspace's directory exists keeps the
+/// workspace. An archive that fails after it deleted the directory still
+/// counts as an archive, because the workspace is gone, so its board
+/// mounts are updated and the row names the failure and the command that
+/// finishes the archive.
+fn archive_one(
+    output: &mut Run,
+    environment: &Environment,
+    workspace: &Workspace,
+    bytes: u64,
+    served: &mut Served,
+) -> SweepRow {
+    let name = workspace.name.as_str();
+    let args = ArchiveArgs::unattended(name);
+    let mut row = match archive::archive(output, environment, &args, served) {
+        Ok(result) => {
+            let result = result.value();
+            if result.already_archived() {
+                return SweepRow::new(workspace, SweepState::AlreadyArchived, 0);
+            }
+            let mut row = SweepRow::new(workspace, SweepState::Archived, bytes);
+            row.uncommitted = result.uncommitted_folders();
+            row.warnings = result.warnings().to_vec();
+            row
+        }
+        Err(error) if workspace.path.exists() => {
+            return SweepRow::kept(workspace, format!("the archive failed: {error}"));
+        }
+        Err(error) => SweepRow {
+            reason: Some(format!(
+                "the archive deleted the directory and then failed: {error}; run `mxv archive -w {name}` to finish it"
+            )),
+            ..SweepRow::new(workspace, SweepState::Archived, bytes)
+        },
+    };
+    let mut notes: Vec<String> = row
+        .warnings
+        .iter()
+        .map(|warning| format!("{name}: {warning}"))
+        .collect();
+    notes.extend(row.reason.clone().map(|reason| format!("{name}: {reason}")));
+    if !row.uncommitted.is_empty() {
+        notes.push(format!(
+            "the archive of {name} kept uncommitted work of {} as work-in-progress commits; `mxv restore {name}` puts it back",
+            row.uncommitted.join(", ")
+        ));
+    }
+    crate::warn(&notes);
+    row.update_board_mounts(workspace);
+    row
 }

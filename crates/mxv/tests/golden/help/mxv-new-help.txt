@@ -20,10 +20,10 @@ Options:
           The folder of the --repo before it, which defaults to the repository's name
 
       --no-clone
-          Clone no ignored directory, such as node_modules/
+          Clone none of the repositories' ignored directories, such as node_modules/, into the new checkouts
 
       --manifest <FILE>
-          Copy FILE in as the workspace manifest
+          Copy FILE into the new workspace as its workspace manifest, <ROOT>/<NAME>/mxv.toml, in place of a template
 
       --board-mount <MOUNT>
           Update board mount BOARD:PATH when swept

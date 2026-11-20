@@ -296,6 +296,10 @@ fn reclaim_skips_a_workspace_while_a_restart_runs_its_build() {
             wait(Duration::from_millis(10));
         }
         if !checkout.join("started").exists() {
+            if restart.is_finished() {
+                let (exit, document) = restart.join().unwrap();
+                panic!("the restart exited {exit} without running its build: {document}");
+            }
             // The release lets a build that starts late end, so the scope
             // can join the restart and report the failure.
             write(&checkout.join("release"), "");

@@ -290,3 +290,71 @@ fn a_board_mount_without_a_path_is_refused() {
     assert_ne!(exit, 0);
     assert!(stderr.contains("BOARD:PATH"), "{stderr}");
 }
+
+/// Sets the mode bits of `path`.
+fn set_mode(path: &Path, mode: u32) {
+    fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+}
+
+#[test]
+fn a_failed_write_of_the_board_mounts_fails_mxv_new_and_leaves_the_workspace_without_mounts() {
+    let setup = Setup::new();
+    setup.fake_board(0);
+    let records = setup.root().join("state/mxv/workspaces");
+    // mxv new reads the ignored files of the source checkout after it has
+    // written the live record and before it records the mounts. This git
+    // makes the record directory read-only at that moment, so only the
+    // write of the mounts fails.
+    let bin = setup.root().join("bin");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test writes a program that stands in for git"
+    )]
+    fs::write(
+        bin.join("git"),
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *--ignored*) chmod 555 {} ;; esac\nfor dir in $(echo {PATH} | tr : ' '); do [ -x \"$dir/git\" ] && exec \"$dir/git\" \"$@\"; done\nexit 127\n",
+            records.display()
+        ),
+    )
+    .unwrap();
+    set_mode(&bin.join("git"), 0o755);
+    let mount = format!("{}:/repos/app", setup.root().join("board").display());
+    let (exit, _, stderr) = setup.text(&[
+        "new",
+        "mounted",
+        "--repo",
+        "app",
+        "--no-sweep",
+        "--board-mount",
+        &mount,
+    ]);
+    set_mode(&records, 0o755);
+    fs::remove_file(bin.join("git")).unwrap();
+    assert_ne!(exit, 0, "{stderr}");
+    let record: Value =
+        serde_json::from_str(&fs::read_to_string(records.join("mounted.json")).unwrap()).unwrap();
+    assert_eq!(record["state"], "live", "{record}");
+    assert!(record.get("board_mounts").is_none(), "{record}");
+    assert_eq!(setup.live(), vec!["mounted".to_owned()]);
+}
+
+#[test]
+fn mxv_new_warns_and_creates_the_workspace_when_the_sweep_itself_fails() {
+    let setup = Setup::new();
+    setup.workspace("merged", true, &[]);
+    let records = setup.root().join("state/mxv/workspaces");
+    // Without read permission the sweep cannot list the records, while
+    // mxv new can still write and read a record by its name.
+    set_mode(&records, 0o333);
+    let (exit, _, stderr) = setup.text(&["new", "fresh", "--repo", "app"]);
+    set_mode(&records, 0o755);
+    assert_eq!(exit, 0, "{stderr}");
+    assert!(
+        stderr.contains("mxv could not sweep merged workspaces"),
+        "{stderr}"
+    );
+    let mut live = setup.live();
+    live.sort();
+    assert_eq!(live, vec!["fresh".to_owned(), "merged".to_owned()]);
+}

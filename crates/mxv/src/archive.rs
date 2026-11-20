@@ -501,6 +501,31 @@ pub(crate) struct ArchiveResult {
     planned: bool,
 }
 
+impl ArchiveResult {
+    /// Returns whether an earlier run had already archived the workspace,
+    /// so this run changed nothing.
+    pub(crate) fn already_archived(&self) -> bool {
+        self.state == LifecycleState::Unchanged
+    }
+
+    /// Returns the folder of each checkout whose uncommitted work the
+    /// archive kept as work-in-progress commits, which restore puts back
+    /// uncommitted.
+    pub(crate) fn uncommitted_folders(&self) -> Vec<String> {
+        self.kept
+            .iter()
+            .filter(|row| row.uncommitted)
+            .map(|row| row.folder.clone())
+            .collect()
+    }
+
+    /// Returns what the run could not read or finish, one sentence for
+    /// each.
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
+}
+
 impl fmt::Display for ArchiveResult {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.state == LifecycleState::Unchanged {
