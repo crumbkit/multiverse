@@ -120,11 +120,6 @@ pub(crate) struct PlacedRow {
     /// workspace's record, so it stays where the workspace was created when
     /// the root changes later.
     path: String,
-    /// The workspace's stable id: 32 lowercase hex digits that mxv mints
-    /// when it creates the workspace and never changes. Null for a record
-    /// that an mxv before stable ids wrote and no mxv has written since, and
-    /// in a dry run of `new`, which mints no id.
-    id: Option<String>,
     /// The workspace root that the run used, in which `new` creates a
     /// workspace's directory.
     root: String,
@@ -221,7 +216,7 @@ impl Row for PlacedRow {
     const COLUMNS: &'static [&'static str] =
         &["name", "branch", "path", "root", "root_source", "ports"];
     const LONG_COLUMNS: &'static [&'static str] =
-        &["id", "kind", "manifest", "manifest_path", "repositories"];
+        &["kind", "manifest", "manifest_path", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -235,7 +230,6 @@ impl PlacedRow {
             name: row.name,
             branch: row.branch,
             path: row.path,
-            id: row.id,
             root: root.path.display().to_string(),
             root_source: root.source,
             repositories: row.repositories,
@@ -293,6 +287,12 @@ impl Row for WorkspaceRow {
         &["id", "kind", "manifest", "manifest_path", "repositories"];
     // A person copies the name and the repair into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name", "repair"];
+}
+
+/// Returns the stable id of `workspace` as text, or `None` when its record
+/// holds none.
+fn stable_id(workspace: &Workspace) -> Option<String> {
+    workspace.id.as_ref().map(|id| id.as_str().to_owned())
 }
 
 /// Returns the text of the problem of `broken`.
@@ -369,7 +369,7 @@ impl From<&Workspace> for WorkspaceRow {
                 |checkout| checkout.branch.clone(),
             ),
             path: workspace.path.display().to_string(),
-            id: workspace.id.as_ref().map(|id| id.as_str().to_owned()),
+            id: stable_id(workspace),
             repositories: workspace
                 .checkouts
                 .iter()
@@ -475,6 +475,10 @@ pub(crate) struct ShowRow {
     /// The workspace and the root.
     #[serde(flatten)]
     placed: PlacedRow,
+    /// The workspace's stable id: 32 lowercase hex digits that mxv mints
+    /// when it creates the workspace and never changes. Null for a record
+    /// that an mxv before stable ids wrote and no mxv has written since.
+    id: Option<String>,
     /// The bytes that the workspace's directory takes on disk, with each
     /// file that has several hard links counted once and no symbolic link
     /// followed.
@@ -584,6 +588,7 @@ impl ShowRow {
     pub(crate) fn new(workspace: &Workspace, root: &Root, usage: &DiskUsage) -> Self {
         Self {
             placed: PlacedRow::new(workspace, root),
+            id: stable_id(workspace),
             size: Size(usage.bytes),
             disposable: Size(usage.disposable_bytes),
             disposable_paths: usage
@@ -622,6 +627,11 @@ pub(crate) struct NewRow {
     /// The workspace and the root.
     #[serde(flatten)]
     placed: PlacedRow,
+    /// The workspace's stable id: 32 lowercase hex digits that mxv mints
+    /// when it creates the workspace and never changes. Null for a record
+    /// that an mxv before stable ids wrote and no mxv has written since, and
+    /// in a dry run of `new`, which mints no id.
+    id: Option<String>,
     /// Each ignored directory of the repository that `new` cloned into the
     /// checkout, or would clone on a dry run, with the checkout's name in
     /// front, such as `app: web/node_modules/`. A clone shares its disk
@@ -713,6 +723,7 @@ impl NewRow {
         }
         Self {
             placed,
+            id: stable_id(workspace),
             cloned: cloned.paths,
             clone_warning: cloned.warning,
             manifest_from: copied.map(|path| path.display().to_string()),

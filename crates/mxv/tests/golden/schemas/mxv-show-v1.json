@@ -651,13 +651,6 @@
           "description": "The workspace's directory, which `mxv cd` prints. It comes from the\nworkspace's record, so it stays where the workspace was created when\nthe root changes later.",
           "type": "string"
         },
-        "id": {
-          "description": "The workspace's stable id: 32 lowercase hex digits that mxv mints\nwhen it creates the workspace and never changes. Null for a record\nthat an mxv before stable ids wrote and no mxv has written since, and\nin a dry run of `new`, which mints no id.",
-          "type": [
-            "string",
-            "null"
-          ]
-        },
         "root": {
           "description": "The workspace root that the run used, in which `new` creates a\nworkspace's directory.",
           "type": "string"
@@ -711,6 +704,13 @@
             "minimum": 0,
             "maximum": 65535
           }
+        },
+        "id": {
+          "description": "The workspace's stable id: 32 lowercase hex digits that mxv mints\nwhen it creates the workspace and never changes. Null for a record\nthat an mxv before stable ids wrote and no mxv has written since.",
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "size": {
           "description": "The bytes that the workspace's directory takes on disk, with each\nfile that has several hard links counted once and no symbolic link\nfollowed.",

@@ -4,8 +4,8 @@ use multiverse::health::{Problem, Repair};
 use multiverse::{ProcessNote, Workspace};
 
 use super::{
-    KindName, NewRow, NoteRow, PlacedRow, ProcessRow, ShowRow, StateName, WorkspaceRow,
-    repair_text, text_of_problem,
+    KindName, NewRow, NoteRow, ProcessRow, ShowRow, StateName, WorkspaceRow, repair_text,
+    text_of_problem,
 };
 
 fn row(notes: &[ProcessNote]) -> ProcessRow {
@@ -86,7 +86,6 @@ fn the_id_is_a_long_column_of_each_workspace_row_type() {
     use crumbkit::Row as _;
     for (row, columns, long) in [
         ("list", WorkspaceRow::COLUMNS, WorkspaceRow::LONG_COLUMNS),
-        ("placed", PlacedRow::COLUMNS, PlacedRow::LONG_COLUMNS),
         ("show", ShowRow::COLUMNS, ShowRow::LONG_COLUMNS),
         ("new", NewRow::COLUMNS, NewRow::LONG_COLUMNS),
     ] {
