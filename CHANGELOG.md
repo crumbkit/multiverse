@@ -5,6 +5,8 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.3.0] - 2026-11-20
+
 ### Added
 
 - A process in `mxv.toml` may name the starmap file that declares its
@@ -76,6 +78,8 @@ workspace may need to act on.
   branch of yours.
 
 ## [0.2.0] - 2026-11-18
+
+Version 0.2.0 was not released as binaries, and 0.3.0 holds its changes.
 
 ### Added
 
