@@ -5,6 +5,8 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.4.0] - 2026-11-20
+
 ### Added
 
 - `mxv list`, `mxv list --archived`, `mxv show`, `mxv new` and `mxv add`
