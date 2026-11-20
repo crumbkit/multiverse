@@ -17,9 +17,30 @@ workspace may need to act on.
   `HEAD` stays, with a row that says why. `mxv new` runs the same sweep first,
   without a question, unless `--no-sweep` is given, and a failed sweep only
   warns. That sweep starts no new decision after 45 seconds and keeps the
-  workspaces it has not reached. `mxv new --board-mount BOARD:PATH` records a board mount that the
-  sweep updates with `board -C BOARD mount update PATH` after it archives the
-  workspace. The workspace record gains an optional `board_mounts` list.
+  workspaces it has not reached. `mxv new --board-mount BOARD:PATH` records
+  a board mount that the sweep updates with `board -C BOARD mount update
+  PATH` after it archives the workspace. The workspace record gains an
+  optional `board_mounts` list. Each row lists the checkouts whose
+  uncommitted work the archive kept as work-in-progress commits, which
+  `mxv restore` puts back, and the archive's warnings.
+
+## [0.3.0] - 2026-11-20
+
+### Added
+
+- A process in `mxv.toml` may name the starmap file that declares its
+  variables with `starmap = "<path>"` in its `[processes.<name>]` table, for
+  tools such as jumpgate that read the manifest. The path is relative to
+  the top of the checkout, whatever the process's `cwd`. An empty path, a
+  path that starts with `/` and a path with a `..` part fail with
+  `mxv::manifest::invalid` and the line. A file that is missing, is a
+  symbolic link, is not a regular file or leaves the checkout through a
+  linked directory fails each command that reads the manifest to act,
+  such as `mxv up`, with the new code `mxv::manifest::starmap_file`, which
+  names the unit, the file and the line. `mxv down` still stops every running
+  unit then, and `mxv status` still lists them and reports the code in
+  `manifest_error_code`. mxv does not read the file. Before this release
+  the key failed with `mxv::manifest::unknown_key`.
 - A manifest declares the credentials its work needs as `[secrets.<name>]`
   tables with a `check` command and a `sign_in` command line. `mxv preflight`
   runs each check, which should be the real command that uses the credential,
@@ -76,6 +97,8 @@ workspace may need to act on.
   branch of yours.
 
 ## [0.2.0] - 2026-11-18
+
+Version 0.2.0 was not released as binaries, and 0.3.0 holds its changes.
 
 ### Added
 

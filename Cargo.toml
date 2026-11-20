@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/multiverse", "crates/mxv", "crates/phase", "crates/services"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 # nono, which applies phase's sandbox, needs Rust 1.95, so the workspace's
 # MSRV is 1.95.

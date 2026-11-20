@@ -352,8 +352,8 @@ fn declare<'a>(
 }
 
 /// Moves the units, ports and warnings of `from` into `into`, with each
-/// process's `cwd` and each write path of its permissions other than
-/// `$STATE` made absolute below `root`.
+/// process's `cwd`, its `starmap` file and each write path of its
+/// permissions other than `$STATE` made absolute below `root`.
 fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
     for (name, mut process) in from.processes {
         process.cwd = if process.cwd == Path::new(".") {
@@ -361,6 +361,7 @@ fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
         } else {
             root.join(&process.cwd)
         };
+        process.starmap = process.starmap.map(|starmap| root.join(starmap));
         if let Some(permissions) = &mut process.permissions {
             permissions.write = permissions
                 .write

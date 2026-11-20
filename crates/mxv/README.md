@@ -362,6 +362,7 @@ cwd = "web"                                  # optional, relative to the reposit
 ports = { PORT = "web", API_PORT = "api" }
 listen = "web"                               # ready when web accepts, within 60 seconds
 depends_on = ["api"]
+starmap = "web/starmap.toml"                 # optional, relative to the repository root
 ```
 
 The schema has these keys, and any other key fails with
@@ -379,6 +380,7 @@ The schema has these keys, and any other key fails with
 | `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
 | `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. An empty `log` pattern fails with `mxv::manifest::invalid` and the line of the key. A table may not set both. |
 | `processes.<name>.depends_on` | Units that start, and are ready, before this one. A cycle fails. |
+| `processes.<name>.starmap` | The starmap file that declares the variables the process reads, for tools that read the manifest, such as jumpgate. The path is relative to the repository root whatever the process's `cwd`, so `cwd = "cli"` with `starmap = "cli/starmap.toml"` names one file. mxv drops a leading `./` and repeated or trailing `/`. An empty value, `.`, a value that starts with `/` and a value with a `..` part fail with `mxv::manifest::invalid` and the value's line. Each command that reads the manifest checks that the file exists, is a regular file, is not a symbolic link and does not reach outside the repository through a linked directory, and a file that fails fails with `mxv::manifest::starmap_file`, whose fields name the unit, the file, the line and what mxv `found`: `missing`, `link`, `not_a_file` or `unreadable`. `down` and `status` still stop and list the running units then, and `status` reports the code in `manifest_error_code`. mxv never reads the file or passes its variables to the process. A process without the key names none, and such tools then read `<cwd>/starmap.toml`. Containers and tasks do not take the key. |
 | `processes.<name>.permissions` | Runs the process under phase's sandbox, with the grants of `write`, `listen` and `connect`. An empty table runs it sandboxed with no grants, and a process without the table runs unsandboxed. [Sandboxed processes](#sandboxed-processes) describes it. |
 | `processes.<name>.permissions.write` | Paths that the process may write: `$STATE`, the process's own state directory, or a path relative to the repository root without `..`, such as `target`. An absolute path, a path with `..`, the root itself, a path inside `.git` in any case, and any other `$` name fail with `mxv::manifest::invalid` and the path's line. |
 | `processes.<name>.permissions.listen` | Ports that the process may listen on. Each is its `listen` port or a port it receives, and a process with a `listen` port must name it here. A port that another process listens on or a container publishes fails with `mxv::manifest::invalid` and its line. |
@@ -1418,7 +1420,11 @@ reports `merged`, with every file it read in `manifest_paths`.
   lie inside the checkout that the process runs in, so that process
   writes `api/target`. A write path that lies in no checkout, or that
   names a whole checkout, such as `api`, fails with
-  `mxv::manifest::invalid` and its line.
+  `mxv::manifest::invalid` and its line. A process's `starmap` file is
+  relative to the workspace directory as well and must lie inside one of
+  the checkouts, such as `api/starmap.toml`, and one that lies in none
+  fails with `mxv::manifest::invalid` and its line. The merged manifest
+  that the library returns holds each `starmap` file as an absolute path.
 - The `listen` ports and `connect` units of a checkout's `permissions`
   follow the new names too, and its write paths stay relative to its own
   checkout.
