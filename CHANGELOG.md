@@ -5,19 +5,22 @@ workspace may need to act on.
 
 ## Unreleased
 
-## [0.3.0] - 2026-11-20
-
 ### Added
 
 - `mxv list`, `mxv list --archived`, `mxv show`, `mxv new` and `mxv add`
-  print each workspace's stable id in the field `id`. `id` is a long column, so it
-  appears with `--long`, `--full` or `--fields`, such as
+  print each workspace's stable id in the field `id`. `id` is a long column,
+  so it appears with `--long`, `--full` or `--fields`, such as
   `mxv list --json --fields name,id,path`. Plain `mxv list` and its table
   are unchanged. `id` is null for a record that an mxv before stable ids
   wrote and no mxv has written since, for a record that mxv cannot read,
   and for an archive that holds no id. Reading a record never mints its id.
   The schemas `mxv/list/v1`, `mxv/show/v1`, `mxv/new/v1` and `mxv/add/v1`
   gain the field.
+
+## [0.3.0] - 2026-11-20
+
+### Added
+
 - A process in `mxv.toml` may name the starmap file that declares its
   variables with `starmap = "<path>"` in its `[processes.<name>]` table, for
   tools such as jumpgate that read the manifest. The path is relative to
@@ -88,7 +91,7 @@ workspace may need to act on.
 
 ## [0.2.0] - 2026-11-18
 
-Version 0.2.0 was not published, and its changes first ship in 0.3.0.
+Version 0.2.0 was not released as binaries, and 0.3.0 holds its changes.
 
 ### Added
 
