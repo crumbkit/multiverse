@@ -41,7 +41,7 @@ Columns:
   warnings     Why a checkout's disposable set holds fewer globs than its `mxv.toml` declares, such as an invalid manifest, or why its paths wait for a confirmation, and each table of the manifest that mxv ignores although its name is close to one of mxv's own, or null.
 
 Columns that --long adds:
-  id                The workspace's stable id: 32 lowercase hex digits that mxv mints when it creates the workspace and never changes. Null for a record that an mxv before stable ids wrote and no mxv has written since.
+  id                The workspace's stable id: 32 lowercase hex digits that mxv mints when it creates the workspace and never changes. Null for a record that an mxv before stable ids wrote and no mxv has written since, and in a dry run of `new`, which mints no id.
   kind              How the workspace's checkouts are made: `clone` for a clone with a `.git` of its own, or `worktree` for a git worktree of the repository, which mxv made before clones.
   manifest          Which manifest the workspace's commands read: `workspace` for the workspace manifest above the checkout, `repository` for the checkout's own `mxv.toml`, `merged` for the files of a workspace with several checkouts, or `none` for a bare workspace.
   manifest_path     The path of the manifest that the workspace's commands read, or null when they read none. For a merged manifest, it is the workspace manifest when it exists, or else the first checkout's `mxv.toml`.

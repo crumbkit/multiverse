@@ -122,7 +122,8 @@ pub(crate) struct PlacedRow {
     path: String,
     /// The workspace's stable id: 32 lowercase hex digits that mxv mints
     /// when it creates the workspace and never changes. Null for a record
-    /// that an mxv before stable ids wrote and no mxv has written since.
+    /// that an mxv before stable ids wrote and no mxv has written since, and
+    /// in a dry run of `new`, which mints no id.
     id: Option<String>,
     /// The workspace root that the run used, in which `new` creates a
     /// workspace's directory.

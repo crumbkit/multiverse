@@ -700,8 +700,25 @@ fn a_record_without_an_id_lists_with_a_null_id_and_list_leaves_the_record_unchan
     let (exit, listed) = setup.json(&["list", "--full"]);
     assert_eq!(exit, 0, "{listed}");
     assert_eq!(listed["data"][0]["name"], "reading-list", "{listed}");
-    assert_eq!(listed["data"][0]["id"], Value::Null, "{listed}");
+    let row = listed["data"][0].as_object().unwrap();
+    assert_eq!(row.get("id"), Some(&Value::Null), "{listed}");
     assert_eq!(fs::read(&path).unwrap(), before, "list rewrote the record");
+}
+
+#[test]
+fn a_dry_run_of_new_prints_a_null_id() {
+    let setup = Setup::new();
+    let (exit, document) = setup.json(&[
+        "new",
+        "reading-list",
+        "--repo",
+        "app",
+        "--dry-run",
+        "--full",
+    ]);
+    assert_eq!(exit, 0, "{document}");
+    let row = document["data"].as_object().unwrap();
+    assert_eq!(row.get("id"), Some(&Value::Null), "{document}");
 }
 
 #[test]

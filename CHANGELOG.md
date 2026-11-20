@@ -15,7 +15,8 @@ workspace may need to act on.
   `mxv list --json --fields name,id,path`. Plain `mxv list` and its table
   are unchanged. `id` is null for a record that an mxv before stable ids
   wrote and no mxv has written since, for a record that mxv cannot read,
-  and for an archive that holds no id. Reading a record never mints its id.
+  for an archive that holds no id, and in a dry run of `mxv new`. Reading a
+  record never mints its id.
   The schemas `mxv/list/v1`, `mxv/show/v1`, `mxv/new/v1` and `mxv/add/v1`
   gain the field.
 - `mxv sweep` archives each workspace whose change has merged, deletes its
