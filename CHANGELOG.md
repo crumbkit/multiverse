@@ -5,6 +5,25 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Added
+
+- `mxv sweep` archives each workspace whose change has merged, deletes its
+  directory, build output and docker volumes, and reports the disk space it
+  freed. A workspace counts as merged when every checkout that holds a commit
+  of its own is merged, either because the branch is contained in its base
+  after a fetch and origin holds the branch under its own name, or because
+  `gh` shows a pull request of that branch merged into its base at its
+  `HEAD`. A workspace with uncommitted changes, a stash or a detached
+  `HEAD` stays, with a row that says why. `mxv new` runs the same sweep first,
+  without a question, unless `--no-sweep` is given, and a failed sweep only
+  warns. That sweep starts no new decision after 45 seconds and keeps the
+  workspaces it has not reached. `mxv new --board-mount BOARD:PATH` records
+  a board mount that the sweep updates with `board -C BOARD mount update
+  PATH` after it archives the workspace. The workspace record gains an
+  optional `board_mounts` list. Each row lists the checkouts whose
+  uncommitted work the archive kept as work-in-progress commits, which
+  `mxv restore` puts back, and the archive's warnings.
+
 ## [0.3.0] - 2026-11-20
 
 ### Added

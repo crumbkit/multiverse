@@ -1,0 +1,48 @@
+Archive the workspaces whose change has merged, delete their build output and docker volumes, and report the disk space that this freed.
+
+A workspace counts as merged when it is live, no checkout has uncommitted changes, a stash or a detached `HEAD`, at least one checkout holds a commit of its own, and each such checkout's branch is merged. A branch is merged when, after `git fetch` of origin, its commits are all in the branch that the checkout started from and origin's branch of the same name holds the checkout's `HEAD`, or when `gh pr list` shows a pull request of that branch, merged into the branch that the checkout started from, whose head is the checkout's `HEAD`, which is how a squash merge appears. A branch that nobody pushed to origin and that only moved along its base, such as after `git pull`, is not merged. When the fetch fails or `gh` is not signed in, mxv keeps the workspace. The archive is the archive of `mxv archive --delete-volumes`: it keeps each checkout's commit for `mxv restore`, stops the workspace's units, deletes its directory, build output and docker volumes, and refuses what `mxv archive` refuses, such as a workspace that a shell or editor works in, which stays and has a row that says why. After each archive, mxv runs `board -C <board> mount update <path>` for each board mount that `mxv new --board-mount` recorded for the workspace, and a failed update prints a warning that names the command to run again. `mxv new` runs the same sweep before it makes a workspace, without a question, unless `--no-sweep` is given. That sweep keeps the workspace whose name `mxv new` was given, and it starts no new decision 45 seconds after it began, so each workspace that it has not reached by then stays for a later `mxv sweep`. A decision that has started runs to the end of its own fetch and `gh` deadlines.
+
+Usage: mxv sweep [OPTIONS]
+
+Options:
+      --dry-run
+          Report what the command would change, and change nothing
+
+      --yes
+          Proceed without asking for confirmation
+
+      --json
+          Print the result as a JSON document. The default prints text.
+
+      --fields <FIELD>
+          Print only these comma-separated fields, in this order. The default prints the compact columns.
+
+      --long
+          Add the long columns after the compact ones. The default prints only the compact columns.
+
+      --full
+          With --json, print every field of every row. The default prints only the fields of the columns.
+
+      --no-input
+          Fail instead of asking a question
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  mxv sweep --dry-run
+          Print which merged workspaces sweeping would archive and the space that this frees
+
+Columns:
+  name    The workspace's name.
+  state   `archived` when the run archived the workspace, `would_archive` on a dry run, `already_archived` when an earlier run had archived it, or `kept`.
+  freed   The bytes that the workspace's directory took before the archive deleted it, or take on a dry run, and 0 for a workspace that the run kept or that an earlier run had archived. The archive keeps the ignored files of its checkouts in a tar outside the directory, so the disk frees a little less.
+  reason  Why the run kept the workspace, or what failed after the archive deleted the workspace's directory, or null.
+
+Columns that --long adds:
+  uncommitted     The folder of each checkout whose uncommitted work the archive kept as work-in-progress commits. `mxv restore` puts the work back uncommitted.
+  warnings        What the archive could not read or finish, one sentence for each.
+  board_mounts    Each board mount whose update the run ran, such as `/repos/multiverse in /Users/you/board`.
+  mount_failures  Each board mount update that failed, with the command that runs it again.
+
+Effects: destructive, idempotent, closed-world.

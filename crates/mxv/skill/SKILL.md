@@ -27,7 +27,7 @@ workspace that holds the current directory. Pass `-w NAME` from anywhere else.
 | Run the app | `mxv up [UNIT]...` | mxv builds and starts the processes and containers in `mxv.toml`, in dependency order, and returns once each is ready. `mxv restart [UNIT]...` builds them, stops them and starts them again, and `mxv down` stops them. |
 | Run a job that finishes, such as tests | `mxv run TASK` | mxv runs a task from `[tasks.<name>]` in `mxv.toml` or a mise task of a checkout, and exits with its exit code. A repository with mise tasks needs no `mxv.toml`. `mxv run` with no task lists the tasks. |
 | Run an ad hoc command, such as one test or a script | `mxv exec -- COMMAND` | mxv runs the command on the host with the workspace's ports and every service's variables, in the current directory when that is inside a checkout. It needs no running unit and no `mxv.toml`, and it starts no services, so run `mxv up` first when the command talks to them. `mxv exec --repo FOLDER -- COMMAND` runs it at the top of that checkout. |
-| Run one command inside a running unit | `mxv exec UNIT -- COMMAND` | The command gets a host process's directory, variables and sandbox, or runs inside the container. The unit must already be running. |
+| Run one command inside a running unit | `mxv exec UNIT -- COMMAND` | The command gets a host process's directory, variables and sandbox, or runs inside the container. The unit must be running. |
 
 ## Check sign-ins before work starts
 
@@ -52,9 +52,9 @@ sign-in that is needed. Pass that list on at once, then run
 
 - `mxv archive -w NAME` puts a finished workspace away and keeps each
   checkout's commit, and `mxv restore NAME` rebuilds it at those commits.
-  `mxv list --archived` lists the archives.
-- `mxv remove NAME` removes a workspace's clones, with the branch that each
-  clone holds, its directory and its record. It refuses while a checkout holds unpushed or uncommitted work.
+  `mxv list --archived` lists the archives. `mxv sweep` archives workspaces
+  whose change merged.
+- `mxv remove NAME` removes a workspace's clones, branches and record. It refuses while a checkout holds unpushed or uncommitted work.
 
 ## Complete mxv's commands in a shell
 

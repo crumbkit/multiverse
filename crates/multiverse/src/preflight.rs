@@ -252,9 +252,9 @@ impl Preflight {
 
 /// Runs the check of `secret` in `dir` and returns what it showed.
 fn check(secret: &Secret, dir: &Path, timeout: Duration) -> Outcome {
-    match run_command(secret.check.words(), dir, timeout) {
-        Ran::Exited { success: true } => Outcome::Works,
-        Ran::Exited { success: false } => Outcome::Failed,
+    match run_command(secret.check.words(), dir, timeout, false) {
+        Ran::Exited { success: true, .. } => Outcome::Works,
+        Ran::Exited { success: false, .. } => Outcome::Failed,
         Ran::Unstartable => Outcome::Unrunnable,
         Ran::TimedOut => Outcome::TimedOut,
     }

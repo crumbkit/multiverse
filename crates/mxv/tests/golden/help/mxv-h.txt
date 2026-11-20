@@ -6,7 +6,7 @@ Work in a workspace:                 new, add, list, show, cd, preflight
 Run a workspace's app:               up, down, restart, status, logs, exec, run, ports
 Serve a workspace at a stable name:  proxy
 Put a workspace away:                archive, restore, repair, remove
-Free disk space:                     clean
+Free disk space:                     clean, sweep
 Free memory:                         reclaim, pin, unpin
 Explore the commands:                commands, schemas
 Review how mxv is used:              self
