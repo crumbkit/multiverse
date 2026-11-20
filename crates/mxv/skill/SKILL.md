@@ -40,6 +40,7 @@ sign-in that is needed. Pass that list on at once, then run
 
 - `mxv list` names the workspaces, and `cd "$(mxv cd NAME)"` resumes one.
   `mxv cd NAME FOLDER` prints the directory of one checkout.
+- `mxv list --json --fields name,id` lists each id.
 - When `mxv list` shows a row with a `problem`, run the command in its
   `repair` column, such as `mxv repair NAME`; `--dry-run` first shows what
   it would change.
@@ -83,10 +84,9 @@ depends on UNIT; name the dependants too to stop them all.
 
 ## Keep this skill current
 
-mxv embeds this skill, so the installed copy matches the mxv that wrote it.
-`mxv skills install` writes it into each agent skills directory that exists,
-and `mxv skills check` exits with 1 when a copy is missing or differs from
-this mxv's. `mxv skills print` prints it.
+mxv embeds this skill. `mxv skills install` writes it into each agent skills
+directory that exists, and `mxv skills check` exits with 1 when a copy is
+missing or differs from this mxv's. `mxv skills print` prints it.
 
 ## Find everything else in the tool
 

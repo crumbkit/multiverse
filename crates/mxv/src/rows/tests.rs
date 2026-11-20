@@ -1,9 +1,12 @@
 use std::path::PathBuf;
 
-use multiverse::ProcessNote;
 use multiverse::health::{Problem, Repair};
+use multiverse::{ProcessNote, Workspace};
 
-use super::{KindName, NoteRow, ProcessRow, StateName, repair_text, text_of_problem};
+use super::{
+    KindName, NewRow, NoteRow, ProcessRow, ShowRow, StateName, WorkspaceRow, repair_text,
+    text_of_problem,
+};
 
 fn row(notes: &[ProcessNote]) -> ProcessRow {
     ProcessRow {
@@ -52,6 +55,43 @@ fn kept_secrets_print_as_a_warning_and_rewritten_secrets_as_an_info_line() {
 #[test]
 fn a_process_without_notes_prints_no_child_lines() {
     assert!(row(&[]).child_lines().is_empty());
+}
+
+/// Returns a workspace `reading-list` with no checkouts and the id `id`.
+fn workspace(id: Option<&str>) -> Workspace {
+    let mut workspace = Workspace::new(
+        "reading-list".parse().unwrap(),
+        PathBuf::from("/home/agent/mxv/reading-list"),
+        Vec::new(),
+    );
+    workspace.id = id.map(|id| id.parse().unwrap());
+    workspace
+}
+
+#[test]
+fn a_workspace_row_without_an_id_serialises_a_null_id() {
+    let json = serde_json::to_value(WorkspaceRow::from(&workspace(None))).unwrap();
+    assert_eq!(json["id"], serde_json::Value::Null, "{json}");
+}
+
+#[test]
+fn a_workspace_row_serialises_the_id_that_its_record_holds() {
+    let id = "0123456789abcdef0123456789abcdef";
+    let json = serde_json::to_value(WorkspaceRow::from(&workspace(Some(id)))).unwrap();
+    assert_eq!(json["id"], id, "{json}");
+}
+
+#[test]
+fn the_id_is_a_long_column_of_each_workspace_row_type() {
+    use crumbkit::Row as _;
+    for (row, columns, long) in [
+        ("list", WorkspaceRow::COLUMNS, WorkspaceRow::LONG_COLUMNS),
+        ("show", ShowRow::COLUMNS, ShowRow::LONG_COLUMNS),
+        ("new", NewRow::COLUMNS, NewRow::LONG_COLUMNS),
+    ] {
+        assert!(!columns.contains(&"id"), "{row} prints id by default");
+        assert!(long.contains(&"id"), "{row} has no long id column");
+    }
 }
 
 #[test]

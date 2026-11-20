@@ -378,6 +378,47 @@ fn archive_then_restore_brings_back_the_commit_and_the_branch() {
 }
 
 #[test]
+fn an_archived_workspace_lists_with_the_id_it_had_and_restore_lists_the_same_id() {
+    let setup = Setup::new();
+    let (exit, listed) = setup.run(&["list", "--fields", "name,id"]);
+    assert_eq!(exit, 0, "{listed}");
+    let id = listed["data"][0]["id"].clone();
+    assert!(id.is_string(), "{listed}");
+    setup.archive();
+    let (exit, archived) = setup.run(&["list", "--archived", "--fields", "name,id"]);
+    assert_eq!(exit, 0, "{archived}");
+    assert_eq!(archived["data"][0]["name"], "triage", "{archived}");
+    assert_eq!(archived["data"][0]["id"], id, "{archived}");
+    let (exit, restored) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{restored}");
+    let (exit, listed) = setup.run(&["list", "--fields", "name,id"]);
+    assert_eq!(exit, 0, "{listed}");
+    assert_eq!(listed["data"][0]["id"], id, "{listed}");
+}
+
+#[test]
+fn an_archive_without_a_workspace_id_lists_with_a_null_id() {
+    let setup = Setup::new();
+    setup.archive();
+    let path = setup.root().join("state/mxv/archives/triage/archive.json");
+    let mut record: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(
+        record
+            .as_object_mut()
+            .unwrap()
+            .remove("workspace_id")
+            .is_some(),
+        "the archive holds no workspace_id: {record}"
+    );
+    write(&path, &serde_json::to_string_pretty(&record).unwrap());
+    let (exit, archived) = setup.run(&["list", "--archived", "--fields", "name,id"]);
+    assert_eq!(exit, 0, "{archived}");
+    let row = archived["data"][0].as_object().unwrap();
+    assert_eq!(row.get("name"), Some(&Value::from("triage")), "{archived}");
+    assert_eq!(row.get("id"), Some(&Value::Null), "{archived}");
+}
+
+#[test]
 fn archive_restore_and_removal_work_on_a_mirror_when_git_refuses_to_discover_bare_repositories() {
     let setup = Setup::new();
     let config = setup.root().join("explicit.gitconfig");

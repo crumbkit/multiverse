@@ -32,6 +32,12 @@ pub(crate) struct WorkspaceRow {
     branch: String,
     /// The workspace's directory, which `mxv cd` prints.
     path: String,
+    /// The workspace's stable id: 32 lowercase hex digits that mxv mints
+    /// when it creates the workspace and never changes. Null for a record
+    /// that an mxv before stable ids wrote and no mxv has written since, for
+    /// a record that mxv cannot read, and for an archive that holds no id.
+    /// Reading a record never mints its id.
+    id: Option<String>,
     /// The top-level directory of each repository that the workspace checks
     /// out.
     repositories: Vec<String>,
@@ -278,9 +284,15 @@ impl Row for WorkspaceRow {
     ];
     const PROBLEM: Option<crumbkit::Problem<Self>> = Some(crumbkit::Problem::field("problem"));
     const LONG_COLUMNS: &'static [&'static str] =
-        &["kind", "manifest", "manifest_path", "repositories"];
+        &["id", "kind", "manifest", "manifest_path", "repositories"];
     // A person copies the name and the repair into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name", "repair"];
+}
+
+/// Returns the stable id of `workspace` as text, or `None` when its record
+/// holds none.
+fn stable_id(workspace: &Workspace) -> Option<String> {
+    workspace.id.as_ref().map(|id| id.as_str().to_owned())
 }
 
 /// Returns the text of the problem of `broken`.
@@ -357,6 +369,7 @@ impl From<&Workspace> for WorkspaceRow {
                 |checkout| checkout.branch.clone(),
             ),
             path: workspace.path.display().to_string(),
+            id: stable_id(workspace),
             repositories: workspace
                 .checkouts
                 .iter()
@@ -393,6 +406,7 @@ impl WorkspaceRow {
             name: broken.name.clone(),
             branch: String::new(),
             path: String::new(),
+            id: None,
             repositories: Vec::new(),
             kind: None,
             manifest: None,
@@ -461,6 +475,10 @@ pub(crate) struct ShowRow {
     /// The workspace and the root.
     #[serde(flatten)]
     placed: PlacedRow,
+    /// The workspace's stable id: 32 lowercase hex digits that mxv mints
+    /// when it creates the workspace and never changes. Null for a record
+    /// that an mxv before stable ids wrote and no mxv has written since.
+    id: Option<String>,
     /// The bytes that the workspace's directory takes on disk, with each
     /// file that has several hard links counted once and no symbolic link
     /// followed.
@@ -544,6 +562,7 @@ impl Row for ShowRow {
         "warnings",
     ];
     const LONG_COLUMNS: &'static [&'static str] = &[
+        "id",
         "kind",
         "manifest",
         "manifest_path",
@@ -569,6 +588,7 @@ impl ShowRow {
     pub(crate) fn new(workspace: &Workspace, root: &Root, usage: &DiskUsage) -> Self {
         Self {
             placed: PlacedRow::new(workspace, root),
+            id: stable_id(workspace),
             size: Size(usage.bytes),
             disposable: Size(usage.disposable_bytes),
             disposable_paths: usage
@@ -607,6 +627,11 @@ pub(crate) struct NewRow {
     /// The workspace and the root.
     #[serde(flatten)]
     placed: PlacedRow,
+    /// The workspace's stable id: 32 lowercase hex digits that mxv mints
+    /// when it creates the workspace and never changes. Null for a record
+    /// that an mxv before stable ids wrote and no mxv has written since, and
+    /// in a dry run of `new`, which mints no id.
+    id: Option<String>,
     /// Each ignored directory of the repository that `new` cloned into the
     /// checkout, or would clone on a dry run, with the checkout's name in
     /// front, such as `app: web/node_modules/`. A clone shares its disk
@@ -641,7 +666,7 @@ impl Row for NewRow {
         "manifest_from",
         "warnings",
     ];
-    const LONG_COLUMNS: &'static [&'static str] = &["kind", "manifest_path", "repositories"];
+    const LONG_COLUMNS: &'static [&'static str] = &["id", "kind", "manifest_path", "repositories"];
     // A person copies the name into the next command.
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
@@ -698,6 +723,7 @@ impl NewRow {
         }
         Self {
             placed,
+            id: stable_id(workspace),
             cloned: cloned.paths,
             clone_warning: cloned.warning,
             manifest_from: copied.map(|path| path.display().to_string()),

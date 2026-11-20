@@ -91,6 +91,13 @@
             "maximum": 65535
           }
         },
+        "id": {
+          "description": "The workspace's stable id: 32 lowercase hex digits that mxv mints\nwhen it creates the workspace and never changes. Null for a record\nthat an mxv before stable ids wrote and no mxv has written since, and\nin a dry run of `new`, which mints no id.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "cloned": {
           "description": "Each ignored directory of the repository that `new` cloned into the\ncheckout, or would clone on a dry run, with the checkout's name in\nfront, such as `app: web/node_modules/`. A clone shares its disk\nwith the repository's copy until a file in either changes.",
           "type": "array",

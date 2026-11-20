@@ -213,7 +213,8 @@ that version of multiverse cannot read, so it never acts on the first
 checkout alone. A workspace of one checkout keeps version 3. mxv still
 reads the records that earlier versions wrote, version 1 for worktrees and
 version 2 for clones, and gives such a record an id the first time it
-writes it. `mxv new` writes the record before it
+writes it. `mxv list`, `mxv show` and `mxv new` print the id in `id`, which
+is null for a record that holds none. `mxv new` writes the record before it
 makes the checkout, so a run that stops partway leaves a record that
 `mxv remove` cleans up. When the fetch, the clone or the checkout fails,
 `mxv new` deletes the clone, the `AGENTS.md` and the directory that the run

@@ -5,8 +5,20 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.4.0] - 2026-11-20
+
 ### Added
 
+- `mxv list`, `mxv list --archived`, `mxv show`, `mxv new` and `mxv add`
+  print each workspace's stable id in the field `id`. `id` is a long column,
+  so it appears with `--long`, `--full` or `--fields`, such as
+  `mxv list --json --fields name,id,path`. Plain `mxv list` and its table
+  are unchanged. `id` is null for a record that an mxv before stable ids
+  wrote and no mxv has written since, for a record that mxv cannot read,
+  for an archive that holds no id, and in a dry run of `mxv new`. Reading a
+  record never mints its id.
+  The schemas `mxv/list/v1`, `mxv/show/v1`, `mxv/new/v1` and `mxv/add/v1`
+  gain the field.
 - `mxv sweep` archives each workspace whose change has merged, deletes its
   directory, build output and docker volumes, and reports the disk space it
   freed. A workspace counts as merged when every checkout that holds a commit
