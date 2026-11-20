@@ -341,6 +341,13 @@ pub(crate) fn new(
                 )?
             };
             let from = copied.as_ref().map(|copied| copied.from.as_path());
+            let workspace = if mode == Mode::Change && !args.board_mount.is_empty() {
+                workspaces
+                    .record_board_mounts(&workspace, args.board_mount.clone())
+                    .map_err(MxvFailure::from)?
+            } else {
+                workspace
+            };
             let row = NewRow::new(&workspace, &root, cloned, from).with_warnings(&warnings);
             // The checks may take a while, so the lock is released first.
             drop(lock);

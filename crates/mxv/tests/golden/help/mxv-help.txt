@@ -31,6 +31,7 @@ Put a workspace away
 
 Free disk space
   clean       Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
+  sweep       Archive the workspaces whose change has merged, delete their build output and docker volumes, and report the disk space that this freed
 
 Free memory
   reclaim     Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met

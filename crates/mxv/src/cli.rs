@@ -27,6 +27,7 @@ use crate::proxy::{
 use crate::reclaim::{Need, PIN, RECLAIM, UNPIN, parse_idle, parse_need};
 use crate::repair::{REPAIR, RepairArgs};
 use crate::run::RUN;
+use crate::sweep::SWEEP;
 use crate::units::parse_age;
 use crate::verbs::{ADD, CD, LIST, NEW, REMOVE, SHOW};
 
@@ -58,7 +59,7 @@ const HELP: Help = Help::new()
     .root_verbs(
         &[
             "new", "add", "list", "show", "cd", "preflight", "up", "down", "restart", "status", "logs",
-            "exec", "run", "archive", "restore", "repair", "remove", "clean", "reclaim", "pin",
+            "exec", "run", "archive", "restore", "repair", "remove", "clean", "sweep", "reclaim", "pin",
             "unpin",
         ],
         "Workspaces are mxv's everyday resource, and people type these verbs many times a day.",
@@ -79,7 +80,7 @@ const HELP: Help = Help::new()
                 "Put a workspace away",
                 &["archive", "restore", "repair", "remove"],
             ),
-            Goal::new("Free disk space", &["clean"]),
+            Goal::new("Free disk space", &["clean", "sweep"]),
             Goal::new("Free memory", &["reclaim", "pin", "unpin"]),
             Goal::new("Explore the commands", &["commands", "schemas"]),
             Goal::new("Review how mxv is used", &["self"]),
@@ -267,6 +268,13 @@ const HELP: Help = Help::new()
             )])
             .effects(Effects::destructive().idempotent().per_item())
             .document(CLEAN),
+        Leaf::new(&["sweep"])
+            .examples(&[Example::new(
+                &["--dry-run"],
+                "Print which merged workspaces sweeping would archive and the space that this frees",
+            )])
+            .effects(Effects::destructive().idempotent())
+            .document(SWEEP),
         Leaf::new(&["reclaim"])
             .examples(&[Example::new(
                 &["--need", "memory=2GiB", "--dry-run"],
@@ -446,6 +454,10 @@ pub(crate) enum Verb {
     ///
     /// A workspace is idle when none of its units run, no other process, such as a cargo build, a shell or an editor, has its working directory inside the workspace, and no file or directory of its checkout outside the disposable directories, and no commit or staged change, changed within the idle age. The disposable directories are the ignored directories named target, node_modules, dist, build and .cache, and the paths that the `disposable` globs of the checkout's mxv.toml and of the config file match while git reports them as ignored. A directory that holds a .git entry at any depth is kept. The command deletes nothing else: no tracked file, no git data and no other ignored file. It takes each workspace's lock and checks again that the workspace is idle just before it deletes anything. A workspace that mxv cannot find, measure or clean fails alone, the others are still cleaned, and the command exits with 1. Nothing runs in the background, so a cron job or a hook runs `mxv clean --over-limit --yes` to keep the disk under the config file's `max_disposable`.
     Clean(CleanArgs),
+    /// Archive the workspaces whose change has merged, delete their build output and docker volumes, and report the disk space that this freed.
+    ///
+    /// A workspace counts as merged when it is live, no checkout has uncommitted changes, a stash or a detached `HEAD`, at least one checkout holds a commit of its own, and each such checkout's branch is merged. A branch is merged when, after `git fetch` of origin, its commits are all in the branch that the checkout started from and origin's branch of the same name holds the checkout's `HEAD`, or when `gh pr list` shows a pull request of that branch, merged into the branch that the checkout started from, whose head is the checkout's `HEAD`, which is how a squash merge appears. A branch that nobody pushed to origin and that only moved along its base, such as after `git pull`, is not merged. When the fetch fails or `gh` is not signed in, mxv keeps the workspace. The archive is the archive of `mxv archive --delete-volumes`: it keeps each checkout's commit for `mxv restore`, stops the workspace's units, deletes its directory, build output and docker volumes, and refuses what `mxv archive` refuses, such as a workspace that a shell or editor works in, which stays and has a row that says why. After each archive, mxv runs `board -C <board> mount update <path>` for each board mount that `mxv new --board-mount` recorded for the workspace, and a failed update prints a warning that names the command to run again. `mxv new` runs the same sweep before it makes a workspace, without a question, unless `--no-sweep` is given. That sweep keeps the workspace whose name `mxv new` was given, and it starts no new decision 45 seconds after it began, so each workspace that it has not reached by then stays for a later `mxv sweep`. A decision that has started runs to the end of its own fetch and `gh` deadlines.
+    Sweep(SweepArgs),
     /// Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met.
     ///
     /// With --need memory=SIZE, a running workspace is idle when it is not pinned, no process outside phase has its working directory inside the workspace's directory, and neither a file, commit or staged change of its checkouts nor an mxv command that named it changed within the idle age. `mxv exec` and `mxv logs --follow` name the workspace again every few minutes while they run. mxv stops the idle workspaces that were active least recently, one by one, until the resident memory of their processes, measured before the stop, covers the need, or until none is left. On Linux the memory of their containers counts too; on macOS mxv reports it separately and leaves it out, because Docker Desktop's virtual machine keeps the memory that stopped containers free for a while. Each stop is the stop of `mxv down`, which mxv makes while it holds the workspace's lock, after it checks again that the workspace is still idle. mxv marks each stopped workspace, `mxv status` reports the mark, and `mxv up` without names starts the same units again. mxv measures idle time on the wall clock, so time that the machine spends asleep counts as idle, and after the clock moves back a workspace whose recorded times lie ahead of it counts as in use until the clock passes them. With --need disk=SIZE, mxv deletes the disposable directories of idle workspaces as `mxv clean --over-limit` does, oldest first, until it frees the need, and keeps each path that only a repository's own mxv.toml declares disposable. Nothing runs in the background, so a load manager runs the command when the machine runs short.
@@ -611,17 +623,47 @@ pub(crate) struct NewArgs {
     #[command(flatten)]
     pub(crate) repos: Repos,
 
-    /// Clone none of the repositories' ignored directories, such as node_modules/, into the new checkouts
-    #[arg(long)]
+    /// Clone no ignored directory, such as node_modules/
+    #[arg(
+        long,
+        long_help = "Clone none of the repositories' ignored directories, such as node_modules/, into the new checkouts"
+    )]
     pub(crate) no_clone: bool,
 
-    /// Copy FILE into the new workspace as its workspace manifest, <ROOT>/<NAME>/mxv.toml, in place of a template
-    #[arg(long, value_name = "FILE")]
+    /// Copy FILE in as the workspace manifest
+    #[arg(
+        long,
+        value_name = "FILE",
+        long_help = "Copy FILE into the new workspace as its workspace manifest, <ROOT>/<NAME>/mxv.toml, in place of a template"
+    )]
     pub(crate) manifest: Option<PathBuf>,
+
+    /// Update board mount BOARD:PATH when swept
+    #[arg(long, value_name = "MOUNT", value_parser = board_mount, action = clap::ArgAction::Append, value_delimiter = ',')]
+    pub(crate) board_mount: Vec<multiverse::BoardMount>,
+
+    /// Skip the sweep of merged workspaces
+    #[arg(long)]
+    pub(crate) no_sweep: bool,
 
     /// Print the workspace that the command would create, and create nothing.
     #[command(flatten)]
     pub(crate) dry_run: DryRun,
+}
+
+/// Reads one `--board-mount` as the board's directory, a colon and the
+/// mount's path in the board.
+fn board_mount(text: &str) -> Result<multiverse::BoardMount, String> {
+    let (board, path) = text
+        .rsplit_once(':')
+        .ok_or("expected BOARD:PATH, such as /home/you/board:/repos/app")?;
+    if !std::path::Path::new(board).is_absolute() || !path.starts_with('/') {
+        return Err("BOARD must be an absolute directory and PATH must start with /".to_owned());
+    }
+    Ok(multiverse::BoardMount::new(
+        std::path::PathBuf::from(board),
+        path.to_owned(),
+    ))
 }
 
 /// The arguments of `mxv add`.
@@ -734,7 +776,7 @@ impl clap::Args for Repos {
                     .action(clap::ArgAction::Append)
                     .value_delimiter(',')
                     .required(true)
-                    .help("A git repository to check out, or a directory inside it; repeat it or use commas for several"),
+                    .help("A git repository, or a directory in it, to check out; repeat it or use commas"),
             )
             .arg(
                 clap::Arg::new("as")
@@ -743,7 +785,7 @@ impl clap::Args for Repos {
                     .action(clap::ArgAction::Append)
                     .value_delimiter(',')
                     .requires("repo")
-                    .help("The folder of the checkout of the --repo right before it, which defaults to the repository's name"),
+                    .help("The folder of the --repo before it, which defaults to the repository's name"),
             )
     }
 
@@ -808,6 +850,18 @@ pub(crate) struct ListArgs {
     /// List the archived workspaces instead
     #[arg(long, conflicts_with = "sizes")]
     pub(crate) archived: bool,
+}
+
+/// The arguments of `mxv sweep`.
+#[derive(Debug, Args)]
+pub(crate) struct SweepArgs {
+    /// Print the workspaces that the command would archive, and archive nothing.
+    #[command(flatten)]
+    pub(crate) dry_run: DryRun,
+
+    /// Archive the merged workspaces without asking.
+    #[command(flatten)]
+    pub(crate) yes: Yes,
 }
 
 /// The arguments of `mxv clean`.

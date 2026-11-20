@@ -89,6 +89,34 @@ pub(crate) struct ArchiveArgs {
     /// Archive the workspace without asking.
     #[command(flatten)]
     pub(crate) yes: Yes,
+
+    /// Whether `mxv sweep` archives the workspace, which asks nothing
+    /// because the sweep itself proved the change merged.
+    #[arg(skip)]
+    pub(crate) unattended: bool,
+}
+
+impl ArchiveArgs {
+    /// Returns the arguments with which `mxv sweep` archives the workspace
+    /// `name` without a question, deleting its docker volumes.
+    pub(crate) fn unattended(name: &str) -> Self {
+        Self {
+            workspace: Some(name.to_owned()),
+            force: false,
+            delete_volumes: true,
+            dry_run: DryRun::default(),
+            yes: Yes::default(),
+            unattended: true,
+        }
+    }
+
+    /// Asks `question`, unless the sweep archives without asking.
+    fn confirm(&self, output: &mut Run, question: &str) -> Result<(), crumbkit::Error> {
+        if self.unattended {
+            return Ok(());
+        }
+        output.confirm(self.yes, question)
+    }
 }
 
 /// The arguments of `mxv restore`.
@@ -471,6 +499,31 @@ pub(crate) struct ArchiveResult {
     /// Whether the result reports a dry run, which changed nothing.
     #[serde(skip)]
     planned: bool,
+}
+
+impl ArchiveResult {
+    /// Returns whether an earlier run had already archived the workspace,
+    /// so this run changed nothing.
+    pub(crate) fn already_archived(&self) -> bool {
+        self.state == LifecycleState::Unchanged
+    }
+
+    /// Returns the folder of each checkout whose uncommitted work the
+    /// archive kept as work-in-progress commits, which restore puts back
+    /// uncommitted.
+    pub(crate) fn uncommitted_folders(&self) -> Vec<String> {
+        self.kept
+            .iter()
+            .filter(|row| row.uncommitted)
+            .map(|row| row.folder.clone())
+            .collect()
+    }
+
+    /// Returns what the run could not read or finish, one sentence for
+    /// each.
+    pub(crate) fn warnings(&self) -> &[String] {
+        &self.warnings
+    }
 }
 
 impl fmt::Display for ArchiveResult {
@@ -1207,7 +1260,7 @@ pub(crate) fn archive(
         refuse_outsider(&workspace)?;
     }
     let cd = cd_target(environment, &workspace.path);
-    let passed_yes = args.yes != Yes::default();
+    let passed_yes = args.yes != Yes::default() || args.unattended;
     if !args.force && !plan.removal.manifest.is_empty() && passed_yes {
         return Err(manifest_disposable(&name, &plan).into());
     }
@@ -1216,7 +1269,7 @@ pub(crate) fn archive(
     } else {
         Vec::new()
     };
-    output.confirm(args.yes, &question(&plan, &running, &volumes))?;
+    args.confirm(output, &question(&plan, &running, &volumes))?;
     let uncommitted = plan.uncommitted.clone();
     let mut warnings = plan.warnings.clone();
     // Under the lock, the library plans again and archives only what the
@@ -1287,7 +1340,7 @@ fn finish_stopped(
 ) -> Result<Prose<ArchiveResult>, crumbkit::Error> {
     let volumes = stale_volumes(environment, archive, args.delete_volumes)?;
     if !volumes.is_empty() {
-        output.confirm(args.yes, &finish_question(&archive.name, &volumes))?;
+        args.confirm(output, &finish_question(&archive.name, &volumes))?;
     }
     match lifecycle
         .finish(archive, &VolumesAsked::new(volumes))

@@ -28,6 +28,11 @@ use crate::test_ports::PortBlock;
 /// The longest that a test waits for a child mxv to reach a step.
 const MOST_WAIT: Duration = Duration::from_secs(30);
 
+/// A deadband socket that no daemon listens on, so a build that `mxv up`
+/// or `mxv restart` runs starts at once and never waits for a place on the
+/// machine that runs the tests.
+const MISSING_SOCKET: &str = "/nonexistent/deadband.sock";
+
 /// The manifest of each workspace: one process that sleeps.
 const SLEEPER: &str = "[processes.sleeper]\nargv = [\"sh\", \"-c\", \"exec sleep 600\"]\n";
 
@@ -141,7 +146,8 @@ impl Setup {
             .env("HOME", &root)
             .env("XDG_CONFIG_HOME", root.join("config"))
             .env("XDG_STATE_HOME", root.join("state"))
-            .env("MXV_ROOT", root.join("workspaces"));
+            .env("MXV_ROOT", root.join("workspaces"))
+            .env("DEADBAND_SOCKET", MISSING_SOCKET);
         command
     }
 
@@ -282,10 +288,23 @@ fn reclaim_skips_a_workspace_while_a_restart_runs_its_build() {
     );
     std::thread::scope(|scope| {
         let restart = scope.spawn(|| setup.json(&["restart", "-w", "building"]));
-        while !checkout.join("started").exists() && !restart.is_finished() {
-            std::thread::yield_now();
+        let begun = Instant::now();
+        while !checkout.join("started").exists()
+            && !restart.is_finished()
+            && begun.elapsed() < MOST_WAIT
+        {
+            wait(Duration::from_millis(10));
         }
-        assert!(checkout.join("started").exists());
+        if !checkout.join("started").exists() {
+            if restart.is_finished() {
+                let (exit, document) = restart.join().unwrap();
+                panic!("the restart exited {exit} without running its build: {document}");
+            }
+            // The release lets a build that starts late end, so the scope
+            // can join the restart and report the failure.
+            write(&checkout.join("release"), "");
+            panic!("the restart ran no build within {MOST_WAIT:?}");
+        }
 
         let (exit, document) = setup.json(&["reclaim", "--need", "memory=1K"]);
 

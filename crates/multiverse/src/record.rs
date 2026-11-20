@@ -282,6 +282,31 @@ pub struct Workspace {
     /// or `None`. A record without the mark leaves the key out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reclaimed: Option<Reclaimed>,
+    /// The board mounts that `mxv new --board-mount` registered for the
+    /// workspace, which `mxv sweep` advances once the workspace's change
+    /// has merged. A record without mounts leaves the key out, and an older
+    /// mxv that rewrites the record drops the key.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub board_mounts: Vec<BoardMount>,
+}
+
+/// A mount of a board that follows the repository whose workspace this
+/// is, such as the mount `/repos/multiverse` of the board in `~/Code/board`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct BoardMount {
+    /// The directory of the board that holds the mount.
+    pub board: PathBuf,
+    /// The mount's path in the board, such as `/repos/multiverse`.
+    pub path: String,
+}
+
+impl BoardMount {
+    /// Returns the mount at `path` of the board in `board`.
+    #[must_use]
+    pub const fn new(board: PathBuf, path: String) -> Self {
+        Self { board, path }
+    }
 }
 
 /// A workspace record as the store reads it, whose state an older mxv may
@@ -314,6 +339,9 @@ struct StoredWorkspace {
     /// [`Workspace::reclaimed`].
     #[serde(default)]
     reclaimed: Option<Reclaimed>,
+    /// [`Workspace::board_mounts`].
+    #[serde(default)]
+    board_mounts: Vec<BoardMount>,
 }
 
 /// The checkout of a workspace record that is not made the way the
@@ -392,6 +420,7 @@ impl TryFrom<StoredWorkspace> for Workspace {
             ports: stored.ports,
             pinned: stored.pinned,
             reclaimed: stored.reclaimed,
+            board_mounts: stored.board_mounts,
         })
     }
 }
@@ -452,6 +481,7 @@ impl Workspace {
             ports: BTreeMap::new(),
             pinned: false,
             reclaimed: None,
+            board_mounts: Vec::new(),
         }
     }
 

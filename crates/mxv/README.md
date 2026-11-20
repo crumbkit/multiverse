@@ -2033,6 +2033,91 @@ A restore refuses, and builds nothing, with these codes:
 | `mxv::restore::mirror_missing` | A clone's mirror is gone or has lost its pins, and the result lists what only the mirror held. `mxv restore NAME --from-origin` fetches origin and restores only what origin holds, and `mxv remove --archived NAME` deletes the archive. |
 | `mxv::restore::stopped_holds_other_files` | A restore of the name stopped after it made the workspace's directory, and the directory holds entries that the restore's mark does not account for. mxv deleted nothing and kept the mark. `mxv repair NAME` and `mxv remove --archived NAME` fail with the same code. Move or delete the listed entries and run the command again. |
 
+## Archiving merged workspaces
+
+`mxv sweep` archives each workspace whose change has merged and reports the
+disk space that this freed. The archive is the one that `mxv archive
+--delete-volumes` makes, so `mxv restore NAME` can rebuild the workspace from
+the commits it kept. A sweep that is not a dry run asks before it archives,
+unless `--yes` is given. `mxv sweep --dry-run` lists what it would archive.
+
+A workspace counts as merged when all of these hold:
+
+- It is live, no checkout has uncommitted changes or a stash, and no
+  checkout is on a detached `HEAD`.
+- At least one checkout holds a commit of its own, so a workspace that
+  nobody has worked in is not swept.
+- Each checkout that holds a commit of its own has a merged branch. A branch
+  is merged after `git fetch` of origin when its commits are all in the branch
+  that the checkout started from and origin's branch of the same name holds
+  the checkout's `HEAD`. A branch is also merged when `gh pr list --state
+  merged --base <base>` shows a pull request of that branch, merged into the
+  branch that the checkout started from, whose head is the checkout's `HEAD`,
+  which is how a squash merge appears. A branch that nobody pushed to origin
+  and that only moved along its base, such as after `git pull`, is not
+  merged.
+
+A failed fetch or a `gh` that is not signed in keeps the workspace. Every
+workspace that the sweep keeps has a row with the reason. The sweep refuses what
+`mxv archive` refuses, such as a workspace that a shell or editor works in,
+and a workspace whose manifest `disposable` globs match files, which `mxv
+archive --yes` refuses too. The
+`freed` column is the size of the workspace directory before the archive
+deleted it. The archive keeps the ignored files in a tar outside the directory,
+so the disk frees a little less.
+
+`mxv new --board-mount BOARD:PATH` records that the workspace belongs to the
+board mount PATH in the board at the directory BOARD, and repeating the flag or
+separating the values with commas records several. After the sweep archives
+the workspace it runs `board -C BOARD mount update PATH` for each one. A
+failed update does not undo the archive. It prints a warning that names the
+command to run again, and the row's `mount_failures` lists the mounts.
+
+`mxv new` runs the same sweep first, without a question, so a person who starts
+the next task frees the last one's disk. `mxv new --no-sweep` skips it, and a
+sweep that fails only warns, so it never stops a new workspace. The sweep
+before `mxv new` keeps the workspace whose name `mxv new` was given, so
+`mxv new` refuses a name that a workspace holds, as it does without the
+sweep. That sweep starts no new decision 45 seconds after it began. Each
+workspace that it has not reached by then stays, with the reason that mxv ran
+out of time to check it, and a later `mxv sweep` decides it. A decision that
+has started runs to the end, which the fetch's deadline of 120 seconds for
+each checkout and the 30-second deadline of `gh` bound.
+
+The sweep decides each workspace before it archives it, and the archive does
+not decide again under the workspace's lock. Each row reports what the archive
+did:
+
+- A change made in the workspace between the decision and the archive goes
+  into the archive's work-in-progress commits. The row's `uncommitted` lists
+  the checkouts that hold such work, the sweep prints a warning, and `mxv
+  restore NAME` puts the work back uncommitted.
+- The row's `warnings` lists what the archive could not read or finish, and
+  the sweep prints each one.
+- A workspace that another run archived first has the state
+  `already_archived`, and the sweep counts no freed space for it.
+- An archive that fails while the workspace's directory exists keeps the
+  workspace, and the row's reason names the failure.
+- An archive that fails after it deleted the workspace's directory counts as
+  archived. The sweep still updates the board mounts, and the row's reason
+  names the failure. `mxv archive -w NAME` finishes the archive.
+
+A kill or a failed write leaves these states, and each has a recovery:
+
+- When mxv is killed before an archive starts, the workspace stays live, and
+  the next sweep decides it again.
+- When mxv is killed during an archive, the archive's own recovery applies:
+  `mxv archive -w NAME` carries it on, and `mxv repair NAME` abandons it, as
+  the repair table above says.
+- When mxv is killed between the archive and the board mount update, the
+  archive stands and the mount keeps its old commit. Run `board -C BOARD
+  mount update PATH` by hand.
+- When `mxv new` is killed after it creates the workspace and before it
+  records the board mounts, or when that write fails, the workspace exists
+  with no board mounts. `mxv new` reports a failed write. A later sweep
+  archives the workspace without updating a mount, so run `board -C BOARD
+  mount update PATH` by hand after the change merges.
+
 ## Disk space
 
 Build output, such as Rust's `target/` and Node's `node_modules/`, takes

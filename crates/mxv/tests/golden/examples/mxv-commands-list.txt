@@ -18,9 +18,9 @@ mxv restore      Rebuild an archived workspace at its archived commits
 mxv repair       Repair the broken records of one name that `mxv list` names `mxv repair NAME` for, or with --orphans list what no record names
 mxv remove       Remove a workspace's clones with their branches, its directory and its record
 mxv clean        Delete the disposable directories, such as target/ and node_modules/, of idle workspaces
+mxv sweep        Archive the workspaces whose change has merged, delete their build output and docker volumes, and report the disk space that this freed
 mxv reclaim      Stop idle workspaces to free memory, or delete their build output to free disk, until the need is met
 mxv pin          Keep mxv reclaim from stopping a workspace
 mxv unpin        Let mxv reclaim stop a workspace again while it is idle
 mxv ports        Manage the host ports that a workspace holds
 mxv ports reset  Give a stopped workspace new host ports, each different from the port it held
-mxv proxy        Serve the routes that workspaces declare at stable names

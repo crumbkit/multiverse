@@ -1,0 +1,2 @@
+NAME          STATE  FREED  REASON
+reading-list  kept   0 B    the checkout app has no branch or no commit checked out
