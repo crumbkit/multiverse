@@ -32,23 +32,27 @@
 //!   error and discards the rest. A fetch has [`FETCH_DEADLINE`],
 //!   `worktree add` has [`CHECKOUT_DEADLINE`], and every other command has
 //!   [`LOCAL_DEADLINE`].
-//! - End: the module waits for the child and reads its exit status. A
-//!   child that misses its deadline is killed and reaped, and the
-//!   operation returns [`Error::TimedOut`]. The module stops only the
-//!   direct child and not processes that git started, such as `ssh`
-//!   (PROC-3). A fetch that is stopped can leave git's own lock files,
-//!   which git reports on the next fetch. A checkout that `worktree add`
-//!   leaves half made is reported by git's own error.
+//! - End: crumbkit-process runs the child in mxv's own process group, so a
+//!   Ctrl-C at the terminal reaches git too, and waits for it. A child
+//!   that misses its deadline is killed and reaped, and the operation
+//!   returns [`Error::TimedOut`]. The module stops only the direct child
+//!   and not processes that git started, such as `ssh` (PROC-3). Once git
+//!   has exited, the module reads its pipes for at most one second
+//!   (`crumbkit_process::DRAIN_GRACE`), so a process that git started and
+//!   that keeps a pipe open does not hold mxv. A fetch that is stopped can
+//!   leave git's own lock files, which git reports on the next fetch. A
+//!   checkout that `worktree add` leaves half made is reported by git's
+//!   own error.
 
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Read, Write as _};
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
+use std::process::ExitStatus;
 use std::thread;
 use std::time::Duration;
 
-use wait_timeout::ChildExt as _;
+use crumbkit_process::{Capture, Input, OverLimit, RunError, RunOptions, Scope, Zeroizing};
 
 use crate::backend::{
     Backend, Changes, Concealed, Head, LargeFile, Listed, LocalNames, RefHolder, Repository,
@@ -56,6 +60,7 @@ use crate::backend::{
 };
 use crate::error::Error;
 use crate::mirror::redacted;
+use crate::process::{deadline_in, ran_to_its_end};
 
 mod archive;
 mod concealed;
@@ -422,7 +427,7 @@ fn run_fed<I, S>(
     input: Option<Vec<u8>>,
     operation: &'static str,
     deadline: Duration,
-    kept: u64,
+    kept_bytes: u64,
 ) -> Result<Finished, Error>
 where
     I: IntoIterator<Item = S>,
@@ -437,63 +442,51 @@ where
         // submodule's git directory read only its references and objects.
         command.arg("--work-tree=.");
     }
-    command
-        .args(args)
-        .envs(env.iter().copied())
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    command.args(args).envs(env.iter().copied());
+    // Each stream keeps its first bytes and reads the rest into nothing, so
+    // git never blocks on a full pipe. The input is written on a thread of
+    // crumbkit-process, so a child that fills its output pipe before it
+    // reads all of its input cannot block this one. A child that exits
+    // early makes the write stop, and its exit status reports why.
+    let kept = |most: u64| {
+        Capture::whole(usize::try_from(most).unwrap_or(usize::MAX)).over(OverLimit::Sink)
+    };
+    let options = RunOptions::new()
+        .stdin(input.map_or(Input::Null, |input| Input::Bytes(Zeroizing::new(input))))
+        .stdout(kept(kept_bytes))
+        .stderr(kept(MOST_OUTPUT_BYTES))
+        .scope(Scope::Child)
+        .deadline(deadline_in(deadline));
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/git.rs is the module that starts processes (PROC-1)"
     )]
-    let spawned = command.spawn();
-    #[expect(
-        clippy::disallowed_types,
-        reason = "crates/multiverse/src/git.rs holds the child and owns its deadline and cleanup (PROC-1)"
-    )]
-    let mut child: std::process::Child = spawned.map_err(|source| Error::ProgramMissing {
-        program: GIT,
-        source,
-    })?;
-    // The input is written on a thread of its own, so a child that fills
-    // its output pipe before it reads all of its input cannot block this
-    // one. A child that exits early makes the write fail, and its exit
-    // status reports why.
-    if let Some((mut stream, bytes)) = child.stdin.take().zip(input) {
-        thread::spawn(move || {
-            let _ = stream.write_all(&bytes);
-        });
-    }
-    let stdout = child.stdout.take().map(|stream| drain(stream, kept));
-    let stderr = child
-        .stderr
-        .take()
-        .map(|stream| drain(stream, MOST_OUTPUT_BYTES));
-    let waited = child.wait_timeout(deadline);
-    let status = match waited {
-        Ok(Some(status)) => status,
-        Ok(None) | Err(_) => {
-            // The child is killed and reaped whatever the wait reported, so
-            // no zombie remains. A kill of a child that already exited
-            // fails harmlessly.
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::TimedOut {
-                operation,
-                dir: dir.to_path_buf(),
-                deadline,
+    let ran = crumbkit_process::run(command, &options);
+    let timed_out = || Error::TimedOut {
+        operation,
+        dir: dir.to_path_buf(),
+        deadline,
+    };
+    let finished = match ran {
+        Ok(finished) => finished,
+        Err(RunError::Start(source)) => {
+            return Err(Error::ProgramMissing {
+                program: GIT,
+                source,
             });
         }
+        // crumbkit-process could not wait for git or read its output, and
+        // has killed and reaped it, as a failed wait did before.
+        Err(_) => return Err(timed_out()),
     };
+    let Some(status) = ran_to_its_end(&finished) else {
+        return Err(timed_out());
+    };
+    let (stdout, stderr) = finished.into_output();
     Ok(Finished {
         status,
-        stdout: joined(stdout),
-        stderr: joined(stderr),
+        stdout: String::from_utf8_lossy(stdout.bytes()).into_owned(),
+        stderr: String::from_utf8_lossy(stderr.bytes()).into_owned(),
     })
 }
 

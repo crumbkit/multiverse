@@ -5,6 +5,19 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Fixed
+
+- A git command, a docker command, or the check command of a manifest's
+  secret whose descendant keeps its output open no longer holds mxv until
+  that descendant exits. mxv returns at most about one second after the
+  command itself exits.
+- `mxv run` and its listing of mise tasks read a checkout's tasks when a
+  process that the mise config starts in the background keeps mise's output
+  open. Before, mxv waited 30 seconds and then said that mise did not list
+  the tasks.
+- `mxv up` and `mxv restart` stop a cancelled secret write or readiness
+  probe within a few milliseconds. Before, they took up to 50 ms or 20 ms.
+
 ## [0.4.0] - 2026-11-20
 
 ### Added

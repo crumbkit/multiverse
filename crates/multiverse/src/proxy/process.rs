@@ -2,15 +2,23 @@
 //! program it found, and `caddy trust`, which the person runs through
 //! `mxv proxy trust`. Caddy's server process is phase's, not this module's.
 
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
+use std::process::{Command, ExitStatus};
 use std::time::Duration;
 
-use wait_timeout::ChildExt as _;
+use crumbkit_process::{Capture, OverLimit, RunError, RunOptions, Scope};
 
-/// How long `caddy version` may take.
+use crate::process::{deadline_in, ran_to_its_end};
+
+/// How long `caddy version` and `security verify-cert` may take.
 const VERSION_WAIT: Duration = Duration::from_secs(10);
+
+/// The most bytes of `caddy version`'s standard output that mxv keeps.
+const MOST_VERSION_BYTES: usize = 64 * 1024;
+
+/// The most bytes of `caddy version`'s standard error that mxv keeps, of
+/// which a failure quotes the first line.
+const MOST_MESSAGE_BYTES: usize = 4 * 1024;
 
 /// The oldest Caddy that mxv drives: the first that `caddy trust` can send
 /// to an admin socket and that keeps the JSON mxv renders.
@@ -79,41 +87,39 @@ pub(super) enum Version {
 
 /// Runs `caddy version` and returns the version it prints. A version
 /// prints as `v2.10.0 h1:...`, and the result drops the `v` and the hash.
+///
+/// Caddy stays in mxv's process group and is killed alone when it misses
+/// [`VERSION_WAIT`]. A process that it leaves holding its output holds mxv
+/// for at most [`crumbkit_process::DRAIN_GRACE`] after it exits.
 pub(super) fn version(caddy: &Path) -> Version {
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/proxy/process.rs runs caddy to read its version and owns the deadline (PROC-1)"
     )]
-    let spawned = Command::new(caddy)
-        .arg("version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn();
+    let mut command = Command::new(caddy);
+    command.arg("version");
+    let options = RunOptions::new()
+        .stdout(Capture::whole(MOST_VERSION_BYTES).over(OverLimit::Sink))
+        .stderr(Capture::whole(MOST_MESSAGE_BYTES).over(OverLimit::Sink))
+        .scope(Scope::Child)
+        .deadline(deadline_in(VERSION_WAIT));
     #[expect(
-        clippy::disallowed_types,
-        reason = "crates/multiverse/src/proxy/process.rs holds the child and owns its deadline and cleanup (PROC-1)"
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/proxy/process.rs runs caddy to read its version and owns the deadline (PROC-1)"
     )]
-    let mut child: std::process::Child = match spawned {
-        Ok(child) => child,
-        Err(error) => return Version::Unusable(error.to_string()),
+    let finished = match crumbkit_process::run(command, &options) {
+        Ok(finished) => finished,
+        Err(RunError::Start(error)) => return Version::Unusable(error.to_string()),
+        Err(_) => return Version::Unusable("it did not print a version".to_owned()),
     };
-    let finished = child.wait_timeout(VERSION_WAIT);
-    let ended = matches!(finished, Ok(Some(status)) if status.success());
+    let ended = ran_to_its_end(&finished).is_some_and(|status| status.success());
+    let (stdout, stderr) = finished.into_output();
     if !ended {
-        let _ = child.kill();
-        let _ = child.wait();
-        let mut said = String::new();
-        if let Some(mut stderr) = child.stderr.take() {
-            let _ = stderr.read_to_string(&mut said);
-        }
+        let said = String::from_utf8_lossy(stderr.bytes());
         let said = said.lines().next().unwrap_or("it did not print a version");
         return Version::Unusable(said.trim().to_owned());
     }
-    let mut out = String::new();
-    if let Some(mut stdout) = child.stdout.take() {
-        let _ = stdout.read_to_string(&mut out);
-    }
+    let out = String::from_utf8_lossy(stdout.bytes());
     let Some(word) = out
         .split_whitespace()
         .next()
@@ -157,24 +163,15 @@ pub(super) fn trusted(certificate: &Path) -> Option<bool> {
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/proxy/process.rs asks the system whether it trusts the root (PROC-1)"
     )]
-    let spawned = Command::new("/usr/bin/security")
-        .args(["verify-cert", "-L", "-c"])
-        .arg(certificate)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+    let mut command = Command::new("/usr/bin/security");
+    command.args(["verify-cert", "-L", "-c"]).arg(certificate);
+    let options = RunOptions::new()
+        .scope(Scope::Child)
+        .deadline(deadline_in(VERSION_WAIT));
     #[expect(
-        clippy::disallowed_types,
-        reason = "crates/multiverse/src/proxy/process.rs holds the child and owns its deadline and cleanup (PROC-1)"
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/proxy/process.rs asks the system whether it trusts the root (PROC-1)"
     )]
-    let mut child: std::process::Child = spawned.ok()?;
-    match child.wait_timeout(VERSION_WAIT) {
-        Ok(Some(status)) => Some(status.success()),
-        _ => {
-            let _ = child.kill();
-            let _ = child.wait();
-            None
-        }
-    }
+    let finished = crumbkit_process::run(command, &options).ok()?;
+    ran_to_its_end(&finished).map(|status| status.success())
 }

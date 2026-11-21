@@ -313,6 +313,36 @@ fn a_version_without_a_major_and_minor_is_unusable_and_names_what_was_printed() 
 }
 
 #[test]
+fn a_caddy_whose_background_process_holds_its_output_still_gives_its_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let caddy = dir.path().join("caddy");
+    write(&caddy, "#!/bin/sh\nsleep 20 &\necho 'v2.10.0 h1:x'\n");
+    std::fs::set_permissions(&caddy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let begun = std::time::Instant::now();
+    let version = process::version(&caddy);
+    let took = begun.elapsed();
+    assert!(
+        matches!(&version, process::Version::Found(found) if found.major_minor() == (2, 10)),
+        "{version:?}"
+    );
+    assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+}
+
+#[test]
+fn a_caddy_that_fails_is_unusable_and_names_the_first_line_it_wrote_on_standard_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let caddy = dir.path().join("caddy");
+    write(
+        &caddy,
+        "#!/bin/sh\necho 'broken install' >&2\necho 'second line' >&2\nexit 1\n",
+    );
+    std::fs::set_permissions(&caddy, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(process::version(&caddy), process::Version::Unusable(reason) if reason == "broken install")
+    );
+}
+
+#[test]
 fn a_caddy_with_an_unparseable_version_is_refused_as_missing() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().join("records"));

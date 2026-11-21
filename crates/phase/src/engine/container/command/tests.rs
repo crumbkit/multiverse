@@ -1,8 +1,11 @@
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use super::stream_program;
+use super::{run_failure, run_program, run_program_until, stream_program};
+use crate::cancel::Cancel;
 use crate::clock::now;
+use crate::engine::container::ContainerError;
+use crate::engine::container::compose::ComposeEnv;
 
 /// Runs `script` with `/bin/sh -c` through [`stream_program`], and keeps
 /// each line with whether it came from standard error, until `keep` says
@@ -355,4 +358,87 @@ fn the_message_of_a_failed_command_is_kept_to_the_most_bytes_of_a_docker_message
     );
     assert!(kept.starts_with("Error response from daemon: x"));
     assert!(kept.ends_with("..."));
+}
+
+#[test]
+fn a_docker_command_whose_descendant_keeps_standard_error_open_returns_once_it_exits() {
+    let began = now();
+    let finished = run_program(
+        "/bin/sh".as_ref(),
+        ["-c", "sleep 20 & echo done"],
+        ComposeEnv,
+        "test",
+        Duration::from_secs(30),
+    )
+    .unwrap();
+    let took = began.elapsed();
+    assert!(finished.status.success());
+    assert_eq!(finished.stdout, "done\n");
+    assert!(took < Duration::from_secs(3), "took {took:?}");
+}
+
+#[test]
+fn a_cancelled_docker_command_returns_cancelled_at_once() {
+    let cancel = Cancel::new();
+    let canceller = cancel.clone();
+    let setter = std::thread::spawn(move || {
+        crate::clock::pause(Duration::from_millis(300));
+        canceller.cancel();
+    });
+    let began = now();
+    let ran = run_program_until(
+        "/bin/sh".as_ref(),
+        ["-c", "exec sleep 20"],
+        "test",
+        Duration::from_secs(30),
+        &cancel,
+    );
+    let took = began.elapsed();
+    setter.join().unwrap();
+    assert!(
+        matches!(ran, Err(ContainerError::Cancelled { .. })),
+        "{:?}",
+        ran.err()
+    );
+    assert!(took < Duration::from_millis(300 + 200), "took {took:?}");
+}
+
+#[test]
+fn a_docker_command_past_its_deadline_fails_as_timed_out() {
+    let began = now();
+    let ran = run_program(
+        "/bin/sh".as_ref(),
+        ["-c", "exec sleep 20"],
+        ComposeEnv,
+        "test",
+        Duration::from_secs(1),
+    );
+    let took = began.elapsed();
+    assert!(
+        matches!(&ran, Err(ContainerError::Failed { message, .. }) if message.contains("did not finish within 1 seconds")),
+        "{:?}",
+        ran.as_ref().err()
+    );
+    assert!(took < Duration::from_secs(4), "took {took:?}");
+}
+
+#[test]
+fn a_docker_command_whose_wait_fails_fails_as_timed_out_as_a_missed_deadline_does() {
+    let failed = run_failure(
+        "test",
+        Duration::from_secs(30),
+        crumbkit_process::RunError::Run(std::io::Error::other("the wait failed")),
+    );
+    assert!(
+        matches!(&failed, ContainerError::Failed { message, .. } if message == "docker did not finish within 30 seconds, so mxv stopped it"),
+        "{failed:?}"
+    );
+    assert!(matches!(
+        run_failure(
+            "test",
+            Duration::from_secs(30),
+            crumbkit_process::RunError::Start(std::io::ErrorKind::NotFound.into()),
+        ),
+        ContainerError::Missing { .. }
+    ));
 }

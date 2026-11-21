@@ -40,10 +40,22 @@ serde_json = { version = "1.0.154", default-features = false, features = ["std"]
 # `Row` and `Document` need. Only mxv uses it.
 schemars = { version = "1.2.3", default-features = false, features = ["std", "derive"] }
 
-# wait-timeout gives each git command a deadline (BASE-34): the library
-# waits for the child with a timeout, and kills it when the deadline passes,
-# without polling with a sleep (BASE-11).
+# wait-timeout gives a deadline (BASE-34) to the children that
+# crumbkit-process does not run: the `git log` and `git patch-id` pipeline
+# of crates/multiverse/src/git/detached.rs and phase's `mxv exec` and
+# `mxv run` in crates/phase/src/engine/exec.rs. It waits for the child with a
+# timeout without polling with a sleep (BASE-11).
 wait-timeout = "0.2.1"
+
+# crumbkit-process runs every one-shot child that multiverse and phase start
+# and wait for: it reads each output stream within a byte limit, stops the
+# child at a deadline or on a cancel, reaps it, and stops reading the pipes
+# one second after the reap, so a descendant that holds a pipe open no
+# longer holds mxv. 0.6.1 is the first release in which a run whose child
+# something else reaped never signals its process group. Its `forward`
+# feature stays off, because every run that a terminal's Ctrl-C must reach
+# uses `Scope::Child`.
+crumbkit-process = "0.6.1"
 
 # etcetera finds the XDG base directories of mxv, as crumbkit does. It has
 # no features.

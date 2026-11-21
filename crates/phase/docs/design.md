@@ -403,8 +403,10 @@ connects to both loopback addresses, and the lookup of the process that
 holds a port reads IPv6 sockets as well as IPv4 ones.
 
 A command probe of a host process runs in its own process group, and phase
-kills that group however the command ends. A command probe of a container
-process runs inside its container through `docker exec`. When it times
+kills that group however the command ends. crumbkit-process runs it, and
+wakes on the command's exit, its timeout or phase's cancel without polling,
+so a cancelled probe stops within a few milliseconds. A command probe of
+a container process runs inside its container through `docker exec`. When it times
 out, phase kills only the local `docker` client, and the command inside
 the container may keep running. The container module may wrap the command
 in the image's `timeout` program where the image has one.
@@ -755,12 +757,15 @@ process's old container, so an environment that cannot write a value
 leaves the old container running. The zeroing is best effort: the
 environment, the operating system's pipe buffers and the `docker` program
 may keep copies of their own. phase starts `docker exec` itself, in a
-process group of its own. When the host program set
+process group of its own, through crumbkit-process, which writes the
+framed value from a buffer that it overwrites with zeros when the write
+ends. When the host program set
 `Phase::with_docker_environment`, `docker exec` receives only the `PATH`,
 `HOME` and `DOCKER_*` variables that it passed, and otherwise the host
 program's environment, as phase's other `docker` commands do. The value
 therefore reaches no shell, no environment and no argument list. When the
-deadline passes or the caller cancels, phase kills the group.
+deadline passes or the caller cancels, phase kills the group, and it kills
+what is left of the group however the write ends.
 
 An image that runs with secret files must therefore provide `/bin/sh`,
 `sleep`, `cat`, `wc`, `chown`, `chmod`, `mv` and `rm`, which busybox and

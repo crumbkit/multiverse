@@ -2,23 +2,25 @@
 //! waits for it, with a deadline, and reads what it printed.
 
 use std::ffi::OsStr;
-use std::io::{self, Read as _, Write as _};
-use std::os::unix::process::CommandExt as _;
+use std::io;
+#[cfg(test)]
+use std::io::Write as _;
 use std::process::{Command, ExitStatus, Stdio};
 use std::thread;
 use std::time::Duration;
 
-use rustix::process::{Pid, Signal};
-use wait_timeout::ChildExt as _;
+use crumbkit_process::{
+    Capture, Input, Outcome, OverLimit, RunError, RunOptions, Scope, Status, Zeroizing,
+};
 
 use crate::cancel::Cancel;
-use crate::clock::{now, pause};
+use crate::clock::{deadline_in, now, pause};
 use crate::engine::container::ContainerError as Error;
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::ContainerId;
 use crate::engine::container::objects::DOCKER_ERROR_PREFIXES;
 use crate::engine::container::secrets::SecretBytes;
-use crate::engine::probe::{CommandEnd, ProbeExec, exited, run_bounded};
+use crate::engine::probe::{CommandEnd, ProbeExec, run_bounded};
 use crate::env::AppliedEnvironment;
 
 /// The variables that a docker command receives on top of the host
@@ -86,34 +88,33 @@ impl Drop for FeedPause {
     }
 }
 
-/// Writes `input` to `stdin` and closes it. In a test that holds a
-/// `FeedPause`, it writes one byte at a time with that pause.
-fn feed(mut stdin: std::process::ChildStdin, input: &SecretBytes) {
+/// Returns what a secret write's `docker` reads on its standard input:
+/// `input`'s framed bytes, which crumbkit-process writes from a buffer that
+/// it clears when the run's settings drop. In a test that holds a
+/// `FeedPause`, it is instead the read end of a pipe that a thread writes
+/// one byte at a time with that pause, returned with that thread, which
+/// ends at its first write after every read end of the pipe has closed.
+fn secret_input(input: &SecretBytes) -> (Input, Option<thread::JoinHandle<()>>) {
     #[cfg(test)]
     {
         let millis = FEED_PAUSE_MILLIS.load(std::sync::atomic::Ordering::Relaxed);
-        if millis > 0 {
-            for byte in input.framed() {
-                if stdin.write_all(&[*byte]).is_err() {
-                    return;
+        if millis > 0
+            && let Ok((reader, mut writer)) = io::pipe()
+        {
+            let bytes = input.framed().to_vec();
+            let feeder = thread::spawn(move || {
+                for byte in bytes {
+                    if writer.write_all(&[byte]).is_err() {
+                        return;
+                    }
+                    crate::clock::pause(Duration::from_millis(millis));
                 }
-                let _ = stdin.flush();
-                crate::clock::pause(Duration::from_millis(millis));
-            }
-            return;
+            });
+            let reader = std::fs::File::from(std::os::fd::OwnedFd::from(reader));
+            return (Input::File(std::sync::Arc::new(reader)), Some(feeder));
         }
     }
-    let _ = stdin.write_all(input.framed());
-}
-
-/// Why [`secret_exec`] stopped `docker` before it exited.
-enum Stop {
-    /// The caller cancelled the write.
-    Cancelled,
-    /// The deadline passed.
-    Late,
-    /// phase could not wait for `docker`.
-    WaitFailed(io::Error),
+    (Input::Bytes(Zeroizing::new(input.framed().to_vec())), None)
 }
 
 /// Runs `docker <args>`, where `args` are a `docker exec --interactive`
@@ -145,15 +146,17 @@ pub(super) fn write_secret(
 /// status, and a failure's message is phase's own sentence about that
 /// status.
 ///
-/// `docker` starts in a process group of its own. With `environment`, it
+/// crumbkit-process starts `docker` in a process group of its own
+/// (`Scope::Group`), writes the framed secret to it from a buffer that it
+/// overwrites with zeros when the run's settings drop, and kills what is
+/// left of the group however the write ends. With `environment`, `docker`
 /// receives those variables alone, which the host program chose, and
 /// otherwise the host program's environment, as phase's other `docker`
 /// commands do. No secret's value is in either. When the deadline passes
-/// or the caller cancels, phase kills the group, reaps `docker`, and joins
-/// the thread that fed it, whose pipe the kill closed. The feeder's next
-/// write to the closed pipe then fails with `EPIPE` and the feeder ends,
-/// because Rust's runtime ignores `SIGPIPE` in every program it starts, so
-/// the write does not kill the host program.
+/// or the caller cancels, the run kills the group and reaps `docker`. Its
+/// writer's next write to the closed pipe then fails with `EPIPE` and the
+/// writer ends, because Rust's runtime ignores `SIGPIPE` in every program
+/// it starts, so the write does not kill the host program.
 ///
 /// # Errors
 ///
@@ -176,80 +179,78 @@ pub(super) fn secret_exec(
     if let Some(environment) = environment {
         command.env_clear().envs(environment);
     }
-    command
-        .args(args)
-        .env("LC_ALL", "C")
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
+    command.args(args).env("LC_ALL", "C");
+    let (stdin, feeder) = input.as_ref().map_or((Input::Null, None), secret_input);
+    let options = RunOptions::new()
+        .stdin(stdin)
+        .scope(Scope::Group)
+        .deadline(deadline_in(deadline))
+        .cancel(cancel.runs());
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
     )]
-    let spawned = command.spawn();
-    #[expect(
-        clippy::disallowed_types,
-        reason = "crates/phase/src/engine/container/command.rs holds the child and owns its deadline and cleanup (PROC-1)"
-    )]
-    let mut child: std::process::Child = match spawned {
-        Ok(child) => child,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            return Err(Error::Missing { source });
-        }
-        Err(source) => return Err(Error::unexpected(operation, None, source.to_string())),
-    };
-    let pid = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
-    let feeder = child
-        .stdin
-        .take()
-        .zip(input)
-        .map(|(stdin, input)| thread::spawn(move || feed(stdin, &input)));
-    let ends = now() + deadline;
-    let stopped = loop {
-        match exited(pid) {
-            Ok(true) => break None,
-            Ok(false) => {}
-            Err(error) => break Some(Stop::WaitFailed(error)),
-        }
-        if cancel.is_cancelled() {
-            break Some(Stop::Cancelled);
-        }
-        if now() >= ends {
-            break Some(Stop::Late);
-        }
-        pause(CANCEL_POLL.min(ends.saturating_duration_since(now())));
-    };
-    // The group is killed however the write ended, so nothing that docker
-    // started outlives it. docker stays unreaped until then, so its pid,
-    // which is the group's id, is not reused in between.
-    if let Some(group) = pid {
-        let _ = rustix::process::kill_process_group(group, Signal::KILL);
-    }
-    let reaped = child.wait();
+    let ran = crumbkit_process::run(command, &options);
+    // The settings hold phase's copy of the framed secret, and a test's
+    // feed pipe, so they drop before the feeder is joined.
+    drop(options);
+    drop(input);
     if let Some(feeder) = feeder {
         let _ = feeder.join();
     }
-    match (stopped, reaped) {
-        (Some(Stop::Cancelled), _) => Err(Error::Cancelled { operation }),
-        (Some(Stop::WaitFailed(error)), _) => Err(Error::unexpected(
-            operation,
-            None,
-            format!("phase could not wait for docker: {error}"),
-        )),
-        (Some(Stop::Late), _) => Err(Error::timed_out(
+    let finished = match ran {
+        Ok(finished) => finished,
+        Err(RunError::Start(source)) => return Err(start_failure(operation, source)),
+        Err(error) => {
+            return Err(Error::unexpected(
+                operation,
+                None,
+                format!("phase could not wait for docker: {}", run_cause(&error)),
+            ));
+        }
+    };
+    match finished.outcome() {
+        Outcome::Ended(status) => Ok(exit_status(status)),
+        Outcome::TimedOut => Err(Error::timed_out(
             operation,
             format!(
                 "docker did not finish within {} seconds, so phase stopped it",
                 deadline.as_secs()
             ),
         )),
-        (None, Ok(status)) => Ok(status),
-        (None, Err(source)) => Err(Error::unexpected(operation, None, source.to_string())),
+        _ => Err(Error::Cancelled { operation }),
+    }
+}
+
+/// Returns the failure of `operation` when `docker` could not start:
+/// [`Error::Missing`] when no `docker` program is on `PATH`.
+fn start_failure(operation: &'static str, source: io::Error) -> Error {
+    if source.kind() == io::ErrorKind::NotFound {
+        Error::Missing { source }
+    } else {
+        Error::unexpected(operation, None, source.to_string())
+    }
+}
+
+/// Returns the cause of a run that crumbkit-process could not follow to its
+/// end, as text.
+fn run_cause(error: &RunError) -> String {
+    match error {
+        RunError::Start(cause) | RunError::Run(cause) => cause.to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Returns the exit status that `status`, as crumbkit-process reaped it,
+/// stands for, so every reader of [`Finished::status`] keeps the standard
+/// library's type.
+fn exit_status(status: Status) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt as _;
+    match status {
+        Status::Signal(signal) => ExitStatus::from_raw(signal & 0x7f),
+        Status::Code(code) => ExitStatus::from_raw((code & 0xff) << 8),
+        // A status that a later crumbkit-process adds reads as a failure.
+        _ => ExitStatus::from_raw(1 << 8),
     }
 }
 
@@ -517,9 +518,6 @@ struct Until<'a> {
     cancel: Option<&'a Cancel>,
 }
 
-/// The longest a command waits before it checks its cancel flag again.
-const CANCEL_POLL: Duration = Duration::from_millis(50);
-
 /// Runs `<program> <args>`, where `program` is the `docker` program, as
 /// [`run`] does.
 pub(super) fn run_program<I, S, E>(
@@ -571,86 +569,58 @@ where
     let mut command = Command::new(program);
     command.args(args).env("LC_ALL", "C");
     env.set_on(&mut command);
-    command
-        .stdin(if input.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    let Until { deadline, cancel } = until;
+    let most = usize::try_from(MOST_OUTPUT_BYTES).unwrap_or(usize::MAX);
+    let kept = || Capture::whole(most).over(OverLimit::Sink);
+    let mut options = RunOptions::new()
+        .stdin(input.map_or(Input::Null, |input| Input::Bytes(Zeroizing::new(input))))
+        .stdout(kept())
+        .stderr(kept())
+        .scope(Scope::Child)
+        .deadline(deadline_in(deadline));
+    if let Some(cancel) = cancel {
+        options = options.cancel(cancel.runs());
+    }
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
     )]
-    let spawned = command.spawn();
-    #[expect(
-        clippy::disallowed_types,
-        reason = "crates/phase/src/engine/container/command.rs holds the child and owns its deadline and cleanup (PROC-1)"
-    )]
-    let mut child: std::process::Child = match spawned {
-        Ok(child) => child,
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {
-            return Err(Error::Missing { source });
-        }
-        Err(source) => {
-            return Err(Error::unexpected(operation, None, source.to_string()));
-        }
+    let finished = crumbkit_process::run(command, &options)
+        .map_err(|error| run_failure(operation, deadline, error))?;
+    let status = match finished.outcome() {
+        Outcome::Ended(status) => exit_status(status),
+        Outcome::TimedOut => return Err(timed_out(operation, deadline)),
+        _ => return Err(Error::Cancelled { operation }),
     };
-    // The input is written on a thread of its own, so a child that writes
-    // before it reads never blocks on a full pipe.
-    let feeder = child.stdin.take().zip(input).map(|(mut stdin, input)| {
-        thread::spawn(move || {
-            let _ = stdin.write_all(&input);
-        })
-    });
-    let stdout = child.stdout.take().map(drain);
-    let stderr = child.stderr.take().map(drain);
-    let Until { deadline, cancel } = until;
-    let began = now();
-    let waited = loop {
-        let left = deadline.saturating_sub(began.elapsed());
-        let slice = match cancel {
-            Some(_) => left.min(CANCEL_POLL),
-            None => left,
-        };
-        match child.wait_timeout(slice) {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if cancel.is_some_and(Cancel::is_cancelled) => break Err(true),
-            Ok(None) if !left.is_zero() && began.elapsed() < deadline => {}
-            Ok(None) | Err(_) => break Err(false),
-        }
-    };
-    let status = match waited {
-        Ok(status) => status,
-        Err(cancelled) => {
-            // The child is killed and reaped whatever the wait reported, so
-            // no zombie remains.
-            let _ = child.kill();
-            let _ = child.wait();
-            if let Some(feeder) = feeder {
-                let _ = feeder.join();
-            }
-            if cancelled {
-                return Err(Error::Cancelled { operation });
-            }
-            return Err(Error::timed_out(
-                operation,
-                format!(
-                    "docker did not finish within {} seconds, so mxv stopped it",
-                    deadline.as_secs()
-                ),
-            ));
-        }
-    };
-    if let Some(feeder) = feeder {
-        let _ = feeder.join();
-    }
+    let (stdout, stderr) = finished.into_output();
     Ok(Finished {
         status,
-        stdout: joined(stdout),
-        stderr: joined(stderr),
+        stdout: String::from_utf8_lossy(stdout.bytes()).into_owned(),
+        stderr: String::from_utf8_lossy(stderr.bytes()).into_owned(),
     })
+}
+
+/// Returns the failure of a [`run_full`] that crumbkit-process could not
+/// run: the start failure when `docker` could not start, and otherwise the
+/// timed-out failure, which a failed wait has always given, because the
+/// run killed and reaped `docker` and its end is unknown.
+fn run_failure(operation: &'static str, deadline: Duration, error: RunError) -> Error {
+    match error {
+        RunError::Start(source) => start_failure(operation, source),
+        _ => timed_out(operation, deadline),
+    }
+}
+
+/// Returns the failure of a [`run_full`] whose `docker` did not finish
+/// within `deadline`.
+fn timed_out(operation: &'static str, deadline: Duration) -> Error {
+    Error::timed_out(
+        operation,
+        format!(
+            "docker did not finish within {} seconds, so mxv stopped it",
+            deadline.as_secs()
+        ),
+    )
 }
 
 /// Runs `docker <args>` with [`DOCKER_DEADLINE`] and no added variables.
@@ -674,26 +644,6 @@ where
     S: AsRef<OsStr>,
 {
     run_program(program, args, ComposeEnv, operation, DOCKER_DEADLINE)
-}
-
-/// Reads `stream` on a thread of its own: the first [`MOST_OUTPUT_BYTES`]
-/// bytes into a buffer, and the rest into nothing, so docker never blocks
-/// on a full pipe.
-fn drain<R: io::Read + Send + 'static>(mut stream: R) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
-        let mut kept = Vec::new();
-        let _ = (&mut stream).take(MOST_OUTPUT_BYTES).read_to_end(&mut kept);
-        let _ = io::copy(&mut stream, &mut io::sink());
-        kept
-    })
-}
-
-/// Returns the text that a drain thread read.
-fn joined(handle: Option<thread::JoinHandle<Vec<u8>>>) -> String {
-    let bytes = handle
-        .and_then(|handle| handle.join().ok())
-        .unwrap_or_default();
-    String::from_utf8_lossy(&bytes).into_owned()
 }
 
 /// Checks that docker is installed and that its daemon answers.
@@ -1040,7 +990,7 @@ fn read_lines<R: io::Read + Send + 'static>(
     sender: std::sync::mpsc::SyncSender<StreamedLine>,
 ) -> thread::JoinHandle<()> {
     thread::spawn(move || {
-        use std::io::BufRead as _;
+        use std::io::{BufRead as _, Read as _};
         let mut reader = io::BufReader::new(stream);
         let mut bytes = Vec::new();
         // The start of a UTF-8 character that the bound cut from the last
