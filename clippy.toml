@@ -44,6 +44,7 @@ disallowed-methods = [
     { path = "tokio::process::Command::spawn", reason = "start processes through the library's git and process modules", allow-invalid = true },
     { path = "tokio::process::Command::status", reason = "start processes through the library's git and process modules", allow-invalid = true },
     { path = "tokio::process::Command::output", reason = "start processes through the library's git and process modules", allow-invalid = true },
+    { path = "crumbkit_process::run", reason = "start processes through the library's git and process modules" },
     # DUR-1
     { path = "std::fs::write", reason = "write through the library's store module" },
     { path = "std::fs::copy", reason = "write through the library's store module" },

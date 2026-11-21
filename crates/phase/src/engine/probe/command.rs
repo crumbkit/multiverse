@@ -5,16 +5,15 @@
 
 use std::ffi::OsString;
 use std::io;
-use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 
-use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
+use crumbkit_process::{Outcome, RunError, RunOptions, Scope, Status};
 
 use super::{Attempt, Failure};
 use crate::cancel::Cancel;
-use crate::clock::{POLL_INTERVAL, now, pause};
+use crate::clock::deadline_in;
 use crate::env::AppliedEnvironment;
 
 /// Runs a probe's command where its process runs, with the process's
@@ -105,78 +104,47 @@ impl ProbeExec for HostExec<'_> {
 /// output discarded, and waits at most `timeout` for it to exit, or until
 /// `cancel` is set.
 ///
-/// However the command ends, `run_bounded` kills what is left of its group
-/// before it reaps the command. The command stays a zombie until then, so
-/// its pid, which is also its group's id, cannot be reused by another
-/// process in between. A command that leaves a process running in the
-/// background therefore never outlives its probe, unless that process
-/// started a group of its own. The command gives no event that can be
-/// waited on with a deadline, so the wait polls it every [`POLL_INTERVAL`].
+/// crumbkit-process runs it with `Scope::Group`: however the command ends,
+/// the run kills what is left of its group before it reaps the command, so
+/// the group's id cannot name another process in between. A command that
+/// leaves a process running in the background therefore never outlives its
+/// probe, unless that process started a group of its own. The run wakes on
+/// the command's exit, the timeout or the cancel, without polling. A cancel
+/// that was set before the run starts no command.
 ///
 /// # Errors
 ///
 /// Returns the error that kept the command from starting.
 pub(crate) fn run_bounded(
-    mut command: Command,
+    command: Command,
     timeout: Duration,
     cancel: &Cancel,
 ) -> io::Result<CommandEnd> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
-    let deadline = now() + timeout;
+    let options = RunOptions::new()
+        .scope(Scope::Group)
+        .deadline(deadline_in(timeout))
+        .cancel(cancel.runs());
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/phase/src/engine/probe/command.rs starts probe commands and owns their deadline (PROC-1)"
     )]
-    let mut child = command.spawn()?;
-    let pid = i32::try_from(child.id()).ok().and_then(Pid::from_raw);
-    let end = loop {
-        match exited(pid) {
-            Ok(true) => break None,
-            Ok(false) => {}
-            Err(error) => break Some(CommandEnd::WaitFailed { kind: error.kind() }),
-        }
-        if cancel.is_cancelled() {
-            break Some(CommandEnd::Cancelled);
-        }
-        if now() >= deadline {
-            break Some(CommandEnd::TimedOut);
-        }
-        pause(POLL_INTERVAL.min(deadline.saturating_duration_since(now())));
-    };
-    if let Some(group) = pid {
-        let _ = rustix::process::kill_process_group(group, Signal::KILL);
-    }
-    let reaped = child.wait();
-    Ok(match (end, reaped) {
-        (Some(end), _) => end,
-        (None, Ok(status)) => CommandEnd::Exited {
-            code: status.code(),
+    let ran = crumbkit_process::run(command, &options);
+    Ok(match ran {
+        Ok(finished) => match finished.outcome() {
+            Outcome::Ended(Status::Code(code)) => CommandEnd::Exited { code: Some(code) },
+            Outcome::Ended(_) => CommandEnd::Exited { code: None },
+            Outcome::TimedOut => CommandEnd::TimedOut,
+            Outcome::Stopped(_) => CommandEnd::Cancelled,
+            _ => CommandEnd::WaitFailed {
+                kind: io::ErrorKind::Other,
+            },
         },
-        (None, Err(error)) => CommandEnd::WaitFailed { kind: error.kind() },
+        Err(RunError::Start(error)) => return Err(error),
+        Err(RunError::Run(error)) => CommandEnd::WaitFailed { kind: error.kind() },
+        Err(_) => CommandEnd::WaitFailed {
+            kind: io::ErrorKind::Other,
+        },
     })
-}
-
-/// Reports whether the child `pid` has exited, and leaves it unreaped. A
-/// wait that a signal interrupts is tried again.
-pub(crate) fn exited(pid: Option<Pid>) -> io::Result<bool> {
-    let Some(pid) = pid else {
-        return Err(io::Error::from(io::ErrorKind::InvalidInput));
-    };
-    let options = WaitIdOptions::EXITED | WaitIdOptions::NOHANG | WaitIdOptions::NOWAIT;
-    loop {
-        match rustix::process::waitid(WaitId::Pid(pid), options) {
-            Ok(status) => {
-                return Ok(status
-                    .is_some_and(|status| status.exited() || status.killed() || status.dumped()));
-            }
-            Err(error) if error == rustix::io::Errno::INTR => {}
-            Err(error) => return Err(io::Error::from(error)),
-        }
-    }
 }
 
 /// Runs `run` through `exec` within `timeout`, and passes when it exits

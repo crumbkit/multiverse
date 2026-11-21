@@ -883,6 +883,53 @@ fn a_bounded_command_ends_when_it_is_cancelled() {
 }
 
 #[test]
+fn a_bounded_command_whose_background_process_holds_its_output_leaves_nothing_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let pid_file = dir.path().join("pid");
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test prepares a command for the probe's bounded runner"
+    )]
+    let mut command = Command::new("sh");
+    command.args([
+        "-c",
+        &format!("sleep 30 & echo $! > '{}'", pid_file.display()),
+    ]);
+    let started = Instant::now();
+    assert_eq!(
+        run_bounded(command, Duration::from_secs(30), &Cancel::new()).unwrap(),
+        CommandEnd::Exited { code: Some(0) }
+    );
+    assert!(started.elapsed() < Duration::from_secs(3));
+    let pid = std::fs::read_to_string(pid_file).unwrap();
+    assert!(gone(&pid), "the background sleep {pid} is still running");
+}
+
+#[test]
+fn a_cancelled_bounded_command_returns_within_200_ms_of_the_cancel() {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test prepares a command for the probe's bounded runner"
+    )]
+    let mut command = Command::new("sleep");
+    command.arg("30");
+    let cancel = Cancel::new();
+    let canceller = cancel.clone();
+    let setter = thread::spawn(move || {
+        pause(Duration::from_millis(300));
+        canceller.cancel();
+    });
+    let started = Instant::now();
+    assert_eq!(
+        run_bounded(command, Duration::from_secs(30), &cancel).unwrap(),
+        CommandEnd::Cancelled
+    );
+    let took = started.elapsed();
+    setter.join().unwrap();
+    assert!(took < Duration::from_millis(300 + 200), "took {took:?}");
+}
+
+#[test]
 fn a_bounded_command_whose_wait_fails_reports_the_failure() {
     // With SIGCHLD ignored, the system reaps each child of this process as
     // it ends, so the runner's wait for the command fails with ECHILD. A

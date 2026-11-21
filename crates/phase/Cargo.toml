@@ -48,10 +48,14 @@ regex = { workspace = true }
 # are not secrets, HMAC-SHA-256, to notice a changed value without keeping it.
 sha2 = { workspace = true }
 hmac = { workspace = true }
-# The container engine gives each `docker` command a deadline (BASE-34): it
-# waits for the child with a timeout, and kills it when the deadline passes,
-# without polling with a sleep (BASE-11).
+# `mxv exec` and `mxv run` (engine/exec.rs) wait for the command that holds
+# the person's terminal with a timeout, without polling with a sleep
+# (BASE-11).
 wait-timeout = { workspace = true }
+# crumbkit-process runs phase's one-shot `docker` commands, its secret
+# writes and its command probes, each with a deadline (BASE-34) and phase's
+# cancel.
+crumbkit-process = { workspace = true }
 
 # Linux reads a process's start in clock ticks from /proc, and the `param`
 # feature gives the number of ticks in a second.

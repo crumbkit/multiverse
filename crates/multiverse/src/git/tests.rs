@@ -596,3 +596,62 @@ fn the_patch_id_commands_carry_the_settings_that_stop_ssh_asking() {
         }
     }
 }
+
+#[test]
+fn a_git_command_whose_descendant_keeps_its_output_open_returns_once_git_exits() {
+    let fixture = fixture();
+    let begun = std::time::Instant::now();
+    let finished = super::run_with(
+        &fixture.clone,
+        ["-c", "alias.hold=!sleep 20 & echo held", "hold"],
+        &[],
+        "hold",
+        super::LOCAL_DEADLINE,
+        super::MOST_OUTPUT_BYTES,
+    )
+    .unwrap();
+    let took = begun.elapsed();
+    assert!(finished.status.success());
+    assert_eq!(finished.stdout, "held\n");
+    assert!(took < std::time::Duration::from_secs(3), "took {took:?}");
+}
+
+#[test]
+fn a_git_command_runs_in_mxvs_own_process_group() {
+    let fixture = fixture();
+    let finished = super::run_with(
+        &fixture.clone,
+        ["-c", "alias.group=!ps -o pgid= -p $$", "group"],
+        &[],
+        "group",
+        super::LOCAL_DEADLINE,
+        super::MOST_OUTPUT_BYTES,
+    )
+    .unwrap();
+    assert!(finished.status.success(), "{}", finished.stderr);
+    let own = rustix::process::getpgrp().as_raw_nonzero().get();
+    assert_eq!(finished.stdout.trim().parse::<i32>().unwrap(), own);
+}
+
+#[test]
+fn a_git_command_past_its_deadline_fails_as_timed_out_soon_after_the_deadline() {
+    let fixture = fixture();
+    let deadline = std::time::Duration::from_millis(300);
+    let begun = std::time::Instant::now();
+    let error = super::run_with(
+        &fixture.clone,
+        ["-c", "alias.stall=!sleep 20", "stall"],
+        &[],
+        "stall",
+        deadline,
+        super::MOST_OUTPUT_BYTES,
+    )
+    .err()
+    .unwrap();
+    let took = begun.elapsed();
+    assert!(matches!(error, Error::TimedOut { .. }), "{error:?}");
+    assert!(
+        took < deadline + std::time::Duration::from_secs(2),
+        "took {took:?}"
+    );
+}

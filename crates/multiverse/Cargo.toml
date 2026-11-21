@@ -17,7 +17,12 @@ workspace = true
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
+# wait-timeout gives the `git log` and `git patch-id` pipeline of
+# git/detached.rs its deadline.
 wait-timeout = { workspace = true }
+# crumbkit-process runs git, a secret's check command, `gh`, `board`,
+# `caddy version`, `security verify-cert` and `mise tasks ls`.
+crumbkit-process = { workspace = true }
 # `parse` and `serde` read the manifest `mxv.toml` into typed structs with
 # the spans that name a bad key's line.
 toml = { workspace = true, features = ["std", "parse", "serde"] }

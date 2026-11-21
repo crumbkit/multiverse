@@ -3,14 +3,14 @@
 //! starts: the check commands of a manifest's secrets, `gh` and `board`
 //! (PROC-1).
 
-use std::io::Read as _;
 use std::path::Path;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::Duration;
+use std::process::{Command, ExitStatus};
+use std::time::{Duration, Instant};
 
+use crumbkit_process::{
+    Capture, ChildFinished, Outcome, OverLimit, RunError, RunOptions, Scope, Status,
+};
 use phase::host::ProcessError;
-use wait_timeout::ChildExt as _;
 
 use crate::error::Error;
 
@@ -64,12 +64,20 @@ pub(crate) enum Ran {
 }
 
 /// The most bytes of a command's standard output that [`run_command`] keeps.
-const MOST_KEPT_BYTES: u64 = 64 * 1024;
+const MOST_KEPT_BYTES: usize = 64 * 1024;
 
 /// Runs `words`, a program and its arguments that no shell reads, in `dir`
 /// with an empty standard input, and waits at most `deadline`. Its standard
 /// error is discarded, and its standard output is discarded unless
-/// `keep_stdout` is set, in which case the first 64 KiB are returned.
+/// `keep_stdout` is set, in which case the first 64 KiB are returned and
+/// the rest is read into nothing.
+///
+/// The command stays in mxv's process group, so a Ctrl-C at the terminal
+/// reaches it. When it misses its deadline, crumbkit-process kills it alone
+/// and reaps it: a check such as `sh -c` that forked a helper leaves the
+/// helper running, and a process group kill would stop it too. A helper
+/// that holds standard output open holds mxv for at most
+/// [`crumbkit_process::DRAIN_GRACE`] after the command exits.
 ///
 /// This is the module that starts the programs other than git: the check
 /// commands of a manifest's secrets, `gh` and `board` (PROC-1).
@@ -87,51 +95,67 @@ pub(crate) fn run_command(
         reason = "crates/multiverse/src/process.rs starts the programs other than git (PROC-1)"
     )]
     let mut command = Command::new(program);
-    command
-        .args(arguments)
-        .current_dir(dir)
-        .stdin(Stdio::null())
-        .stdout(if keep_stdout {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stderr(Stdio::null());
+    command.args(arguments).current_dir(dir);
+    let stdout = if keep_stdout {
+        Capture::from(Capture::whole(MOST_KEPT_BYTES).over(OverLimit::Sink))
+    } else {
+        Capture::discard()
+    };
+    let options = RunOptions::new()
+        .stdout(stdout)
+        .scope(Scope::Child)
+        .deadline(deadline_in(deadline));
     #[expect(
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/process.rs starts the programs other than git (PROC-1)"
     )]
-    let spawned = command.spawn();
-    #[expect(
-        clippy::disallowed_types,
-        reason = "crates/multiverse/src/process.rs holds the child and owns its deadline and cleanup (PROC-1)"
-    )]
-    let Ok(mut child): Result<std::process::Child, _> = spawned else {
-        return Ran::Unstartable;
-    };
-    let reader = child.stdout.take().map(|stream| {
-        thread::spawn(move || {
-            let mut kept = Vec::new();
-            let _ = stream.take(MOST_KEPT_BYTES).read_to_end(&mut kept);
-            kept
-        })
-    });
-    match child.wait_timeout(deadline) {
-        Ok(Some(status)) => Ran::Exited {
-            success: status.success(),
-            stdout: reader
-                .and_then(|reader| reader.join().ok())
-                .unwrap_or_default(),
+    let ran = crumbkit_process::run(command, &options);
+    match ran {
+        Ok(finished) => match ran_to_its_end(&finished) {
+            Some(status) => Ran::Exited {
+                success: status.success(),
+                stdout: finished.into_output().0.into_bytes(),
+            },
+            None => Ran::TimedOut,
         },
-        Ok(None) | Err(_) => {
-            // The child is killed and reaped, so no zombie remains. A kill of
-            // a child that already exited fails harmlessly. This stops only
-            // the direct child: a check such as `sh -c` that forked a helper
-            // leaves the helper running, and a process group kill would
-            // stop it too.
-            let _ = child.kill();
-            let _ = child.wait();
-            Ran::TimedOut
-        }
+        Err(RunError::Start(_)) => Ran::Unstartable,
+        // crumbkit-process could not wait for the command or read it, and
+        // has killed and reaped it, as a failed wait did before.
+        Err(_) => Ran::TimedOut,
     }
 }
+
+/// Returns the exit status of `finished` when its child ran to its own end,
+/// or `None` when the run stopped it at its deadline or on a cancel.
+pub(crate) fn ran_to_its_end(finished: &ChildFinished) -> Option<ExitStatus> {
+    match finished.outcome() {
+        Outcome::Ended(status) => Some(exit_status(status)),
+        _ => None,
+    }
+}
+
+/// Returns the exit status that `status`, as crumbkit-process reaped it,
+/// stands for, so the library's readers of a status keep the standard
+/// library's type.
+pub(crate) fn exit_status(status: Status) -> ExitStatus {
+    use std::os::unix::process::ExitStatusExt as _;
+    match status {
+        Status::Signal(signal) => ExitStatus::from_raw(signal & 0x7f),
+        Status::Code(code) => ExitStatus::from_raw((code & 0xff) << 8),
+        // A status that a later crumbkit-process adds reads as a failure.
+        _ => ExitStatus::from_raw(1 << 8),
+    }
+}
+
+/// Returns the deadline `wait` from now, or a century from now when `wait`
+/// is too long for an [`Instant`] to hold.
+pub(crate) fn deadline_in(wait: Duration) -> Instant {
+    let start = Instant::now();
+    start
+        .checked_add(wait)
+        .or_else(|| start.checked_add(Duration::from_secs(100 * 365 * 24 * 60 * 60)))
+        .unwrap_or(start)
+}
+
+#[cfg(test)]
+mod tests;

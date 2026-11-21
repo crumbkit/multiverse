@@ -30,30 +30,29 @@
 //!   to end, as `mxv exec` does. Running a task in a process group of its
 //!   own would let mxv end it, and would take the terminal from it.
 //! - A process that a mise config starts in the background and that keeps
-//!   mise's pipes open outlives the listing. mxv stops waiting at
-//!   `LIST_WAIT` and treats the listing as refused, and the thread that
-//!   reads the pipe lasts until the pipe closes or mxv ends. mxv does not
-//!   end that process, because it did not start it.
+//!   mise's pipes open outlives the listing. mxv reads mise's pipes for at
+//!   most one second (`crumbkit_process::DRAIN_GRACE`) after mise exits,
+//!   and reads the listing that mise printed by then. mxv does not end that
+//!   process, because it did not start it.
 //! - A `SIGTERM` or `SIGKILL` of mxv frees the place while the task runs on,
 //!   uncounted by the limiter, as for a build.
 
 use std::collections::BTreeMap;
-use std::io::{self, Read as _};
+use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{ExitStatus, Stdio};
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
+use crumbkit_process::{Capture, OverLimit, RunError, RunOptions, Scope};
 use phase::{AppName, Cancel, ExecIo, ExecRequest, PhaseError, ProcessName, WorkspaceId};
 use serde::Deserialize;
-use wait_timeout::ChildExt as _;
 
 use super::exec::EXEC_WAIT;
 use crate::error::Error;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, BuiltTask, TaskEntry, Unrunnable};
+use crate::process::{deadline_in, ran_to_its_end};
 use crate::record::Workspace;
 use crate::runs::{Admission, Asked, Runs, WorkspaceLock};
 use crate::service::Service;
@@ -62,8 +61,8 @@ use crate::store::Store;
 /// The program that lists and runs a checkout's mise tasks.
 const MISE: &str = "mise";
 
-/// How long mise may take to list a checkout's tasks and close its pipes.
-/// When it passes, mxv ends mise and treats the listing as refused.
+/// How long mise may take to list a checkout's tasks. When it passes, mxv
+/// ends mise and treats the listing as refused.
 const LIST_WAIT: Duration = Duration::from_secs(30);
 
 /// The most bytes of mise's listing that mxv reads. A longer listing does
@@ -148,79 +147,50 @@ fn listing(status: ExitStatus, stdout: &[u8], stderr: &[u8]) -> MiseListing {
     }
 }
 
-/// Reads `stream` on a thread of its own: the first `most` bytes into a
-/// buffer, and the rest into nothing, so mise never blocks on a full pipe.
-/// The buffer arrives on the returned channel once the pipe closes.
-fn drain<R: io::Read + Send + 'static>(mut stream: R, most: u64) -> Receiver<Vec<u8>> {
-    let (sender, receiver) = mpsc::channel();
-    thread::spawn(move || {
-        let mut kept = Vec::new();
-        drop((&mut stream).take(most).read_to_end(&mut kept));
-        drop(io::copy(&mut stream, &mut io::sink()));
-        drop(sender.send(kept));
-    });
-    receiver
-}
-
-/// Returns what `command`, a `mise tasks ls --json`, answers within `wait`,
-/// which covers both its exit and the closing of its pipes.
-fn listing_within(command: &mut std::process::Command, wait: Duration) -> MiseListing {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "crates/multiverse/src/runs/phased/task.rs starts mise to list a checkout's tasks, and owns its deadline and cleanup (PROC-1)"
-    )]
-    let spawned = command.spawn();
-    #[expect(
-        clippy::disallowed_types,
-        reason = "crates/multiverse/src/runs/phased/task.rs holds mise until its deadline (PROC-1)"
-    )]
-    let mut child: std::process::Child = match spawned {
-        Ok(child) => child,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return MiseListing::Missing,
-        Err(error) => {
-            return MiseListing::Refused {
-                message: format!("mxv cannot start mise: {error}"),
-            };
-        }
+/// Returns what `command`, a `mise tasks ls --json`, answers within `wait`.
+///
+/// mise stays in mxv's process group and is killed alone when `wait`
+/// passes. Each stream keeps its first bytes and reads the rest into
+/// nothing, so mise never blocks on a full pipe. Once mise exits, a process
+/// that holds its pipes open holds mxv for at most
+/// [`crumbkit_process::DRAIN_GRACE`], and mxv reads what mise printed.
+fn listing_within(command: std::process::Command, wait: Duration) -> MiseListing {
+    let kept = |most: u64| {
+        Capture::whole(usize::try_from(most).unwrap_or(usize::MAX)).over(OverLimit::Sink)
     };
-    let deadline = Instant::now() + wait;
-    let stdout = child
-        .stdout
-        .take()
-        .map(|stream| drain(stream, MOST_LISTING_BYTES));
-    let stderr = child
-        .stderr
-        .take()
-        .map(|stream| drain(stream, MOST_MESSAGE_BYTES));
-    let late = MiseListing::Refused {
+    let options = RunOptions::new()
+        .stdout(kept(MOST_LISTING_BYTES))
+        .stderr(kept(MOST_MESSAGE_BYTES))
+        .scope(Scope::Child)
+        .deadline(deadline_in(wait));
+    let late = || MiseListing::Refused {
         message: format!(
             "mise did not list the tasks within {} seconds",
             wait.as_secs()
         ),
     };
-    let received = |stream: Option<Receiver<Vec<u8>>>| match stream {
-        Some(stream) => stream
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .ok(),
-        None => Some(Vec::new()),
-    };
-    match child.wait_timeout(wait) {
-        Ok(Some(status)) => match (received(stdout), received(stderr)) {
-            (Some(stdout), Some(stderr)) => listing(status, &stdout, &stderr),
-            _ => late,
-        },
-        Ok(None) | Err(_) => {
-            // The child is killed and reaped whatever the wait reported,
-            // so no zombie remains.
-            drop(child.kill());
-            drop(child.wait());
-            late
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "crates/multiverse/src/runs/phased/task.rs starts mise to list a checkout's tasks, and owns its deadline and cleanup (PROC-1)"
+    )]
+    let ran = crumbkit_process::run(command, &options);
+    let finished = match ran {
+        Ok(finished) => finished,
+        Err(RunError::Start(error)) if error.kind() == io::ErrorKind::NotFound => {
+            return MiseListing::Missing;
         }
-    }
+        Err(RunError::Start(error)) => {
+            return MiseListing::Refused {
+                message: format!("mxv cannot start mise: {error}"),
+            };
+        }
+        Err(_) => return late(),
+    };
+    let Some(status) = ran_to_its_end(&finished) else {
+        return late();
+    };
+    let (stdout, stderr) = finished.into_output();
+    listing(status, stdout.bytes(), stderr.bytes())
 }
 
 /// Which services' variables a task receives.
@@ -402,7 +372,7 @@ impl Runs {
                     .passed()
                     .map(|(name, value)| (name.as_str(), value.reveal())),
             );
-        listing_within(&mut command, LIST_WAIT)
+        listing_within(command, LIST_WAIT)
     }
 
     /// Adds `task` to the plan of `workspace`'s `manifest`, after giving
@@ -531,7 +501,7 @@ mod tests {
     fn a_listing_within_the_wait_is_read() {
         assert_eq!(
             listing_within(
-                &mut script("echo '[{\"name\":\"test\"}]'"),
+                script("echo '[{\"name\":\"test\"}]'"),
                 Duration::from_secs(30)
             ),
             MiseListing::Listed(vec![name("test")])
@@ -539,14 +509,37 @@ mod tests {
     }
 
     #[test]
-    fn the_wait_covers_a_background_process_that_keeps_the_pipes_open() {
+    fn a_listing_whose_background_process_keeps_the_pipes_open_is_read() {
         let begun = Instant::now();
-        let answer = listing_within(
-            &mut script("sleep 5 & echo '[]'"),
-            Duration::from_millis(200),
-        );
-        assert!(matches!(answer, MiseListing::Refused { .. }), "{answer:?}");
+        let answer = listing_within(script("sleep 20 & echo '[]'"), Duration::from_secs(30));
+        assert_eq!(answer, MiseListing::Listed(Vec::new()));
         assert!(begun.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_listing_past_the_wait_is_refused_with_the_wait_it_missed() {
+        let begun = Instant::now();
+        let answer = listing_within(script("exec sleep 20"), Duration::from_secs(1));
+        assert_eq!(
+            answer,
+            MiseListing::Refused {
+                message: "mise did not list the tasks within 1 seconds".to_owned()
+            }
+        );
+        assert!(begun.elapsed() < Duration::from_secs(4));
+    }
+
+    #[test]
+    fn a_listing_of_a_program_that_does_not_exist_is_missing() {
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the test names a program that does not exist in place of mise"
+        )]
+        let command = std::process::Command::new("mxv-no-such-mise");
+        assert_eq!(
+            listing_within(command, Duration::from_secs(30)),
+            MiseListing::Missing
+        );
     }
 
     #[test]
