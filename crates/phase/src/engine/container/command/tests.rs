@@ -1,7 +1,7 @@
 use std::ops::ControlFlow;
 use std::time::Duration;
 
-use super::{run_program, run_program_until, stream_program};
+use super::{run_failure, run_program, run_program_until, stream_program};
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::container::ContainerError;
@@ -420,4 +420,25 @@ fn a_docker_command_past_its_deadline_fails_as_timed_out() {
         ran.as_ref().err()
     );
     assert!(took < Duration::from_secs(4), "took {took:?}");
+}
+
+#[test]
+fn a_docker_command_whose_wait_fails_fails_as_timed_out_as_a_missed_deadline_does() {
+    let failed = run_failure(
+        "test",
+        Duration::from_secs(30),
+        crumbkit_process::RunError::Run(std::io::Error::other("the wait failed")),
+    );
+    assert!(
+        matches!(&failed, ContainerError::Failed { message, .. } if message == "docker did not finish within 30 seconds, so mxv stopped it"),
+        "{failed:?}"
+    );
+    assert!(matches!(
+        run_failure(
+            "test",
+            Duration::from_secs(30),
+            crumbkit_process::RunError::Start(std::io::ErrorKind::NotFound.into()),
+        ),
+        ContainerError::Missing { .. }
+    ));
 }

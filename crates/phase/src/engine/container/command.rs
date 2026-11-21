@@ -244,7 +244,7 @@ fn run_cause(error: &RunError) -> String {
 /// Returns the exit status that `status`, as crumbkit-process reaped it,
 /// stands for, so every reader of [`Finished::status`] keeps the standard
 /// library's type.
-pub(crate) fn exit_status(status: Status) -> ExitStatus {
+fn exit_status(status: Status) -> ExitStatus {
     use std::os::unix::process::ExitStatusExt as _;
     match status {
         Status::Signal(signal) => ExitStatus::from_raw(signal & 0x7f),
@@ -585,29 +585,11 @@ where
         clippy::disallowed_methods,
         reason = "crates/phase/src/engine/container/command.rs is the module that runs docker (PROC-1)"
     )]
-    let ran = crumbkit_process::run(command, &options);
-    let finished = match ran {
-        Ok(finished) => finished,
-        Err(RunError::Start(source)) => return Err(start_failure(operation, source)),
-        Err(error) => {
-            return Err(Error::unexpected(
-                operation,
-                None,
-                format!("phase could not wait for docker: {}", run_cause(&error)),
-            ));
-        }
-    };
+    let finished = crumbkit_process::run(command, &options)
+        .map_err(|error| run_failure(operation, deadline, error))?;
     let status = match finished.outcome() {
         Outcome::Ended(status) => exit_status(status),
-        Outcome::TimedOut => {
-            return Err(Error::timed_out(
-                operation,
-                format!(
-                    "docker did not finish within {} seconds, so mxv stopped it",
-                    deadline.as_secs()
-                ),
-            ));
-        }
+        Outcome::TimedOut => return Err(timed_out(operation, deadline)),
         _ => return Err(Error::Cancelled { operation }),
     };
     let (stdout, stderr) = finished.into_output();
@@ -616,6 +598,29 @@ where
         stdout: String::from_utf8_lossy(stdout.bytes()).into_owned(),
         stderr: String::from_utf8_lossy(stderr.bytes()).into_owned(),
     })
+}
+
+/// Returns the failure of a [`run_full`] that crumbkit-process could not
+/// run: the start failure when `docker` could not start, and otherwise the
+/// timed-out failure, which a failed wait has always given, because the
+/// run killed and reaped `docker` and its end is unknown.
+fn run_failure(operation: &'static str, deadline: Duration, error: RunError) -> Error {
+    match error {
+        RunError::Start(source) => start_failure(operation, source),
+        _ => timed_out(operation, deadline),
+    }
+}
+
+/// Returns the failure of a [`run_full`] whose `docker` did not finish
+/// within `deadline`.
+fn timed_out(operation: &'static str, deadline: Duration) -> Error {
+    Error::timed_out(
+        operation,
+        format!(
+            "docker did not finish within {} seconds, so mxv stopped it",
+            deadline.as_secs()
+        ),
+    )
 }
 
 /// Runs `docker <args>` with [`DOCKER_DEADLINE`] and no added variables.
