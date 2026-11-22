@@ -5,6 +5,8 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.5.0] - 2026-11-22
+
 ### Added
 
 - mxv-phase's `http` readiness probe can expect one exact status and can
@@ -13,10 +15,11 @@ workspace may need to act on.
   fields named by JSON pointer (RFC 6901) that must be present or equal a
   scalar. `ProbeCheck::http_expecting` builds such a check, and
   `HttpStatus`, `JsonExpectation`, `JsonPointer` and `JsonScalar` are new
-  public types. A probe with `json` reads at most 65,536 bytes of body, and
-  a longer body fails the attempt. The plan refuses a status outside 100 to
-  599, a malformed pointer, more than 32 expectations on one probe and an
-  expected string longer than 1,024 bytes. A probe that sets neither field
+  public types. A probe with `json` reads at most 65,536 bytes of body as
+  sent, counting a chunked body's framing, and a longer body fails the
+  attempt. The plan refuses a status outside 100 to 599, a malformed
+  pointer, more than 32 expectations on one probe and an expected string
+  longer than 1,024 bytes. A probe that sets neither field
   passes on any 2xx as before, and its plan has the same JSON and digest,
   so an upgrade restarts no running process. mxv's manifest and output are
   unchanged.

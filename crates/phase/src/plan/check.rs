@@ -7,8 +7,9 @@ use std::path::{Component, Path, PathBuf};
 
 use super::container::is_volume_owner;
 use super::probe::{
-    BadLogPattern, HttpStatus, JsonExpectation, JsonScalar, LEAST_PUBLISHED_PROBE_TIMEOUT,
-    LogPattern, MOST_EXPECTED_STRING_BYTES, MOST_JSON_EXPECTATIONS, ProbeCheck, is_sendable_path,
+    BadLogPattern, HttpStatus, JsonExpectation, JsonPointer, JsonScalar,
+    LEAST_PUBLISHED_PROBE_TIMEOUT, LogPattern, MOST_EXPECTED_STRING_BYTES, MOST_JSON_EXPECTATIONS,
+    ProbeCheck, is_sendable_path,
 };
 use super::restart::Restart;
 use super::{AppPlan, MOST_READY_TIMEOUT, MOST_STOP_GRACE, ProcessKind, ProcessPlan, RunnerKind};
@@ -317,14 +318,14 @@ pub enum ProcessProblem {
     /// A JSON pointer of the HTTP probe is not empty and does not start
     /// with `/`, or holds a `~` followed by anything other than `0` or `1`.
     #[non_exhaustive]
-    BadJsonPointer(String),
+    BadJsonPointer(JsonPointer),
     /// The HTTP probe has more than [`MOST_JSON_EXPECTATIONS`] JSON
     /// expectations.
     TooManyJsonExpectations,
     /// The HTTP probe expects the field at the pointer given to equal a
     /// string longer than [`MOST_EXPECTED_STRING_BYTES`] bytes.
     #[non_exhaustive]
-    JsonStringTooLong(String),
+    JsonStringTooLong(JsonPointer),
     /// The log probe's pattern is empty.
     EmptyLogPattern,
     /// The log probe's pattern is not a regular expression.
@@ -551,7 +552,8 @@ impl fmt::Display for ProcessProblem {
             ),
             Self::BadJsonPointer(pointer) => write!(
                 formatter,
-                "its http probe's JSON pointer {pointer:?} is not empty and does not start with `/`, or holds a `~` that is not `~0` or `~1`"
+                "its http probe's JSON pointer {:?} is not empty and does not start with `/`, or holds a `~` that is not `~0` or `~1`",
+                pointer.as_str()
             ),
             Self::TooManyJsonExpectations => write!(
                 formatter,
@@ -1164,15 +1166,13 @@ fn check_http_expectations(
     }
     for expectation in json {
         if !expectation.pointer.is_valid() {
-            return Err(ProcessProblem::BadJsonPointer(
-                expectation.pointer.as_str().to_owned(),
-            ));
+            return Err(ProcessProblem::BadJsonPointer(expectation.pointer.clone()));
         }
         if let Some(JsonScalar::String(text)) = &expectation.equals
             && text.len() > MOST_EXPECTED_STRING_BYTES
         {
             return Err(ProcessProblem::JsonStringTooLong(
-                expectation.pointer.as_str().to_owned(),
+                expectation.pointer.clone(),
             ));
         }
     }

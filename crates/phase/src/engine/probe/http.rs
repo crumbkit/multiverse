@@ -331,7 +331,7 @@ impl<'a, R: Response> Reader<'a, R> {
         let mut coded = None;
         loop {
             let room = MOST_RESPONSE_BYTES.saturating_sub(self.taken);
-            let line = self.line(room, Failure::BadResponse)?;
+            let line = self.line(room, Failure::BadBody)?;
             if line.is_empty() {
                 break;
             }
@@ -359,11 +359,12 @@ impl<'a, R: Response> Reader<'a, R> {
         })
     }
 
-    /// Reads the body that `framing` describes, at most
-    /// [`MOST_BODY_BYTES`] bytes of it once decoded. A `Content-Length` or
-    /// a chunk size that would pass the limit fails the attempt before the
-    /// bytes are read, and a body that ends at the close reads at most one
-    /// byte past the limit before it fails.
+    /// Reads the body that `framing` describes, taking at most
+    /// [`MOST_BODY_BYTES`] bytes of it as sent, which for a chunked body
+    /// counts each chunk-size line and line end. A `Content-Length` or a
+    /// chunk that would pass the limit fails the attempt before the bytes
+    /// are read, and a body that ends at the close reads at most one byte
+    /// past the limit before it fails.
     fn body(&mut self, framing: Framing) -> Result<Vec<u8>, Failure> {
         match framing {
             Framing::Length(length) if length > MOST_BODY_BYTES => Err(Failure::BodyTooLong),
@@ -382,16 +383,31 @@ impl<'a, R: Response> Reader<'a, R> {
     }
 
     /// Decodes a chunked body up to its last, empty chunk. It reads no
-    /// trailer, since the connection closes after the attempt.
+    /// trailer, since the connection closes after the attempt. Each
+    /// chunk-size line, chunk and line end counts against
+    /// [`MOST_BODY_BYTES`], so a stream of small chunks with long
+    /// extensions fails with [`Failure::BodyTooLong`] once it has taken the
+    /// limit.
     fn chunks(&mut self) -> Result<Vec<u8>, Failure> {
+        let start = self.taken;
         let mut body = Vec::new();
         loop {
-            let line = self.line(MOST_CHUNK_LINE_BYTES, Failure::BadBody)?;
+            let room = MOST_BODY_BYTES.saturating_sub(self.taken - start);
+            let most = MOST_CHUNK_LINE_BYTES.min(room);
+            let line = match self.line(most, Failure::BadBody) {
+                Err(Failure::BadBody)
+                    if most < MOST_CHUNK_LINE_BYTES && self.buffered.len() >= most =>
+                {
+                    return Err(Failure::BodyTooLong);
+                }
+                read => read?,
+            };
             let size = chunk_size(&line).ok_or(Failure::BadBody)?;
             if size == 0 {
                 return Ok(body);
             }
-            if size > MOST_BODY_BYTES.saturating_sub(body.len()) {
+            let room = MOST_BODY_BYTES.saturating_sub(self.taken - start);
+            if size.checked_add(2).is_none_or(|sent| sent > room) {
                 return Err(Failure::BodyTooLong);
             }
             body.extend(self.exactly(size)?);
@@ -631,19 +647,111 @@ mod tests {
         );
     }
 
+    /// A response of `head` followed by `chunk` again and again, which
+    /// counts the bytes read from it.
+    struct Repeating {
+        head: &'static [u8],
+        chunk: Vec<u8>,
+        read: usize,
+    }
+
+    impl Read for Repeating {
+        fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+            for byte in buffer.iter_mut() {
+                *byte = match self.read.checked_sub(self.head.len()) {
+                    None => self.head.get(self.read).copied().unwrap_or_default(),
+                    Some(at) => self
+                        .chunk
+                        .get(at % self.chunk.len())
+                        .copied()
+                        .unwrap_or_default(),
+                };
+                self.read += 1;
+            }
+            Ok(buffer.len())
+        }
+    }
+
+    impl Response for Repeating {
+        fn set_slice(&mut self, _: Duration) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
     #[test]
-    fn headers_longer_than_their_bound_fail_as_a_bad_response() {
+    fn a_chunked_body_read_counts_chunk_lines_against_its_limit() {
+        let head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+        let extension = "e".repeat(1000);
+        let mut response = Repeating {
+            head,
+            chunk: format!("1;{extension}\r\nx\r\n").into_bytes(),
+            read: 0,
+        };
+        let json = [JsonExpectation::present(JsonPointer::new("/ok".to_owned()))];
+        let deadline = Instant::now() + Duration::from_secs(60);
+
+        let judged = judge_response(&mut response, None, &json, deadline, &Cancel::new());
+
+        assert_eq!(judged, Err(Failure::BodyTooLong));
+        assert!(
+            response.read <= MOST_RESPONSE_BYTES + MOST_BODY_BYTES,
+            "read {}",
+            response.read
+        );
+    }
+
+    /// Judges a chunked response of one chunk that holds `{"ok":1}` and
+    /// spaces, which with its framing takes `sent` bytes after the headers.
+    fn judge_one_chunk_of(sent: usize) -> Result<(), Failure> {
+        // The size line, the chunk's line end and the last chunk's line.
+        let framing = "xxxx\r\n".len() + "\r\n".len() + "0\r\n".len();
+        let data = format!("{{\"ok\":1{}}}", " ".repeat(sent - framing - 8));
+        let wire = format!("{:04x}\r\n{data}\r\n0\r\n\r\n", data.len());
+        let response = format!("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{wire}");
+        let json = [JsonExpectation::present(JsonPointer::new("/ok".to_owned()))];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        judge_response(
+            &mut response.as_bytes(),
+            None,
+            &json,
+            deadline,
+            &Cancel::new(),
+        )
+    }
+
+    #[test]
+    fn a_chunked_body_passes_at_its_limit_as_sent_and_fails_one_byte_past_it() {
+        assert_eq!(judge_one_chunk_of(MOST_BODY_BYTES), Ok(()));
+        assert_eq!(
+            judge_one_chunk_of(MOST_BODY_BYTES + 1),
+            Err(Failure::BodyTooLong)
+        );
+    }
+
+    #[test]
+    fn headers_longer_than_their_bound_fail_as_unreadable_headers() {
         let mut response = Headed {
             head: b"HTTP/1.1 200 OK\r\nX-Long: ",
             read: 0,
         };
 
-        assert_eq!(judge(&mut response), Err(Failure::BadResponse));
+        assert_eq!(judge(&mut response), Err(Failure::BadBody));
         assert!(
             response.read <= MOST_RESPONSE_BYTES,
             "read {}",
             response.read
         );
+    }
+
+    #[test]
+    fn a_close_before_the_headers_end_fails_as_unreadable_headers() {
+        let json = [JsonExpectation::present(JsonPointer::new("/ok".to_owned()))];
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut response = &b"HTTP/1.1 200 OK\r\nServer: x\r\n"[..];
+
+        let judged = judge_response(&mut response, None, &json, deadline, &Cancel::new());
+
+        assert_eq!(judged, Err(Failure::BadBody));
     }
 
     #[test]

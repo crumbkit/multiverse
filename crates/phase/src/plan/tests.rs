@@ -1484,7 +1484,7 @@ fn a_plan_refuses_a_pointer_that_does_not_start_with_a_slash() {
         ))];
         assert_eq!(
             process_problem(api_probing(expecting(None, json))),
-            ProcessProblem::BadJsonPointer(pointer.to_owned()),
+            ProcessProblem::BadJsonPointer(JsonPointer::new(pointer.to_owned())),
             "{pointer}"
         );
     }
@@ -1498,7 +1498,7 @@ fn a_plan_refuses_a_pointer_with_a_tilde_that_escapes_nothing() {
         ))];
         assert_eq!(
             process_problem(api_probing(expecting(None, json))),
-            ProcessProblem::BadJsonPointer(pointer.to_owned()),
+            ProcessProblem::BadJsonPointer(JsonPointer::new(pointer.to_owned())),
             "{pointer}"
         );
     }
@@ -1540,7 +1540,7 @@ fn a_plan_refuses_an_expected_string_longer_than_1024_bytes() {
     assert!(plan(vec![api_probing(expecting(None, equal(1024)))]).is_ok());
     assert_eq!(
         process_problem(api_probing(expecting(None, equal(1025)))),
-        ProcessProblem::JsonStringTooLong("/revision".to_owned())
+        ProcessProblem::JsonStringTooLong(JsonPointer::new("/revision".to_owned()))
     );
 }
 

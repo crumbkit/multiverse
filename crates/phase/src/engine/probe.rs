@@ -31,7 +31,7 @@
 //!   JSON expectations judges the status first, and only on a passing
 //!   status reads the body, framed by `Content-Length`, by chunked
 //!   transfer coding or by the server closing the connection. It reads at
-//!   most [`MOST_BODY_BYTES`] bytes of decoded body, parses it as JSON and
+//!   most [`MOST_BODY_BYTES`] bytes of body as sent, parses it as JSON and
 //!   judges each expectation. The body is dropped when the attempt ends,
 //!   and no failure holds any of it.
 //! - `tcp` passes when a connection to the port on 127.0.0.1, or on ::1
@@ -83,8 +83,9 @@ pub(crate) use runner::{READY_INTERVAL, Tally, Verdict};
 /// attempt.
 pub(crate) const MOST_RESPONSE_BYTES: usize = 4096;
 
-/// The most bytes of decoded response body that an HTTP check with JSON
-/// expectations reads. A longer body fails the attempt with
+/// The most bytes of response body, as sent, that an HTTP check with JSON
+/// expectations reads. For a chunked body the count includes each
+/// chunk-size line and line end. A longer body fails the attempt with
 /// [`Failure::BodyTooLong`], and a `Content-Length` above it fails the
 /// attempt before any of the body is read.
 pub(crate) const MOST_BODY_BYTES: usize = 65_536;
@@ -261,7 +262,7 @@ pub(crate) enum Failure {
         /// The response's status.
         got: u16,
     },
-    /// The response's decoded body is longer than [`MOST_BODY_BYTES`].
+    /// The response's body, as sent, is longer than [`MOST_BODY_BYTES`].
     BodyTooLong,
     /// The response's body is not JSON.
     NotJson,
@@ -271,7 +272,9 @@ pub(crate) enum Failure {
     /// expects.
     FieldDiffers(JsonPointer),
     /// The response's headers or chunked body could not be read, or the
-    /// body ended before its `Content-Length`.
+    /// body ended before its `Content-Length`. Headers that pass
+    /// [`MOST_RESPONSE_BYTES`] together with the status line, or that the
+    /// server closes the connection within, fail this way.
     BadBody,
     /// The request path holds a space, a control character, a character
     /// outside ASCII or `#`, so phase does not send it.

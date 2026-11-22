@@ -409,10 +409,12 @@ scalar: `true`, `false`, a string, a whole number or `null`. A probe with
 expectations judges the status first, and only on a passing status reads
 the body. It reads the headers within the 4,096 bytes that bound the status
 line and headers together, and the body by `Content-Length`, by chunked
-transfer coding or until the server closes the connection. It reads at most
-65,536 bytes of decoded body. A `Content-Length` over that fails the attempt
-before any of the body is read, and a longer chunked or close-delimited body
-fails once it passes the limit. The attempt then fails when the body is not
+transfer coding or until the server closes the connection. Headers that do
+not end within that bound fail the attempt with `BadBody`. It reads at most
+65,536 bytes of body as sent, and for a chunked body that count includes
+each chunk-size line and line end. A `Content-Length` over that fails the
+attempt before any of the body is read, and a longer chunked or
+close-delimited body fails once it passes the limit. The attempt then fails when the body is not
 JSON, when a field is missing or when a field holds another value. The
 failure names the pointer and never quotes the body or an expected value.
 The plan refuses a status outside 100 to 599, a pointer that is not empty
