@@ -254,8 +254,8 @@ pub(crate) fn helper_of(identity: &Identity, app: Option<&AppName>, labels: &str
     };
     let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
     identity.names(&labels)
-        && is(&identity.key(Label::Role), VOLUME_OWNER_ROLE)
-        && app.is_none_or(|app| is(&identity.key(Label::App), app.as_str()))
+        && is(&identity.labels.key(Label::Role), VOLUME_OWNER_ROLE)
+        && app.is_none_or(|app| is(&identity.labels.key(Label::App), app.as_str()))
 }
 
 /// Returns Docker's line when `error` says that Docker refused to create
@@ -487,9 +487,16 @@ pub(crate) fn remove_helpers_with(
             "--quiet",
             "--no-trunc",
             "--filter",
-            &format!("label={}={}", identity.key(Label::WorkspaceId), identity.id),
+            &format!(
+                "label={}={}",
+                identity.labels.key(Label::WorkspaceId),
+                identity.id
+            ),
             "--filter",
-            &format!("label={}={VOLUME_OWNER_ROLE}", identity.key(Label::Role)),
+            &format!(
+                "label={}={VOLUME_OWNER_ROLE}",
+                identity.labels.key(Label::Role)
+            ),
         ],
         "container ls",
     )?

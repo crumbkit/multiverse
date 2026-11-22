@@ -179,7 +179,7 @@ const STATE_FORMAT: &str = "{{.State.Status}} {{.State.ExitCode}}";
 /// the value of its secrets label, and on the next line when Docker last
 /// started it, which [`status_state`] reads.
 fn restarts_format(identity: &Identity) -> String {
-    let secrets = identity.key(Label::Secrets);
+    let secrets = identity.labels.key(Label::Secrets);
     format!(
         "{{{{.RestartCount}}}} {{{{index .Config.Labels {secrets:?}}}}}\n{{{{.State.StartedAt}}}}"
     )

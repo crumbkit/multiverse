@@ -1067,6 +1067,10 @@ fn a_label_prefix_is_a_lowercase_name_of_at_most_32_bytes_followed_by_a_dot() {
     ] {
         assert!(LabelPrefix::new(bad).is_err(), "{bad:?}");
     }
+    assert_eq!(
+        LabelPrefix::new("2x").unwrap_err().to_string(),
+        "the label prefix \"2x\" is refused: a label prefix is 1 to 32 bytes of lowercase ASCII letters, digits and `-`, starting with a letter"
+    );
 }
 
 #[test]

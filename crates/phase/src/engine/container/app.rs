@@ -464,7 +464,7 @@ fn compose_file_with(
         let mut labels = scope.labels(Label::Container, service.as_str());
         if let (false, Value::Object(labels)) = (secrets.is_empty(), &mut labels) {
             labels.insert(
-                scope.identity().key(Label::Secrets),
+                scope.identity().labels.key(Label::Secrets),
                 Value::String(SECRET_FILES.to_owned()),
             );
         }
