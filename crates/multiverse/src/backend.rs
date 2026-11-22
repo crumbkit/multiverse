@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::host::Host;
 
 /// A repository that a workspace can check out: its top-level directory
 /// and the name that its checkout directory takes.
@@ -750,4 +751,89 @@ pub trait Backend {
     ///
     /// Returns the failure of the checkout.
     fn detach_head(&self, checkout: &Path, commit: &str) -> Result<String, Error>;
+
+    /// Returns what [`Backend::unpushed_commits`] returns, counting the
+    /// copies of the mirror's heads and tags below `host`'s
+    /// [`Host::origin_namespace`] as pushed. The library calls this method
+    /// with the host of the [`crate::Workspaces`] that runs it. A backend
+    /// that keeps no copies of its own returns what
+    /// [`Backend::unpushed_commits`] returns, which this method does unless
+    /// it is implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn unpushed_commits_for(&self, checkout: &Path, host: &Host) -> Result<Vec<String>, Error> {
+        let _ = host;
+        self.unpushed_commits(checkout)
+    }
+
+    /// Returns what [`Backend::orphans`] returns, counting the copies
+    /// below `host`'s [`Host::origin_namespace`] as what `origin` holds.
+    /// It returns what [`Backend::orphans`] returns unless it is
+    /// implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a listing.
+    fn orphans_for(
+        &self,
+        checkout: &Path,
+        kept: &[String],
+        shared: bool,
+        host: &Host,
+    ) -> Result<Vec<String>, Error> {
+        let _ = host;
+        self.orphans(checkout, kept, shared)
+    }
+
+    /// Writes the commits of uncommitted work as [`Backend::write_wip`]
+    /// does, with `host`'s [`Host::wip_message`], and with `host`'s
+    /// [`Host::wip_author`] as their author when git has no identity of
+    /// the person. It calls [`Backend::write_wip`] with the message unless
+    /// it is implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a git command.
+    fn write_wip_for(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+        time: u64,
+        host: &Host,
+    ) -> Result<WipCommits, Error> {
+        self.write_wip(checkout, index, left_out, time, &host.wip_message())
+    }
+
+    /// Returns what [`Backend::concealed`] returns, leaving out the
+    /// references below `host`'s [`Host::ref_namespace`]. It returns what
+    /// [`Backend::concealed`] returns unless it is implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of a listing.
+    fn concealed_for(&self, checkout: &Path, host: &Host) -> Result<Concealed, Error> {
+        let _ = host;
+        self.concealed(checkout)
+    }
+
+    /// Returns what [`Backend::local_only_commits`] returns, counting the
+    /// copies below `host`'s [`Host::origin_namespace`] as what `origin`
+    /// holds. It returns what [`Backend::local_only_commits`] returns
+    /// unless it is implemented.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the listing.
+    fn local_only_commits_for(
+        &self,
+        dir: &Path,
+        revision: &str,
+        host: &Host,
+    ) -> Result<Vec<String>, Error> {
+        let _ = host;
+        self.local_only_commits(dir, revision)
+    }
 }

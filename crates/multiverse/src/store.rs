@@ -24,6 +24,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::archive::{ArchiveId, MintHeld, mint_held};
 use crate::error::Error;
+use crate::host::{Host, ManifestNames};
 use crate::name::WorkspaceName;
 use crate::record::{RECORD_VERSION, Workspace, WorkspaceState};
 
@@ -42,6 +43,9 @@ const EXTENSION: &str = "json";
 pub struct Store {
     /// The directory that holds one `<name>.json` for each workspace.
     dir: PathBuf,
+    /// The names of the host whose manifest files the records it reads
+    /// name, which [`Workspace::with_host`] describes.
+    names: ManifestNames,
 }
 
 /// The outcome of [`Store::create`].
@@ -79,7 +83,19 @@ impl Store {
     /// first write.
     #[must_use]
     pub const fn new(dir: PathBuf) -> Self {
-        Self { dir }
+        Self {
+            dir,
+            names: ManifestNames::MXV,
+        }
+    }
+
+    /// Returns the store with `host`'s names, which every record it reads
+    /// carries, as [`Workspace::with_host`] gives them. Without it the
+    /// records carry mxv's names.
+    #[must_use]
+    pub fn with_host(mut self, host: &Host) -> Self {
+        self.names = host.manifest_names();
+        self
     }
 
     /// Returns the directory of the records.
@@ -141,7 +157,10 @@ impl Store {
                 .map(|stem| stem.to_string_lossy().into_owned())
                 .unwrap_or_default();
             match read_record(&path).and_then(|found| matching(&path, &stem, found)) {
-                Ok(Some(workspace)) => records.workspaces.push(workspace),
+                Ok(Some(mut workspace)) => {
+                    workspace.names = self.names.clone();
+                    records.workspaces.push(workspace);
+                }
                 Ok(None) => {}
                 Err(error) => records.problems.push(error),
             }
@@ -160,7 +179,10 @@ impl Store {
     pub fn read(&self, name: &WorkspaceName) -> Result<Option<Workspace>, Error> {
         let path = self.path(name);
         let found = read_record(&path)?;
-        matching(&path, name.as_str(), found)
+        Ok(matching(&path, name.as_str(), found)?.map(|mut workspace| {
+            workspace.names = self.names.clone();
+            workspace
+        }))
     }
 
     /// Writes the record of `workspace` unless the store already holds a

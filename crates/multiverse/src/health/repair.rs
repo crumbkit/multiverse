@@ -187,7 +187,7 @@ impl<B: Backend> Workspaces<B> {
                         .is_ok_and(|mut entries| entries.next().is_none());
                 // A dry run refuses as the repair would, before the
                 // repair deletes anything.
-                crate::archive::refuse_other_files(&archive)?;
+                crate::archive::refuse_other_files(&archive, &self.host)?;
                 if mode == Mode::Change {
                     self.undo_stopped_restore(archives, &mut archive)?;
                 }
@@ -219,7 +219,7 @@ impl<B: Backend> Workspaces<B> {
     ) -> Result<Repaired, Error> {
         if let Some(mut workspace) = self.store.read(name)?
             && let Some(id) = workspace.state().archive().cloned()
-            && untouched(&workspace)
+            && untouched(&workspace, &self.host)
         {
             if mode == Mode::Change {
                 // `remove_dir` deletes only an empty directory, so a

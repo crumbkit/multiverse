@@ -9,8 +9,7 @@ use std::path::Path;
 
 use crate::archive::admit::{ArchivePlan, ArchivePlanned, ArchiveRefusal, submodule_items};
 use crate::archive::{
-    ARCHIVE_VERSION, Archive, ArchiveState, ArchivedCheckout, Archives, KeptWip, WIP_MESSAGE,
-    quarantine,
+    ARCHIVE_VERSION, Archive, ArchiveState, ArchivedCheckout, Archives, KeptWip, quarantine,
 };
 use crate::archive::{IgnoredEntry, IgnoredSource, ignored, root};
 use crate::backend::{Backend, Head, RefHolder, WipTrees};
@@ -244,7 +243,7 @@ impl<B: Backend> Workspaces<B> {
     /// place.
     pub(super) fn put_back(&self, workspace: &Workspace) -> Result<(), Error> {
         for checkout in &workspace.checkouts {
-            let Some(held) = quarantine(&checkout.path) else {
+            let Some(held) = quarantine(&checkout.path, &self.host) else {
                 continue;
             };
             if Entry::at(&held)? == Entry::Present && Entry::at(&checkout.path)? == Entry::Absent {
@@ -402,7 +401,13 @@ impl<B: Backend> Workspaces<B> {
         }
         (self.checkpoint)("ignored")?;
         let generated = self.generated_agents(&plan.removal.workspace)?;
-        root::copy_in(archives, &mut archive, &plan.removal.workspace, &generated)?;
+        root::copy_in(
+            archives,
+            &mut archive,
+            &plan.removal.workspace,
+            &generated,
+            &self.host,
+        )?;
         archives.write(&archive)?;
         (self.checkpoint)("root")?;
         let mut late = Vec::new();
@@ -434,14 +439,15 @@ impl<B: Backend> Workspaces<B> {
                 Err(refusal) => return Ok(ArchiveOutcome::Refused(refusal)),
             }
         }
-        let differences = root::differences(&archive, &plan.removal.workspace, &generated)?;
+        let differences =
+            root::differences(&archive, &plan.removal.workspace, &generated, &self.host)?;
         if !differences.is_empty() {
             return Ok(ArchiveOutcome::Refused(ArchiveRefusal::SourceChanged {
                 folder: "root".to_owned(),
                 differences,
             }));
         }
-        root::delete_originals(&archive, &plan.removal.workspace, &generated)?;
+        root::delete_originals(&archive, &plan.removal.workspace, &generated, &self.host)?;
         (self.checkpoint)("delete")?;
         self.finish_removal(archives, archive, plan.removal, plan.disposable, late)
     }
@@ -466,12 +472,12 @@ impl<B: Backend> Workspaces<B> {
                 .iter()
                 .any(|work| work.folder == planned.checkout.name && !work.changes.is_empty());
             archived.kept.wip = if has_work {
-                let written = self.backend.write_wip(
+                let written = self.backend.write_wip_for(
                     &planned.checkout.path,
                     index,
                     plan.left_out(&planned.checkout.name),
                     time,
-                    WIP_MESSAGE,
+                    &self.host,
                 )?;
                 Some(KeptWip {
                     index: written.index,
@@ -601,7 +607,7 @@ impl<B: Backend> Workspaces<B> {
         // The top level is the directory itself, which moves.
         head.toplevel = None;
         let changes = self.backend.changes(dir)?;
-        let concealed = self.backend.concealed(dir)?;
+        let concealed = self.backend.concealed_for(dir, &self.host)?;
         let mut hidden = concealed.nested.clone();
         hidden.extend(concealed.hidden.iter().map(|item| item.path.clone()));
         hidden.extend(
@@ -620,7 +626,7 @@ impl<B: Backend> Workspaces<B> {
         let (stashes, unpushed, refs) = if kind == WorkspaceKind::Clone {
             (
                 self.backend.stashes(dir)?,
-                self.backend.unpushed_commits(dir)?,
+                self.backend.unpushed_commits_for(dir, &self.host)?,
                 self.backend.refs_under(own, "refs/")?,
             )
         } else {
@@ -717,8 +723,8 @@ impl<B: Backend> Workspaces<B> {
             path: checkout.path.clone(),
             source: io::ErrorKind::InvalidInput.into(),
         };
-        let held = quarantine(&checkout.path).ok_or_else(invalid)?;
-        let doomed = aside(&checkout.path).ok_or_else(invalid)?;
+        let held = quarantine(&checkout.path, &self.host).ok_or_else(invalid)?;
+        let doomed = aside(&checkout.path, &self.host).ok_or_else(invalid)?;
         delete_directory(&doomed)?;
         if matches!(planned.kind, RemovalKind::Worktree { unlock: true, .. }) {
             self.backend

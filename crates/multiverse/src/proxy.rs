@@ -31,6 +31,7 @@ use phase::{
 
 use crate::clock::{POLL_INTERVAL, pause};
 use crate::error::Error;
+use crate::host::Host;
 use crate::name::WorkspaceName;
 use crate::phase_plan::CallerEnvironment;
 use crate::ports;
@@ -47,16 +48,16 @@ mod tests;
 
 pub use check::{Check, CheckRow, CheckState};
 pub use hosts::{Resolution, Resolver, SystemResolver, line_for, missing};
-use routes::declared;
 pub use routes::{DOMAIN, Declared, Derived, ProxyProblem, Route, Shadowed, ShadowedHost, derive};
+use routes::{declared, derive_under};
 
 /// Returns the routes that the proxy serves for the workspaces of `store`,
 /// and a problem for each record or manifest that is left out, or for the
 /// store that cannot be read, in which case there are no routes.
-pub(crate) fn served(store: &Store) -> (Vec<Route>, Vec<ProxyProblem>) {
-    match declared(store) {
+pub(crate) fn served(store: &Store, host: &Host) -> (Vec<Route>, Vec<ProxyProblem>) {
+    match declared(store, host) {
         Ok((found, mut problems)) => {
-            let derived = derive(found);
+            let derived = derive_under(found, host.proxy_domain());
             problems.extend(derived.problems);
             (derived.served, problems)
         }
@@ -492,6 +493,8 @@ pub struct Proxy {
     settings: Settings,
     /// The phase that supervises Caddy.
     phase: Phase,
+    /// The host whose domain the routes lie below.
+    host: Host,
 }
 
 impl Proxy {
@@ -499,7 +502,21 @@ impl Proxy {
     #[must_use]
     pub fn new(settings: Settings) -> Self {
         let phase = Phase::new(settings.dir().join("phase"));
-        Self { settings, phase }
+        Self {
+            settings,
+            phase,
+            host: Host::mxv(),
+        }
+    }
+
+    /// Returns the proxy with `host`'s names: each route's host name lies
+    /// below `host`'s [`Host::proxy_domain`], and each workspace's
+    /// manifest is read under `host`'s names. Without it the proxy uses
+    /// [`Host::mxv`], whose domain is [`DOMAIN`].
+    #[must_use]
+    pub fn with_host(mut self, host: Host) -> Self {
+        self.host = host;
+        self
     }
 
     /// Returns the proxy with `program`, followed by `leading`, as the
@@ -545,8 +562,8 @@ impl Proxy {
         }
         store::private_dir(&self.settings.dir())?;
         let _lock = store::lock(&self.settings.dir().join("lock"), LOCK_WAIT)?;
-        let (found, mut problems) = declared(store)?;
-        let mut derived = derive(found);
+        let (found, mut problems) = declared(store, &self.host)?;
+        let mut derived = derive_under(found, self.host.proxy_domain());
         problems.append(&mut derived.problems);
         let mut current = self.current();
         if derived.served.is_empty() {
@@ -589,8 +606,8 @@ impl Proxy {
     pub fn ensure_running(&self, store: &Store) -> Result<Ensured, ProxyError> {
         store::private_dir(&self.settings.dir())?;
         let _lock = store::lock(&self.settings.dir().join("lock"), LOCK_WAIT)?;
-        let (found, _) = declared(store)?;
-        let derived = derive(found);
+        let (found, _) = declared(store, &self.host)?;
+        let derived = derive_under(found, self.host.proxy_domain());
         let mut current = self.current();
         let started = current.is_none();
         if started {
@@ -628,8 +645,8 @@ impl Proxy {
     ///
     /// Returns the error of reading the store.
     pub fn status(&self, store: &Store) -> Result<Status, ProxyError> {
-        let (found, problems) = declared(store)?;
-        let mut routes = derive(found);
+        let (found, problems) = declared(store, &self.host)?;
+        let mut routes = derive_under(found, self.host.proxy_domain());
         routes.problems.extend(problems);
         let running = self.answering();
         let version = self.program().ok().map(|(_, version)| version.to_string());

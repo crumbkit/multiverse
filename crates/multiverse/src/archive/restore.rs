@@ -12,6 +12,7 @@ use crate::archive::{
 use crate::backend::{Backend, RefHolder, WipCommits};
 use crate::error::Error;
 use crate::health::{self, Rebuilt};
+use crate::host::Host;
 use crate::marker::MARKER_FILE;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace, WorkspaceKind};
@@ -322,7 +323,7 @@ impl<B: Backend> Workspaces<B> {
                 record,
             });
         }
-        refuse_other_files(&archive)?;
+        refuse_other_files(&archive, &self.host)?;
         if let Some(path) = root::first_changed(archives, &archive)? {
             return refused(RestoreRefusal::RootFileChanged { path });
         }
@@ -444,7 +445,7 @@ impl<B: Backend> Workspaces<B> {
         (self.checkpoint)("mirrors")?;
         // The record is written last, once every checkout is in place, so
         // it is written live.
-        let mut workspace = archive.workspace().finished();
+        let mut workspace = archive.workspace().finished().with_host(&self.host);
         let mut made = MadeSoFar {
             record_not_ours: true,
             ..MadeSoFar::default()
@@ -540,9 +541,9 @@ impl<B: Backend> Workspaces<B> {
         let Some(RestoreMark(mut made)) = archive.restoring.clone() else {
             return Ok(());
         };
-        refuse_other_files(archive)?;
+        refuse_other_files(archive, &self.host)?;
         made.record_not_ours = true;
-        let workspace = archive.workspace().finished();
+        let workspace = archive.workspace().finished().with_host(&self.host);
         let mut clean = self.unmake(archive, &workspace, &made);
         if made.directory {
             // What the run left beside what the mark lists, such as a
@@ -1030,10 +1031,11 @@ impl<B: Backend> Workspaces<B> {
             }
         }
         for commit in &kept.orphans {
-            let kept_ref = KeptRef::of_commit(commit).map_err(|reason| Error::CorruptRecord {
-                path: record.to_path_buf(),
-                source: serde::de::Error::custom(reason),
-            })?;
+            let kept_ref =
+                KeptRef::of_commit(&self.host, commit).map_err(|reason| Error::CorruptRecord {
+                    path: record.to_path_buf(),
+                    source: serde::de::Error::custom(reason),
+                })?;
             let reference = kept_ref.as_str().to_owned();
             // The mark names the reference before the run creates it, so a
             // death in between leaves nothing unlisted. A reference that the
@@ -1154,7 +1156,7 @@ impl<B: Backend> Workspaces<B> {
         };
         if archive.state != ArchiveState::Retiring
             || !health::same_workspace(&archive, &workspace)
-            || !health::untouched(&workspace)
+            || !health::untouched(&workspace, &self.host)
         {
             return Ok(None);
         }
@@ -1197,14 +1199,14 @@ fn path_is_free(archive: &Archive) -> Result<bool, Error> {
 ///
 /// Returns the refusal, and [`Error::StateUnreadable`] when a directory
 /// cannot be read.
-pub(crate) fn refuse_other_files(archive: &Archive) -> Result<(), Error> {
+pub(crate) fn refuse_other_files(archive: &Archive, host: &Host) -> Result<(), Error> {
     let Some(RestoreMark(made)) = &archive.restoring else {
         return Ok(());
     };
     if !made.directory {
         return Ok(());
     }
-    let paths = other_files(archive, made)?;
+    let paths = other_files(archive, made, host)?;
     if paths.is_empty() {
         return Ok(());
     }
@@ -1237,8 +1239,8 @@ struct Accounted {
 /// marker once it did, and the temporary file `.<name>.<pid>.<n>.tmp` or
 /// `.<name>.<pid>.tmp` that a write of one of those files leaves when it
 /// stops.
-fn other_files(archive: &Archive, made: &MadeSoFar) -> Result<Vec<String>, Error> {
-    let workspace = archive.workspace();
+fn other_files(archive: &Archive, made: &MadeSoFar, host: &Host) -> Result<Vec<String>, Error> {
+    let workspace = archive.workspace().with_host(host);
     let started = made.clones.max(made.branches.len());
     let mut accounted = Accounted {
         whole: Vec::new(),
@@ -1247,7 +1249,7 @@ fn other_files(archive: &Archive, made: &MadeSoFar) -> Result<Vec<String>, Error
     };
     for checkout in workspace.checkouts.iter().take(started) {
         accounted.whole.push(checkout.path.clone());
-        accounted.whole.extend(aside(&checkout.path));
+        accounted.whole.extend(aside(&checkout.path, host));
     }
     // The run marks `AGENTS.md`, the manifest and the root files as written
     // in one step, before it writes any of them.

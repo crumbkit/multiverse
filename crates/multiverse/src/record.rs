@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::ArchiveId;
 use crate::error::Error;
+use crate::host::{Host, ManifestNames};
 use crate::name::WorkspaceName;
 
 /// The highest version of the record form that this version of multiverse
@@ -288,6 +289,11 @@ pub struct Workspace {
     /// mxv that rewrites the record drops the key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub board_mounts: Vec<BoardMount>,
+    /// The names of the host whose manifest files the workspace reads,
+    /// which the record never stores. A record reads with mxv's names, and
+    /// [`Workspace::with_host`] gives it another host's.
+    #[serde(skip)]
+    pub(crate) names: ManifestNames,
 }
 
 /// A mount of a board that follows the repository whose workspace this
@@ -421,6 +427,7 @@ impl TryFrom<StoredWorkspace> for Workspace {
             pinned: stored.pinned,
             reclaimed: stored.reclaimed,
             board_mounts: stored.board_mounts,
+            names: ManifestNames::MXV,
         })
     }
 }
@@ -482,7 +489,18 @@ impl Workspace {
             pinned: false,
             reclaimed: None,
             board_mounts: Vec::new(),
+            names: ManifestNames::MXV,
         }
+    }
+
+    /// Returns the record with `host`'s names, so its manifest methods,
+    /// such as [`Workspace::manifest`], read `host`'s manifest file and
+    /// refuse the unit names that `host` keeps. The record's stored form
+    /// does not change.
+    #[must_use]
+    pub fn with_host(mut self, host: &Host) -> Self {
+        self.names = host.manifest_names();
+        self
     }
 
     /// Returns the record as one of a workspace of git worktrees, with the
@@ -615,7 +633,7 @@ impl Workspace {
             .path
             .canonicalize()
             .ok()
-            .map(|dir| dir.join(crate::manifest::MANIFEST_FILE));
+            .map(|dir| dir.join(&*self.names.file));
         self.checkouts.iter().any(|checkout| {
             file.starts_with(&checkout.path)
                 || resolved.as_ref().is_some_and(|file| {

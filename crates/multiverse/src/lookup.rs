@@ -39,12 +39,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::manifest::{
-    Joined, MANIFEST_FILE, Manifest, ManifestError, ManifestProblem, Secret, Task, TaskName,
-};
+use crate::manifest::{Joined, Manifest, ManifestError, ManifestProblem, Secret, Task, TaskName};
 use crate::name::MOST_NAME_BYTES;
 use crate::record::{Checkout, Workspace};
-use crate::service::{RESERVED_PREFIX, Service};
+use crate::service::Service;
 
 #[cfg(test)]
 mod tests;
@@ -218,6 +216,8 @@ struct Declared {
     /// The extra host names, which keep their names in a merged manifest,
     /// because the proxy serves each name once.
     hosts: BTreeMap<String, PathBuf>,
+    /// The prefix of the unit names that the host keeps for itself.
+    unit_prefix: String,
 }
 
 impl Declared {
@@ -226,14 +226,24 @@ impl Declared {
     /// manifest name may be. Containers of one file may share a volume.
     fn add(&mut self, manifest: &Manifest, path: &Path) -> Result<(), ManifestError> {
         let units = manifest.processes.keys().chain(manifest.containers.keys());
-        declare(&mut self.units, units, path)?;
-        declare(&mut self.ports, manifest.ports.iter(), path)?;
+        declare(&mut self.units, units, path, &self.unit_prefix)?;
+        declare(
+            &mut self.ports,
+            manifest.ports.iter(),
+            path,
+            &self.unit_prefix,
+        )?;
         let volumes: BTreeSet<&String> = manifest
             .containers
             .values()
             .flat_map(|container| container.volumes.keys())
             .collect();
-        declare(&mut self.volumes, volumes.into_iter(), path)?;
+        declare(
+            &mut self.volumes,
+            volumes.into_iter(),
+            path,
+            &self.unit_prefix,
+        )?;
         self.add_hosts(manifest, path)?;
         self.add_services(manifest, path)
     }
@@ -317,6 +327,7 @@ fn declare<'a>(
     names: &mut BTreeMap<String, PathBuf>,
     added: impl Iterator<Item = &'a String>,
     path: &Path,
+    unit_prefix: &str,
 ) -> Result<(), ManifestError> {
     let failure = |problem| ManifestError {
         path: path.to_path_buf(),
@@ -332,11 +343,11 @@ fn declare<'a>(
             }));
         }
         // A checkout folder named `mxv` would prefix its names `mxv-`.
-        if name.starts_with(RESERVED_PREFIX) {
+        if name.starts_with(unit_prefix) {
             return Err(failure(ManifestProblem::Invalid {
                 message: format!(
                     "the merged name {}, so give its checkout another folder name with `--as`",
-                    crate::manifest::reserved_message(name)
+                    crate::manifest::reserved_message(name, unit_prefix)
                 ),
             }));
         }
@@ -393,7 +404,7 @@ impl Workspace {
     /// whether or not it exists.
     #[must_use]
     pub fn manifest_file(&self) -> PathBuf {
-        self.path.join(MANIFEST_FILE)
+        self.path.join(&*self.names.file)
     }
 
     /// Reports whether the workspace has more than one checkout, so it
@@ -439,13 +450,13 @@ impl Workspace {
         let workspace = self.workspace_manifest_input();
         let repository = checkout
             .or_else(|| self.manifest_checkout())
-            .map(|checkout| checkout.path.join(MANIFEST_FILE))
+            .map(|checkout| checkout.path.join(&*self.names.file))
             .filter(|path| exists(path));
         let merged = self.has_several_checkouts();
         let checkouts = if merged {
             self.checkouts
                 .iter()
-                .map(|checkout| checkout.path.join(MANIFEST_FILE))
+                .map(|checkout| checkout.path.join(&*self.names.file))
                 .filter(|path| exists(path))
                 .collect()
         } else {
@@ -509,7 +520,7 @@ impl Workspace {
     ) -> Result<Option<Manifest>, ManifestError> {
         if self.has_several_checkouts() {
             return match checkout {
-                Some(checkout) => Manifest::read(&checkout.path),
+                Some(checkout) => Manifest::read_as(&checkout.path, &self.names),
                 None => self.merged_manifest(),
             };
         }
@@ -519,7 +530,7 @@ impl Workspace {
             return Ok(None);
         };
         let root = checkout.map_or(self.path.as_path(), |checkout| checkout.path.as_path());
-        Manifest::read_file(path, root)
+        Manifest::read_file_as(path, root, &Joined::default(), &self.names)
     }
 
     /// Returns the places that hold the workspace's tasks, one for each
@@ -553,7 +564,7 @@ impl Workspace {
             });
         }
         for checkout in &self.checkouts {
-            let manifest = Manifest::read(&checkout.path)?.unwrap_or_default();
+            let manifest = Manifest::read_as(&checkout.path, &self.names)?.unwrap_or_default();
             let prefix = checkout_prefix(&checkout.name);
             homes.push(TaskHome {
                 checkout: Some(checkout.name.clone()),
@@ -599,7 +610,7 @@ impl Workspace {
                 files.push((manifest, self.path.clone()));
             }
             for checkout in &self.checkouts {
-                if let Some(manifest) = Manifest::read(&checkout.path)? {
+                if let Some(manifest) = Manifest::read_as(&checkout.path, &self.names)? {
                     files.push((manifest, checkout.path.clone()));
                 }
             }
@@ -656,7 +667,7 @@ impl Workspace {
             }
             self.join_checkouts(&mut joined);
         }
-        Manifest::read_file_joining(&path, self.manifest_root(), &joined)
+        Manifest::read_file_as(&path, self.manifest_root(), &joined, &self.names)
     }
 
     /// Returns each checkout's own `mxv.toml` that exists, with its names
@@ -665,14 +676,16 @@ impl Workspace {
     fn renamed_checkout_manifests(&self) -> Vec<Result<(&Checkout, Manifest), ManifestError>> {
         self.checkouts
             .iter()
-            .filter_map(|checkout| match Manifest::read(&checkout.path) {
-                Ok(Some(own)) => {
-                    let prefix = checkout_prefix(&checkout.name);
-                    Some(Ok((checkout, own.renamed(&|name| prefixed(&prefix, name)))))
-                }
-                Ok(None) => None,
-                Err(error) => Some(Err(error)),
-            })
+            .filter_map(
+                |checkout| match Manifest::read_as(&checkout.path, &self.names) {
+                    Ok(Some(own)) => {
+                        let prefix = checkout_prefix(&checkout.name);
+                        Some(Ok((checkout, own.renamed(&|name| prefixed(&prefix, name)))))
+                    }
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                },
+            )
             .collect()
     }
 
@@ -718,20 +731,24 @@ impl Workspace {
         for read in self.renamed_checkout_manifests() {
             let (checkout, renamed) = read?;
             joined.add(&renamed);
-            checkouts.push((checkout.path.join(MANIFEST_FILE), checkout, renamed));
+            checkouts.push((checkout.path.join(&*self.names.file), checkout, renamed));
         }
         self.join_checkouts(&mut joined);
         let shared = match (text, self.workspace_manifest_input()) {
             (Some(text), _) => {
                 let path = self.manifest_file();
-                let manifest = Manifest::parse_at(text, &path, &self.path, &joined)?;
+                let manifest =
+                    Manifest::parse_at_as(text, &path, &self.path, &joined, &self.names)?;
                 Some((path, manifest))
             }
-            (None, Some(path)) => Manifest::read_file_joining(&path, &self.path, &joined)?
+            (None, Some(path)) => Manifest::read_file_as(&path, &self.path, &joined, &self.names)?
                 .map(|manifest| (path, manifest)),
             (None, None) => None,
         };
-        let mut declared = Declared::default();
+        let mut declared = Declared {
+            unit_prefix: self.names.unit_prefix.clone().into_owned(),
+            ..Declared::default()
+        };
         let mut merged: Option<Manifest> = None;
         if let Some((path, manifest)) = shared {
             declared.add(&manifest, &path)?;

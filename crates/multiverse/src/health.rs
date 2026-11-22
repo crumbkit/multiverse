@@ -279,7 +279,8 @@ impl ArchiveReading<'_> {
         }
         let problem = match self.case {
             ArchiveCase::Resumable(workspace)
-                if self.state == ArchiveState::Retiring && untouched(workspace) =>
+                if self.state == ArchiveState::Retiring
+                    && untouched(workspace, &crate::Host::mxv()) =>
             {
                 Problem::ArchiveNotStarted
             }
@@ -519,12 +520,12 @@ pub(crate) fn checkouts_gone(workspace: &Workspace) -> bool {
 /// workspace without checkouts is never untouched, because nothing on
 /// disk says whether its archive already deleted the root files, whose
 /// only copies the archive then holds.
-pub(crate) fn untouched(workspace: &Workspace) -> bool {
+pub(crate) fn untouched(workspace: &Workspace, host: &crate::Host) -> bool {
     !workspace.checkouts.is_empty()
         && workspace.path.is_dir()
         && workspace.checkouts.iter().all(|checkout| {
             checkout.path.is_dir()
-                && crate::archive::quarantine(&checkout.path)
+                && crate::archive::quarantine(&checkout.path, host)
                     .is_some_and(|held| held.symlink_metadata().is_err())
         })
 }

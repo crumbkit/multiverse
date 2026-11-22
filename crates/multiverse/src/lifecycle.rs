@@ -390,7 +390,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// and the directory.
     pub fn check_stopped_restore(&self, archive: &Archive) -> Result<(), Error> {
         if archive.restoring.is_some() && self.workspaces.store.read(&archive.name)?.is_none() {
-            crate::archive::refuse_other_files(archive)?;
+            crate::archive::refuse_other_files(archive, &self.workspaces.host)?;
         }
         Ok(())
     }

@@ -59,6 +59,7 @@ use crate::backend::{
     StashEntry, WipCommits, WipTrees,
 };
 use crate::error::Error;
+use crate::host::Host;
 use crate::mirror::redacted;
 use crate::process::{deadline_in, ran_to_its_end};
 
@@ -126,10 +127,14 @@ impl Finished {
     }
 }
 
-/// The pattern of the copies of the heads and tags of a clone's mirror, as
-/// the mirror held them when the clone was last counted. Earlier versions of
-/// mxv also kept copies of origin's tags and notes here.
-const ORIGIN_REFS: &str = "--glob=refs/mxv/origin/*";
+/// Returns the pattern of the copies of the heads and tags of a clone's
+/// mirror below `host`'s origin namespace, such as
+/// `--glob=refs/mxv/origin/*`, as the mirror held them when the clone was
+/// last counted. Earlier versions of mxv also kept copies of origin's tags
+/// and notes there.
+fn origin_refs(host: &Host) -> String {
+    format!("--glob={}*", host.origin_namespace())
+}
 
 /// Returns the lines of `text` that are not empty.
 fn lines(text: &str) -> Vec<String> {
@@ -151,14 +156,17 @@ fn shared_mirror(checkout: &Path) -> Option<PathBuf> {
 }
 
 /// Copies the heads and tags that the mirror of `checkout` holds into the
-/// checkout's `refs/mxv/origin/`, so that the count of unpushed commits
-/// treats them as pushed. The mirror holds origin's heads and tags as of
+/// checkout's origin namespace of `host`, such as `refs/mxv/origin/`, so
+/// that the count of unpushed commits treats them as pushed. The mirror holds origin's heads and tags as of
 /// its last fetch, and the copy contacts no remote. Copies of refs that the
 /// mirror no longer holds are removed.
-fn copy_mirror_refs(checkout: &Path) -> Result<(), Error> {
+fn copy_mirror_refs(checkout: &Path, host: &Host) -> Result<(), Error> {
     let Some(mirror) = shared_mirror(checkout) else {
         return Ok(());
     };
+    let origin = host.origin_namespace();
+    let heads = format!("+refs/heads/*:{origin}heads/*");
+    let tags = format!("+refs/tags/*:{origin}tags/*");
     run(
         checkout,
         [
@@ -170,8 +178,8 @@ fn copy_mirror_refs(checkout: &Path) -> Result<(), Error> {
             OsStr::new("--no-write-fetch-head"),
             OsStr::new("--no-recurse-submodules"),
             mirror.as_os_str(),
-            OsStr::new("+refs/heads/*:refs/mxv/origin/heads/*"),
-            OsStr::new("+refs/tags/*:refs/mxv/origin/tags/*"),
+            OsStr::new(&heads),
+            OsStr::new(&tags),
         ],
         "fetch from mirror",
         LOCAL_DEADLINE,
@@ -1025,8 +1033,13 @@ impl Backend for Git {
     }
 
     fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {
+        self.unpushed_commits_for(checkout, &Host::mxv())
+    }
+
+    fn unpushed_commits_for(&self, checkout: &Path, host: &Host) -> Result<Vec<String>, Error> {
         let mut unpushed = Vec::new();
-        copy_mirror_refs(checkout)?;
+        copy_mirror_refs(checkout, host)?;
+        let origin = origin_refs(host);
         for dir in git_dirs(checkout)? {
             let held = run(
                 &dir,
@@ -1038,7 +1051,7 @@ impl Backend for Git {
                     "--glob=refs/notes/*",
                     "--not",
                     "--remotes=origin",
-                    ORIGIN_REFS,
+                    &origin,
                     "--",
                 ],
                 "rev-list",
@@ -1046,7 +1059,7 @@ impl Backend for Git {
             )?
             .ok("rev-list", &dir)?;
             let held = lines(&held);
-            let detached = detached::detached_commits(&dir)?;
+            let detached = detached::detached_commits(&dir, host)?;
             unpushed.extend(detached.into_iter().filter(|commit| !held.contains(commit)));
             unpushed.extend(held);
         }
@@ -1120,7 +1133,17 @@ impl Backend for Git {
         kept: &[String],
         shared: bool,
     ) -> Result<Vec<String>, Error> {
-        archive::orphans(checkout, kept, shared)
+        archive::orphans(checkout, kept, shared, &Host::mxv())
+    }
+
+    fn orphans_for(
+        &self,
+        checkout: &Path,
+        kept: &[String],
+        shared: bool,
+        host: &Host,
+    ) -> Result<Vec<String>, Error> {
+        archive::orphans(checkout, kept, shared, host)
     }
 
     fn large_files(&self, checkout: &Path, most: u64) -> Result<Vec<LargeFile>, Error> {
@@ -1144,7 +1167,18 @@ impl Backend for Git {
         time: u64,
         message: &str,
     ) -> Result<WipCommits, Error> {
-        archive::write_wip(checkout, index, left_out, time, message)
+        archive::write_wip(checkout, index, left_out, time, message, &Host::mxv())
+    }
+
+    fn write_wip_for(
+        &self,
+        checkout: &Path,
+        index: &Path,
+        left_out: &[String],
+        time: u64,
+        host: &Host,
+    ) -> Result<WipCommits, Error> {
+        archive::write_wip(checkout, index, left_out, time, &host.wip_message(), host)
     }
 
     fn tree_of(&self, dir: &Path, commit: &str) -> Result<String, Error> {
@@ -1180,7 +1214,11 @@ impl Backend for Git {
     }
 
     fn concealed(&self, checkout: &Path) -> Result<Concealed, Error> {
-        concealed::concealed(checkout)
+        concealed::concealed(checkout, &Host::mxv())
+    }
+
+    fn concealed_for(&self, checkout: &Path, host: &Host) -> Result<Concealed, Error> {
+        concealed::concealed(checkout, host)
     }
 
     fn local_names(&self, checkout: &Path, source: &Path) -> Result<LocalNames, Error> {
@@ -1192,7 +1230,16 @@ impl Backend for Git {
     }
 
     fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error> {
-        archive::local_only_commits(dir, revision)
+        archive::local_only_commits(dir, revision, &Host::mxv())
+    }
+
+    fn local_only_commits_for(
+        &self,
+        dir: &Path,
+        revision: &str,
+        host: &Host,
+    ) -> Result<Vec<String>, Error> {
+        archive::local_only_commits(dir, revision, host)
     }
 
     fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error> {

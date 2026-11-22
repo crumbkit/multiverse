@@ -7,7 +7,9 @@ use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 use etcetera::BaseStrategy as _;
-use multiverse::{CallerEnvironment, DEFAULT_PORT_RANGE, Proxy, ProxySettings as Settings, Runs};
+use multiverse::{
+    CallerEnvironment, DEFAULT_PORT_RANGE, Host, Proxy, ProxySettings as Settings, Runs,
+};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -239,6 +241,7 @@ impl Environment {
             .proxy_https
             .unwrap_or_else(|| Settings::new(PathBuf::new(), PathBuf::new()).https());
         let mut runs = Runs::new(&self.state()?)
+            .with_host(Host::mxv())
             .with_proxy_urls(self.state()?.join("workspaces"), https)
             .with_caller(self.caller.clone())
             .with_protected(vec![self.state()?, self.mirrors()?, self.proxy_data()?]);
@@ -267,7 +270,9 @@ impl Environment {
             .with_caddy(config.caddy)
             .with_search(self.caller.path_dirs())
             .with_config(self.config_file()?);
-        let mut proxy = Proxy::new(settings).with_caller(&self.caller);
+        let mut proxy = Proxy::new(settings)
+            .with_host(Host::mxv())
+            .with_caller(&self.caller);
         if let Some(program) = &self.program {
             proxy = proxy.with_keeper(
                 program.clone(),

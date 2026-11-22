@@ -49,6 +49,8 @@ mod tests;
 
 /// The prefix of the names of mxv's own apps and ports. A manifest's
 /// process, container or port may not start with it.
+/// This is the value of mxv's profile, [`Host::mxv`](crate::Host::mxv);
+/// another host's is [`Host::unit_prefix`](crate::Host::unit_prefix).
 pub const RESERVED_PREFIX: &str = "mxv-";
 
 /// The name of the host app that creates the declared resources.

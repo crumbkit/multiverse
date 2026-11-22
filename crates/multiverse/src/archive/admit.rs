@@ -698,7 +698,7 @@ impl<B: Backend> Workspaces<B> {
             let Some(commit) = head.commit.clone() else {
                 return Ok(unusable(folder, "its HEAD names no commit"));
             };
-            let concealed = self.backend.concealed(path)?;
+            let concealed = self.backend.concealed_for(path, &self.host)?;
             if workspace.kind == WorkspaceKind::Worktree
                 && let Some(submodule) = concealed.submodules.first()
             {
@@ -721,12 +721,14 @@ impl<B: Backend> Workspaces<B> {
             if refresh {
                 warnings.extend(self.unkept_names(planned)?);
             }
-            let local_only = self.backend.local_only_commits(path, "HEAD")?;
+            let local_only = self
+                .backend
+                .local_only_commits_for(path, "HEAD", &self.host)?;
             let kept = self.kept(workspace.kind, planned, head.branch.as_deref())?;
             checkouts.push(self.archived(planned, head, commit, local_only, kept, &id)?);
         }
         let generated = self.generated_agents(&workspace)?;
-        let scanned = root::scan(&workspace, &generated)?;
+        let scanned = root::scan(&workspace, &generated, &self.host)?;
         if let Some(refused) = refuse_root(&workspace, &scanned) {
             return Ok(refused);
         }
@@ -909,8 +911,9 @@ impl<B: Backend> Workspaces<B> {
             // with, comes back with a rebuilt clone, so only the others are
             // kept.
             let mut held_heads = self.backend.refs_under(own, "refs/remotes/origin/")?;
-            let mut held: Vec<(String, String)> =
-                self.backend.refs_under(own, "refs/mxv/origin/tags/")?;
+            let mut held: Vec<(String, String)> = self
+                .backend
+                .refs_under(own, &format!("{}tags/", self.host.origin_namespace()))?;
             if let Some(mirror) = planned.checkout.mirror().filter(|dir| dir.is_dir()) {
                 let mirror = RefHolder::Mirror(mirror);
                 held_heads.extend(self.backend.refs_under(mirror, "refs/heads/")?);
@@ -929,9 +932,12 @@ impl<B: Backend> Workspaces<B> {
                 .filter(|tag| !held.contains(tag))
                 .collect();
         }
-        kept.orphans =
-            self.backend
-                .orphans(path, &kept.references(), kind == WorkspaceKind::Worktree)?;
+        kept.orphans = self.backend.orphans_for(
+            path,
+            &kept.references(),
+            kind == WorkspaceKind::Worktree,
+            &self.host,
+        )?;
         Ok(kept)
     }
 
@@ -1090,7 +1096,7 @@ impl<B: Backend> Workspaces<B> {
             base: checkout.base.clone(),
             commit,
             mirror: checkout.mirror().map(Path::to_path_buf),
-            pin: pin_ref(id.as_str(), &checkout.name),
+            pin: pin_ref(&self.host, id.as_str(), &checkout.name),
             local_only,
             kept,
         })

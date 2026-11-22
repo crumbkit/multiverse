@@ -254,9 +254,9 @@ pub(crate) struct Inputs<'a> {
     /// `cwd` becomes the rest of the path.
     pub(crate) roots: Vec<PathBuf>,
     /// The workspace's own directory, which holds its checkouts, its
-    /// manifest and its `AGENTS.md`, or `None` when the plan is built
-    /// without a workspace on disk.
-    pub(crate) workspace_dir: Option<&'a Path>,
+    /// manifest and its `AGENTS.md`, with the host's manifest file name,
+    /// or `None` when the plan is built without a workspace on disk.
+    pub(crate) workspace_dir: Option<(&'a Path, &'a str)>,
     /// The workspace's host ports, by port name.
     pub(crate) ports: &'a BTreeMap<String, u16>,
     /// How long a process gets after its stop signal.
@@ -530,11 +530,11 @@ fn assemble(
     // A sandboxed app may use only its own checkout of the workspace, and
     // never the workspace manifest or `AGENTS.md`, which lie in the
     // workspace's own directory.
-    if let Some(dir) = inputs.workspace_dir {
+    if let Some((dir, manifest_file)) = inputs.workspace_dir {
         plan = plan.with_workspace_dir(
             dir.to_path_buf(),
             vec![
-                dir.join(crate::manifest::MANIFEST_FILE),
+                dir.join(manifest_file),
                 dir.join(crate::record::AGENTS_FILE),
             ],
         );

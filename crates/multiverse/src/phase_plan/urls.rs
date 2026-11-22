@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 
 use crate::manifest::host_label;
 use crate::name::WorkspaceName;
-use crate::proxy::{DOMAIN, Route};
+use crate::proxy::Route;
 
 /// The prefix of the variable that holds a route's host name.
 const HOST_PREFIX: &str = "MXV_HOST_";
@@ -30,7 +30,12 @@ impl ProxyUrls {
     /// Returns the names for `workspace` from `served`, the routes that the
     /// proxy serves for every workspace, whose URLs carry the port of
     /// `https` unless it is 443.
-    pub(crate) fn of(workspace: &WorkspaceName, served: &[Route], https: SocketAddr) -> Self {
+    pub(crate) fn of(
+        workspace: &WorkspaceName,
+        served: &[Route],
+        https: SocketAddr,
+        domain: &str,
+    ) -> Self {
         let routes: Vec<(String, String, String)> = served
             .iter()
             .filter(|route| &route.workspace == workspace)
@@ -40,7 +45,7 @@ impl ProxyUrls {
             return Self::default();
         }
         Self {
-            domain: format!("{}.{DOMAIN}", host_label(workspace.as_str())),
+            domain: format!("{}.{domain}", host_label(workspace.as_str())),
             routes,
         }
     }
