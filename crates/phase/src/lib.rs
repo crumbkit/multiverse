@@ -58,7 +58,8 @@ pub use crate::phase::{
 pub use crate::plan::container::{BindMount, ContainerOptions, KEEP_OWNER, is_volume_owner};
 pub use crate::plan::probe::{
     BadLogPattern, DEFAULT_FAILURE_THRESHOLD, DEFAULT_PROBE_PERIOD, DEFAULT_PROBE_TIMEOUT,
-    LEAST_PUBLISHED_PROBE_TIMEOUT, LogPattern, Probe, ProbeCheck,
+    HttpStatus, JsonExpectation, JsonPointer, JsonScalar, LEAST_PUBLISHED_PROBE_TIMEOUT,
+    LogPattern, MOST_EXPECTED_STRING_BYTES, MOST_JSON_EXPECTATIONS, Probe, ProbeCheck,
 };
 pub use crate::plan::restart::{
     Backoff, BadBackoff, DEFAULT_FIRST_BACKOFF, DEFAULT_MOST_BACKOFF, DEFAULT_STOP_GRACE,

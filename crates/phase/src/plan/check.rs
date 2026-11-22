@@ -7,7 +7,8 @@ use std::path::{Component, Path, PathBuf};
 
 use super::container::is_volume_owner;
 use super::probe::{
-    BadLogPattern, LEAST_PUBLISHED_PROBE_TIMEOUT, LogPattern, ProbeCheck, is_sendable_path,
+    BadLogPattern, HttpStatus, JsonExpectation, JsonScalar, LEAST_PUBLISHED_PROBE_TIMEOUT,
+    LogPattern, MOST_EXPECTED_STRING_BYTES, MOST_JSON_EXPECTATIONS, ProbeCheck, is_sendable_path,
 };
 use super::restart::Restart;
 use super::{AppPlan, MOST_READY_TIMEOUT, MOST_STOP_GRACE, ProcessKind, ProcessPlan, RunnerKind};
@@ -310,6 +311,20 @@ pub enum ProcessProblem {
     /// The HTTP probe's path holds a space, a control character, a
     /// character outside ASCII or `#`, so phase cannot send it as written.
     HttpPathUnsendable,
+    /// The HTTP probe's expected status is outside 100 to 599.
+    #[non_exhaustive]
+    HttpStatusOutOfRange(u16),
+    /// A JSON pointer of the HTTP probe is not empty and does not start
+    /// with `/`, or holds a `~` followed by anything other than `0` or `1`.
+    #[non_exhaustive]
+    BadJsonPointer(String),
+    /// The HTTP probe has more than [`MOST_JSON_EXPECTATIONS`] JSON
+    /// expectations.
+    TooManyJsonExpectations,
+    /// The HTTP probe expects the field at the pointer given to equal a
+    /// string longer than [`MOST_EXPECTED_STRING_BYTES`] bytes.
+    #[non_exhaustive]
+    JsonStringTooLong(String),
     /// The log probe's pattern is empty.
     EmptyLogPattern,
     /// The log probe's pattern is not a regular expression.
@@ -529,6 +544,22 @@ impl fmt::Display for ProcessProblem {
             }
             Self::HttpPathUnsendable => formatter.write_str(
                 "its http probe's path holds a space, a control character, a character outside ASCII or `#`",
+            ),
+            Self::HttpStatusOutOfRange(status) => write!(
+                formatter,
+                "its http probe expects the status {status}, which is outside 100 to 599"
+            ),
+            Self::BadJsonPointer(pointer) => write!(
+                formatter,
+                "its http probe's JSON pointer {pointer:?} is not empty and does not start with `/`, or holds a `~` that is not `~0` or `~1`"
+            ),
+            Self::TooManyJsonExpectations => write!(
+                formatter,
+                "its http probe has more than {MOST_JSON_EXPECTATIONS} JSON expectations"
+            ),
+            Self::JsonStringTooLong(pointer) => write!(
+                formatter,
+                "its http probe expects the JSON field {pointer} to equal a string longer than {MOST_EXPECTED_STRING_BYTES} bytes"
             ),
             Self::EmptyLogPattern => formatter.write_str("its log probe's pattern is empty"),
             Self::BadLogPattern { reason } => write!(
@@ -1100,12 +1131,13 @@ fn check_probe_check(
         ProbeCheck::Http { .. } if process.port.is_none() => {
             Err(ProcessProblem::HttpProbeWithoutPort)
         }
-        ProbeCheck::Http { path } if !path.starts_with('/') => {
+        ProbeCheck::Http { path, .. } if !path.starts_with('/') => {
             Err(ProcessProblem::HttpPathWithoutSlash)
         }
-        ProbeCheck::Http { path } if !is_sendable_path(path) => {
+        ProbeCheck::Http { path, .. } if !is_sendable_path(path) => {
             Err(ProcessProblem::HttpPathUnsendable)
         }
+        ProbeCheck::Http { status, json, .. } => check_http_expectations(*status, json),
         ProbeCheck::Tcp { port } if !app.ports.contains_key(port) => {
             Err(ProcessProblem::UnknownPort(port.clone()))
         }
@@ -1115,6 +1147,34 @@ fn check_probe_check(
             Err(BadLogPattern::Invalid(reason)) => Err(ProcessProblem::BadLogPattern { reason }),
         },
         ProbeCheck::Command { run } if run.is_empty() => Err(ProcessProblem::EmptyProbeCommand),
-        ProbeCheck::Http { .. } | ProbeCheck::Tcp { .. } | ProbeCheck::Command { .. } => Ok(()),
+        ProbeCheck::Tcp { .. } | ProbeCheck::Command { .. } => Ok(()),
     }
+}
+
+/// Checks the expected status and the JSON expectations of an HTTP probe.
+fn check_http_expectations(
+    status: Option<HttpStatus>,
+    json: &[JsonExpectation],
+) -> Result<(), ProcessProblem> {
+    if let Some(status) = status.filter(|status| !(100..=599).contains(&status.get())) {
+        return Err(ProcessProblem::HttpStatusOutOfRange(status.get()));
+    }
+    if json.len() > MOST_JSON_EXPECTATIONS {
+        return Err(ProcessProblem::TooManyJsonExpectations);
+    }
+    for expectation in json {
+        if !expectation.pointer.is_valid() {
+            return Err(ProcessProblem::BadJsonPointer(
+                expectation.pointer.as_str().to_owned(),
+            ));
+        }
+        if let Some(JsonScalar::String(text)) = &expectation.equals
+            && text.len() > MOST_EXPECTED_STRING_BYTES
+        {
+            return Err(ProcessProblem::JsonStringTooLong(
+                expectation.pointer.as_str().to_owned(),
+            ));
+        }
+    }
+    Ok(())
 }

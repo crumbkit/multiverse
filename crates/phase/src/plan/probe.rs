@@ -29,6 +29,14 @@ pub const DEFAULT_FAILURE_THRESHOLD: NonZeroU32 = match NonZeroU32::new(3) {
     None => NonZeroU32::MIN,
 };
 
+/// The most JSON expectations that one HTTP probe holds. A plan with more
+/// is refused before anything starts.
+pub const MOST_JSON_EXPECTATIONS: usize = 32;
+
+/// The most bytes of one string that an HTTP probe expects a JSON field to
+/// equal. A plan with a longer one is refused before anything starts.
+pub const MOST_EXPECTED_STRING_BYTES: usize = 1024;
+
 /// Returns [`DEFAULT_PROBE_PERIOD`], for a probe read from JSON that omits
 /// its period.
 const fn default_period() -> Duration {
@@ -107,15 +115,29 @@ impl Probe {
 #[non_exhaustive]
 pub enum ProbeCheck {
     /// An HTTP `GET` of `path` on the process's own port returns a 2xx
-    /// status. The probe connects to 127.0.0.1, and to ::1 when 127.0.0.1
-    /// refuses or fails, so a server that listens only on ::1 passes. It
-    /// sends the request to the address that accepted, with the `Host`
-    /// header `localhost:<port>`. The process has a port.
+    /// status, or exactly `status` when the probe sets it, and a JSON body
+    /// that meets every expectation in `json`. The probe connects to
+    /// 127.0.0.1, and to ::1 when 127.0.0.1 refuses or fails, so a server
+    /// that listens only on ::1 passes. It sends the request to the address
+    /// that accepted, with the `Host` header `localhost:<port>`. The process
+    /// has a port.
+    ///
+    /// A probe without `json` reads only the status line. A probe with
+    /// `json` reads the body as well, up to 65,536 bytes, and an attempt
+    /// whose body is longer fails.
     #[non_exhaustive]
     Http {
         /// The request path, which starts with `/` and holds only printable
         /// ASCII characters other than space and `#`.
         path: String,
+        /// The one status that passes. When it is absent, any 2xx status
+        /// passes. The plan refuses a status outside 100 to 599.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        status: Option<HttpStatus>,
+        /// What the response's JSON body must hold, at most 32
+        /// expectations. When it is empty, the probe reads no body.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        json: Vec<JsonExpectation>,
     },
     /// A TCP connection to the named port of the app succeeds, on 127.0.0.1
     /// or, when 127.0.0.1 refuses or fails, on ::1.
@@ -149,7 +171,23 @@ impl ProbeCheck {
     /// 2xx status.
     #[must_use]
     pub const fn http(path: String) -> Self {
-        Self::Http { path }
+        Self::Http {
+            path,
+            status: None,
+            json: Vec::new(),
+        }
+    }
+
+    /// Returns the check that `GET path` on the process's port returns
+    /// `status`, or any 2xx status when `status` is `None`, and a JSON body
+    /// that meets every expectation in `json`.
+    #[must_use]
+    pub const fn http_expecting(
+        path: String,
+        status: Option<HttpStatus>,
+        json: Vec<JsonExpectation>,
+    ) -> Self {
+        Self::Http { path, status, json }
     }
 
     /// Returns the check that a TCP connection to the app's `port` succeeds.
@@ -170,6 +208,135 @@ impl ProbeCheck {
     pub const fn command(run: Vec<String>) -> Self {
         Self::Command { run }
     }
+}
+
+/// The one HTTP status code that an HTTP probe accepts, such as 200 or
+/// 204. The plan refuses a code outside 100 to 599.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct HttpStatus(u16);
+
+impl HttpStatus {
+    /// Returns the status `code`.
+    #[must_use]
+    pub const fn new(code: u16) -> Self {
+        Self(code)
+    }
+
+    /// Returns the status code.
+    #[must_use]
+    pub const fn get(self) -> u16 {
+        self.0
+    }
+}
+
+/// A JSON pointer (RFC 6901) that names one field of a JSON document, such
+/// as `/ok` or `/build/revision`. The empty pointer names the whole
+/// document. Within a name, `~1` stands for `/` and `~0` for `~`. The plan
+/// refuses a pointer that is not empty and does not start with `/`, or that
+/// holds a `~` followed by anything other than `0` or `1`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct JsonPointer(String);
+
+impl JsonPointer {
+    /// Returns the pointer `text`, which the plan checks.
+    #[must_use]
+    pub const fn new(text: String) -> Self {
+        Self(text)
+    }
+
+    /// Returns the pointer as the plan writes it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Reports whether the pointer follows RFC 6901: it is empty, or it
+    /// starts with `/` and each `~` in it is followed by `0` or `1`.
+    pub(crate) fn is_valid(&self) -> bool {
+        let text = self.0.as_bytes();
+        let escapes_well = text
+            .iter()
+            .enumerate()
+            .all(|(index, byte)| *byte != b'~' || matches!(text.get(index + 1), Some(b'0' | b'1')));
+        (text.is_empty() || text.starts_with(b"/")) && escapes_well
+    }
+}
+
+impl fmt::Display for JsonPointer {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// One thing an HTTP probe expects of the response's JSON body: that the
+/// field at `pointer` is present, or that it equals `equals`.
+///
+/// An expected value is plan data. The plan's JSON form, the run record's
+/// digest of the plan and `Debug` output can show it, so a host must never
+/// put a secret in `equals`. phase's failure texts name the pointer only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct JsonExpectation {
+    /// The field.
+    pub pointer: JsonPointer,
+    /// The value the field holds. When it is absent, the field must only be
+    /// present, with any value. JSON `null` here expects the field to hold
+    /// `null`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "present_scalar"
+    )]
+    pub equals: Option<JsonScalar>,
+}
+
+impl JsonExpectation {
+    /// Returns the expectation that the field at `pointer` is present.
+    #[must_use]
+    pub const fn present(pointer: JsonPointer) -> Self {
+        Self {
+            pointer,
+            equals: None,
+        }
+    }
+
+    /// Returns the expectation that the field at `pointer` equals `value`.
+    #[must_use]
+    pub const fn equals(pointer: JsonPointer, value: JsonScalar) -> Self {
+        Self {
+            pointer,
+            equals: Some(value),
+        }
+    }
+}
+
+/// Reads an `equals` value that the JSON form holds, so that `null` reads
+/// as [`JsonScalar::Null`] instead of an absent value.
+fn present_scalar<'de, D>(deserializer: D) -> Result<Option<JsonScalar>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    JsonScalar::deserialize(deserializer).map(Some)
+}
+
+/// A JSON value that an HTTP probe compares a field with. It holds no
+/// fraction, array or object, and the JSON form refuses one.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+#[non_exhaustive]
+pub enum JsonScalar {
+    /// `true` or `false`.
+    Bool(bool),
+    /// A whole number. A field equals it only when the field holds a number
+    /// written without a fraction or exponent that has the same value.
+    Integer(i64),
+    /// A string, at most 1,024 bytes long. The plan refuses a longer one.
+    String(String),
+    /// `null`.
+    Null,
 }
 
 /// A regular expression that a log probe matches against each new line.

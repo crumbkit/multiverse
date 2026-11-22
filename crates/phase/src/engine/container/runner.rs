@@ -137,7 +137,7 @@ use crate::engine::probe::{self, Check, Goal, LogLines, LogWatch, Outcome};
 use crate::env::AppliedEnvironment;
 use crate::error::PhaseError;
 use crate::name::{AppName, ProcessName, WorkspaceId};
-use crate::plan::probe::{LogPattern, ProbeCheck};
+use crate::plan::probe::{HttpStatus, LogPattern, ProbeCheck};
 use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, ProcessPlan};
 use crate::record::docker::DockerError;
@@ -995,8 +995,13 @@ impl ComposeRunner {
                         .map(|port| port.get())
                 };
                 let mut check = match &probe.check {
-                    ProbeCheck::Http { path } => match port(process.port.as_ref()) {
-                        Some(port) => Check::Http { port, path },
+                    ProbeCheck::Http { path, status, json } => match port(process.port.as_ref()) {
+                        Some(port) => Check::Http {
+                            port,
+                            path,
+                            status: status.map(HttpStatus::get),
+                            json,
+                        },
                         None => return Readiness::Failed(StartProblem::not_ready(Duration::ZERO)),
                     },
                     ProbeCheck::Tcp { port: name } => match port(Some(name)) {

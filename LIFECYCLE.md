@@ -333,6 +333,8 @@ Two writers own host entry states. The engine owns them during `up`, `restart` a
 | All `Stopped` to no record | `Journal::finish` | The write of the removal fails. | The record stays. | `down` or `sweep` runs again. | `a_directory_that_cannot_be_synced_fails_a_write_and_a_removal` in `phase/src/record/store/tests.rs` fails the sync. `finishing_removes_the_record_only_when_everything_is_stopped` in the same file checks a partly stopped record. |
 | Any write to the record | `Journal` | The directory sync fails after the rename. | The new record is on disk. | The journal keeps the new record. | `a_write_whose_directory_sync_fails_after_the_rename_keeps_the_new_record_in_the_journal` in `phase/src/record/store/tests.rs` fails the sync. |
 
+One attempt of a readiness probe holds no state between calls. An `http` attempt connects, sends, reads, judges and drops the connection within the probe's timeout. It reads at most 4,096 bytes of status line and headers, and, when the probe has JSON expectations, at most 65,536 bytes of body. A longer body fails the attempt, and the wait tries again until its deadline. No byte of the body reaches the record, a log line or a failure text, so an engine that dies during the read leaves the same record as one that dies between attempts.
+
 ## Oneshot completion
 
 `HostEntry.completed` (`phase/src/record/run.rs`) stores the plan hash of a oneshot that exited with status 0 since its last launch. It is empty or set. `mxv-provision` is such a oneshot, so every manifest with services uses it. A later `up` reads it to decide whether to run the oneshot again (`phase/src/engine/run/oneshot.rs`).

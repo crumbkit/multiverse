@@ -20,13 +20,20 @@
 //! # The checks
 //!
 //! - `http` sends `GET <path>` as HTTP/1.1 to the process's host port on
-//!   the loopback address, and passes on a 2xx status. It connects to
-//!   127.0.0.1, and to ::1 when 127.0.0.1 refuses or fails, because a dev
-//!   server such as Vite may listen only on ::1. The request goes to the
-//!   address that accepted, with the `Host` header `localhost:<port>`. It
-//!   follows no redirect, so a 3xx status fails. It reads at most
-//!   [`MOST_RESPONSE_BYTES`] bytes of the response and only needs the
-//!   status line.
+//!   the loopback address, and passes on a 2xx status, or on exactly the
+//!   status the probe expects. It connects to 127.0.0.1, and to ::1 when
+//!   127.0.0.1 refuses or fails, because a dev server such as Vite may
+//!   listen only on ::1. The request goes to the address that accepted,
+//!   with the `Host` header `localhost:<port>`. It follows no redirect, so
+//!   a 3xx status fails unless the probe expects it. It reads at most
+//!   [`MOST_RESPONSE_BYTES`] bytes of status line and headers. A check
+//!   with no JSON expectations reads only the status line. A check with
+//!   JSON expectations judges the status first, and only on a passing
+//!   status reads the body, framed by `Content-Length`, by chunked
+//!   transfer coding or by the server closing the connection. It reads at
+//!   most [`MOST_BODY_BYTES`] bytes of decoded body, parses it as JSON and
+//!   judges each expectation. The body is dropped when the attempt ends,
+//!   and no failure holds any of it.
 //! - `tcp` passes when a connection to the port on 127.0.0.1, or on ::1
 //!   when 127.0.0.1 refuses or fails, succeeds. The connection to ::1 gets
 //!   only the part of the probe's timeout that is left, so an attempt still
@@ -55,6 +62,7 @@ use std::io;
 use std::time::Duration;
 
 use crate::cancel::Cancel;
+use crate::plan::probe::{JsonExpectation, JsonPointer};
 
 mod command;
 mod http;
@@ -75,15 +83,27 @@ pub(crate) use runner::{READY_INTERVAL, Tally, Verdict};
 /// attempt.
 pub(crate) const MOST_RESPONSE_BYTES: usize = 4096;
 
+/// The most bytes of decoded response body that an HTTP check with JSON
+/// expectations reads. A longer body fails the attempt with
+/// [`Failure::BodyTooLong`], and a `Content-Length` above it fails the
+/// attempt before any of the body is read.
+pub(crate) const MOST_BODY_BYTES: usize = 65_536;
+
 /// One probe's check of one process, ready to attempt.
 pub(crate) enum Check<'a> {
     /// `GET path` at `port` on 127.0.0.1, or on ::1 when 127.0.0.1 does not
-    /// accept, returns a 2xx status.
+    /// accept, returns a 2xx status, or `status` when it is set, and a JSON
+    /// body that meets every expectation in `json`.
     Http {
         /// The process's host port.
         port: u16,
         /// The request path, which starts with `/`.
         path: &'a str,
+        /// The one status that passes, or `None` for any 2xx status.
+        status: Option<u16>,
+        /// What the JSON body must hold. When it is empty, the check reads
+        /// no body.
+        json: &'a [JsonExpectation],
     },
     /// A TCP connection to `port` on 127.0.0.1, or on ::1 when 127.0.0.1
     /// does not accept, succeeds.
@@ -119,10 +139,24 @@ pub(crate) enum Check<'a> {
 impl fmt::Debug for Check<'_> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Http { port, path } => formatter
+            // The expectations' values stay out, as the failure texts do.
+            Self::Http {
+                port,
+                path,
+                status,
+                json,
+            } => formatter
                 .debug_struct("Http")
                 .field("port", port)
                 .field("path", path)
+                .field("status", status)
+                .field(
+                    "json",
+                    &json
+                        .iter()
+                        .map(|expectation| expectation.pointer.as_str())
+                        .collect::<Vec<_>>(),
+                )
                 .finish(),
             Self::Tcp { port } => formatter.debug_struct("Tcp").field("port", port).finish(),
             Self::Published { port } => formatter
@@ -143,7 +177,21 @@ impl Check<'_> {
     /// failed.
     pub(crate) fn attempt(&mut self, timeout: Duration, cancel: &Cancel) -> Attempt {
         match self {
-            Self::Http { port, path } => http::attempt(*port, path, timeout, cancel),
+            Self::Http {
+                port,
+                path,
+                status,
+                json,
+            } => http::attempt(
+                &http::Get {
+                    port: *port,
+                    path,
+                    status: *status,
+                    json,
+                },
+                timeout,
+                cancel,
+            ),
             Self::Tcp { port } => http::connect(*port, timeout).map(drop).into(),
             Self::Published { port } => {
                 if crate::engine::container::answers_within(*port, timeout, cancel) {
@@ -203,8 +251,28 @@ pub(crate) enum Failure {
     /// The response did not start with an HTTP/1 status line within
     /// [`MOST_RESPONSE_BYTES`] bytes.
     BadResponse,
-    /// The response's status was not 2xx.
+    /// The response's status was not 2xx, and the probe expects no
+    /// particular status.
     Status(u16),
+    /// The response's status differs from the one the probe expects.
+    StatusDiffers {
+        /// The status the probe expects.
+        expected: u16,
+        /// The response's status.
+        got: u16,
+    },
+    /// The response's decoded body is longer than [`MOST_BODY_BYTES`].
+    BodyTooLong,
+    /// The response's body is not JSON.
+    NotJson,
+    /// The JSON body has no field at the pointer.
+    FieldMissing(JsonPointer),
+    /// The JSON field at the pointer holds another value than the probe
+    /// expects.
+    FieldDiffers(JsonPointer),
+    /// The response's headers or chunked body could not be read, or the
+    /// body ended before its `Content-Length`.
+    BadBody,
     /// The request path holds a space, a control character, a character
     /// outside ASCII or `#`, so phase does not send it.
     BadPath,
@@ -235,6 +303,25 @@ impl fmt::Display for Failure {
             Self::Exchange(kind) => write!(formatter, "the HTTP exchange failed: {kind}"),
             Self::BadResponse => formatter.write_str("the response had no HTTP/1 status line"),
             Self::Status(status) => write!(formatter, "the response status was {status}"),
+            Self::StatusDiffers { expected, got } => write!(
+                formatter,
+                "the response status was {got}, and the probe expects {expected}"
+            ),
+            Self::BodyTooLong => write!(
+                formatter,
+                "the response body is longer than {MOST_BODY_BYTES} bytes, which the probe reads at most of"
+            ),
+            Self::NotJson => formatter.write_str("the response body is not JSON"),
+            Self::FieldMissing(pointer) => {
+                write!(formatter, "the JSON field {pointer} is missing")
+            }
+            Self::FieldDiffers(pointer) => write!(
+                formatter,
+                "the JSON field {pointer} holds another value than the probe expects"
+            ),
+            Self::BadBody => {
+                formatter.write_str("the response's headers or chunked body could not be read")
+            }
             Self::BadPath => formatter.write_str(
                 "the request path holds a space, a control character, a character outside ASCII or `#`",
             ),

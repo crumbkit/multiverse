@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use super::container::BindMount;
-use super::probe::{Probe, ProbeCheck};
+use super::probe::{HttpStatus, JsonExpectation, JsonPointer, JsonScalar, Probe, ProbeCheck};
 use super::restart::{Restart, RestartLimits};
 use super::{
     AppPlan, ContainerProblem, MOST_READY_TIMEOUT, PermissionProblem, Plan, PlanError, ProcessKind,
@@ -30,9 +30,7 @@ fn host_app(name: &str) -> AppPlan {
         vec!["{program}".into(), "serve".into()],
     );
     server.port = Some("http".parse().unwrap());
-    server.ready = Some(Probe::new(ProbeCheck::Http {
-        path: "/healthz".into(),
-    }));
+    server.ready = Some(Probe::new(ProbeCheck::http("/healthz".into())));
     server.restart = Restart::OnFailure(RestartLimits::default());
     app.processes.push(server);
     app
@@ -229,9 +227,7 @@ fn a_plan_refuses_an_http_probe_on_a_process_without_a_port() {
 #[test]
 fn a_plan_refuses_an_http_probe_path_without_a_leading_slash() {
     let mut api = host_app("api");
-    api.processes[0].ready = Some(Probe::new(ProbeCheck::Http {
-        path: "healthz".into(),
-    }));
+    api.processes[0].ready = Some(Probe::new(ProbeCheck::http("healthz".into())));
 
     assert_eq!(process_problem(api), ProcessProblem::HttpPathWithoutSlash);
 }
@@ -1411,5 +1407,181 @@ fn is_volume_owner_accepts_exactly_the_owners_that_a_plan_accepts() {
         "4294967296",
     ] {
         assert!(!crate::is_volume_owner(owner), "{owner:?}");
+    }
+}
+
+/// The JSON form that phase 0.4.0 wrote for the process `server` of
+/// `host_app("api")`, whose probe is `http` with no expectations.
+const PROCESS_WITHOUT_EXPECTATIONS: &str = r#"{"name":"server","kind":"long-running","run":["{program}","serve"],"depends":[],"cwd":null,"env":[],"port":"http","publish":{},"volumes":{},"ready":{"check":{"http":{"path":"/healthz"}},"period_ms":10000,"timeout_ms":1000,"success_threshold":1,"failure_threshold":3},"ready_timeout_ms":60000,"restart":{"policy":"on-failure","max":null,"backoff":{"first_ms":1000,"most_ms":30000},"resolve":"when-expired"},"stop":{"signal":"TERM","grace_ms":10000}}"#;
+
+/// The process digest that phase 0.4.0 kept for that process.
+const PROCESS_DIGEST_WITHOUT_EXPECTATIONS: &str =
+    "989ea67dddb23d1ba2db7086d5d93f564eb3a5b5b941ad403cfd5a5d755eaad0";
+
+/// The plan digest that phase 0.4.0 kept for `plan(vec![host_app("api")])`.
+const PLAN_DIGEST_WITHOUT_EXPECTATIONS: &str =
+    "257073ef40b73a2a9031ecd80180a255716065db1d28f4cb7a458261ef5da35b";
+
+fn hex(digest: [u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Returns `host_app("api")` with its HTTP probe's check replaced by
+/// `check`.
+fn api_probing(check: ProbeCheck) -> AppPlan {
+    let mut api = host_app("api");
+    api.processes[0].ready = Some(Probe::new(check));
+    api
+}
+
+/// Returns an HTTP check of `/health` with `status` and `json`.
+fn expecting(status: Option<u16>, json: Vec<JsonExpectation>) -> ProbeCheck {
+    ProbeCheck::http_expecting("/health".to_owned(), status.map(HttpStatus::new), json)
+}
+
+#[test]
+fn a_plan_without_expectations_serialises_and_hashes_as_before() {
+    let api = host_app("api");
+
+    assert_eq!(
+        serde_json::to_string(&api.processes[0]).unwrap(),
+        PROCESS_WITHOUT_EXPECTATIONS
+    );
+    assert_eq!(
+        hex(api.process_digest(&api.processes[0])),
+        PROCESS_DIGEST_WITHOUT_EXPECTATIONS
+    );
+    assert_eq!(
+        hex(plan(vec![api]).unwrap().digest()),
+        PLAN_DIGEST_WITHOUT_EXPECTATIONS
+    );
+    let read: ProcessPlan = serde_json::from_str(PROCESS_WITHOUT_EXPECTATIONS).unwrap();
+    assert_eq!(read, host_app("api").processes[0]);
+}
+
+#[test]
+fn a_plan_refuses_a_status_outside_100_to_599() {
+    for status in [0, 99, 600, 999] {
+        assert_eq!(
+            process_problem(api_probing(expecting(Some(status), Vec::new()))),
+            ProcessProblem::HttpStatusOutOfRange(status),
+            "{status}"
+        );
+    }
+    for status in [100, 200, 401, 599] {
+        assert!(
+            plan(vec![api_probing(expecting(Some(status), Vec::new()))]).is_ok(),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_refuses_a_pointer_that_does_not_start_with_a_slash() {
+    for pointer in ["ok", "ok/", "#/ok"] {
+        let json = vec![JsonExpectation::present(JsonPointer::new(
+            pointer.to_owned(),
+        ))];
+        assert_eq!(
+            process_problem(api_probing(expecting(None, json))),
+            ProcessProblem::BadJsonPointer(pointer.to_owned()),
+            "{pointer}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_refuses_a_pointer_with_a_tilde_that_escapes_nothing() {
+    for pointer in ["/a~", "/a~2b", "/~/x"] {
+        let json = vec![JsonExpectation::present(JsonPointer::new(
+            pointer.to_owned(),
+        ))];
+        assert_eq!(
+            process_problem(api_probing(expecting(None, json))),
+            ProcessProblem::BadJsonPointer(pointer.to_owned()),
+            "{pointer}"
+        );
+    }
+    for pointer in ["", "/", "/a~0b", "/a~1b/0", "/build/revision"] {
+        let json = vec![JsonExpectation::present(JsonPointer::new(
+            pointer.to_owned(),
+        ))];
+        assert!(
+            plan(vec![api_probing(expecting(None, json))]).is_ok(),
+            "{pointer:?}"
+        );
+    }
+}
+
+#[test]
+fn a_plan_refuses_more_than_32_json_expectations() {
+    let fields = |count: usize| {
+        (0..count)
+            .map(|index| JsonExpectation::present(JsonPointer::new(format!("/f{index}"))))
+            .collect::<Vec<_>>()
+    };
+
+    assert!(plan(vec![api_probing(expecting(None, fields(32)))]).is_ok());
+    assert_eq!(
+        process_problem(api_probing(expecting(None, fields(33)))),
+        ProcessProblem::TooManyJsonExpectations
+    );
+}
+
+#[test]
+fn a_plan_refuses_an_expected_string_longer_than_1024_bytes() {
+    let equal = |length: usize| {
+        vec![JsonExpectation::equals(
+            JsonPointer::new("/revision".to_owned()),
+            JsonScalar::String("r".repeat(length)),
+        )]
+    };
+
+    assert!(plan(vec![api_probing(expecting(None, equal(1024)))]).is_ok());
+    assert_eq!(
+        process_problem(api_probing(expecting(None, equal(1025)))),
+        ProcessProblem::JsonStringTooLong("/revision".to_owned())
+    );
+}
+
+#[test]
+fn a_plan_round_trips_an_http_probe_with_expectations() {
+    let check = expecting(
+        Some(200),
+        vec![
+            JsonExpectation::equals(JsonPointer::new("/ok".to_owned()), JsonScalar::Bool(true)),
+            JsonExpectation::equals(
+                JsonPointer::new("/revision".to_owned()),
+                JsonScalar::String("4f2a9c1".to_owned()),
+            ),
+            JsonExpectation::equals(
+                JsonPointer::new("/count".to_owned()),
+                JsonScalar::Integer(-3),
+            ),
+            JsonExpectation::equals(JsonPointer::new("/gone".to_owned()), JsonScalar::Null),
+            JsonExpectation::present(JsonPointer::new("/paths".to_owned())),
+        ],
+    );
+
+    let json = serde_json::to_string(&check).unwrap();
+    assert_eq!(
+        json,
+        r#"{"http":{"path":"/health","status":200,"json":[{"pointer":"/ok","equals":true},{"pointer":"/revision","equals":"4f2a9c1"},{"pointer":"/count","equals":-3},{"pointer":"/gone","equals":null},{"pointer":"/paths"}]}}"#
+    );
+    assert_eq!(serde_json::from_str::<ProbeCheck>(&json).unwrap(), check);
+    let original = plan(vec![api_probing(check)]).unwrap();
+    let text = serde_json::to_string(&original).unwrap();
+    assert_eq!(serde_json::from_str::<Plan>(&text).unwrap(), original);
+}
+
+#[test]
+fn a_probe_refuses_an_expected_value_that_is_a_fraction_an_array_or_an_object() {
+    for equals in ["1.5", "[]", "{}"] {
+        let text =
+            format!(r#"{{"http":{{"path":"/","json":[{{"pointer":"/a","equals":{equals}}}]}}}}"#);
+        assert!(
+            serde_json::from_str::<ProbeCheck>(&text).is_err(),
+            "{equals}"
+        );
     }
 }

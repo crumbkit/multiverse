@@ -366,10 +366,10 @@ finds it from the run record.
 
 phase uses the probe and restart vocabulary of process-compose:
 
-- probes: `http` (any 2xx passes, and no redirect is followed), `tcp`,
-  `command` and `log` (a line written since the start matches a regular
-  expression), each with a period, a timeout, and success and failure
-  thresholds;
+- probes: `http` (any 2xx passes, or exactly the `status` the probe
+  expects, and no redirect is followed), `tcp`, `command` and `log` (a line
+  written since the start matches a regular expression), each with a
+  period, a timeout, and success and failure thresholds;
 - restart policies: `no`, `on-failure` and `always`, with exponential
   backoff and a maximum count.
 
@@ -401,6 +401,27 @@ header `localhost:<port>`. The port checks before a launch and after
 readiness find a listener on ::1 too: the check whether a port is in use
 connects to both loopback addresses, and the lookup of the process that
 holds a port reads IPv6 sockets as well as IPv4 ones.
+
+An `http` probe may also hold JSON expectations in `json`. Each names a
+field of the response body by a JSON pointer (RFC 6901), such as `/ok` or
+`/build/revision`, and requires the field to be present or to equal one
+scalar: `true`, `false`, a string, a whole number or `null`. A probe with
+expectations judges the status first, and only on a passing status reads
+the body. It reads the headers within the 4,096 bytes that bound the status
+line and headers together, and the body by `Content-Length`, by chunked
+transfer coding or until the server closes the connection. It reads at most
+65,536 bytes of decoded body. A `Content-Length` over that fails the attempt
+before any of the body is read, and a longer chunked or close-delimited body
+fails once it passes the limit. The attempt then fails when the body is not
+JSON, when a field is missing or when a field holds another value. The
+failure names the pointer and never quotes the body or an expected value.
+The plan refuses a status outside 100 to 599, a pointer that is not empty
+and does not start with `/` or that holds a `~` not followed by `0` or `1`,
+more than 32 expectations on one probe, and an expected string longer than
+1,024 bytes. An expected value is plan data that the plan's JSON form and
+`Debug` output show, so a host must never put a secret in one. A probe
+without `status` and `json` writes the same JSON as a probe that predates
+them, so its plan digest is unchanged.
 
 A command probe of a host process runs in its own process group, and phase
 kills that group however the command ends. crumbkit-process runs it, and
