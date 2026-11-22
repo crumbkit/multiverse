@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::host::Host;
 
 /// A repository that a workspace can check out: its top-level directory
 /// and the name that its checkout directory takes.
@@ -469,7 +470,7 @@ pub trait Backend {
     /// # Errors
     ///
     /// Returns the failure of the listing.
-    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error>;
+    fn unpushed_commits(&self, checkout: &Path, host: &Host) -> Result<Vec<String>, Error>;
 
     /// Returns the commit of each stash entry of the clone at `checkout`,
     /// newest first.
@@ -545,8 +546,13 @@ pub trait Backend {
     /// # Errors
     ///
     /// Returns the failure of a listing.
-    fn orphans(&self, checkout: &Path, kept: &[String], shared: bool)
-    -> Result<Vec<String>, Error>;
+    fn orphans(
+        &self,
+        checkout: &Path,
+        kept: &[String],
+        shared: bool,
+        host: &Host,
+    ) -> Result<Vec<String>, Error>;
 
     /// Returns each file of the uncommitted work of the checkout at
     /// `checkout`, changed, staged or untracked and not ignored, that is
@@ -578,7 +584,9 @@ pub trait Backend {
 
     /// Writes the two commits of the uncommitted work of the checkout at
     /// `checkout`, as [`Backend::wip_trees`] reads it through `index`
-    /// without `left_out`, with `message`, and with author and committer
+    /// without `left_out`, with `host`'s [`Host::wip_message`], with
+    /// `host`'s [`Host::wip_author`] as author when git has no identity of
+    /// the person, and with author and committer
     /// dates of `time`, seconds since the Unix epoch, so the same work
     /// gives the same commits. The objects are on disk when it returns.
     /// Nothing names the commits until the caller writes a reference.
@@ -592,7 +600,7 @@ pub trait Backend {
         index: &Path,
         left_out: &[String],
         time: u64,
-        message: &str,
+        host: &Host,
     ) -> Result<WipCommits, Error>;
 
     /// Returns the tree of `commit` in the repository at `dir`.
@@ -664,7 +672,7 @@ pub trait Backend {
     /// # Errors
     ///
     /// Returns the failure of a listing.
-    fn concealed(&self, checkout: &Path) -> Result<Concealed, Error>;
+    fn concealed(&self, checkout: &Path, host: &Host) -> Result<Concealed, Error>;
 
     /// Returns what the clone at `checkout` holds that neither an archive
     /// keeps nor a clone rebuilt from its mirror and the person's
@@ -688,7 +696,12 @@ pub trait Backend {
     /// # Errors
     ///
     /// Returns the failure of the listing.
-    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error>;
+    fn local_only_commits(
+        &self,
+        dir: &Path,
+        revision: &str,
+        host: &Host,
+    ) -> Result<Vec<String>, Error>;
 
     /// Returns the remote branch that `branch` of the checkout at
     /// `checkout` tracks, as a reference on the remote such as

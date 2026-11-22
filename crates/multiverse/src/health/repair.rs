@@ -105,6 +105,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns the errors of reading the records and the pins, and of the
     /// moves and deletions, and [`Error::DatedNamesTaken`] when every dated
     /// name is taken.
@@ -114,6 +116,7 @@ impl<B: Backend> Workspaces<B> {
         name: &WorkspaceName,
         mode: Mode,
     ) -> Result<Repaired, Error> {
+        self.same_host(archives)?;
         let all = archives.list()?;
         let Some(archive) = all.archives.iter().find(|archive| archive.name == *name) else {
             // `list` keeps a record that it cannot read in `problems`, so
@@ -135,7 +138,7 @@ impl<B: Backend> Workspaces<B> {
             &all.archives,
             count_as_there(&self.backend),
         );
-        let broken = reading.broken(name);
+        let broken = reading.broken(name, &self.host);
         let case = reading.case;
         let archive = archive.clone();
         if let Some((Problem::ArchiveNotStarted, _)) = broken {
@@ -187,7 +190,7 @@ impl<B: Backend> Workspaces<B> {
                         .is_ok_and(|mut entries| entries.next().is_none());
                 // A dry run refuses as the repair would, before the
                 // repair deletes anything.
-                crate::archive::refuse_other_files(&archive)?;
+                crate::archive::refuse_other_files(&archive, &self.host)?;
                 if mode == Mode::Change {
                     self.undo_stopped_restore(archives, &mut archive)?;
                 }
@@ -219,7 +222,7 @@ impl<B: Backend> Workspaces<B> {
     ) -> Result<Repaired, Error> {
         if let Some(mut workspace) = self.store.read(name)?
             && let Some(id) = workspace.state().archive().cloned()
-            && untouched(&workspace)
+            && untouched(&workspace, &self.host)
         {
             if mode == Mode::Change {
                 // `remove_dir` deletes only an empty directory, so a

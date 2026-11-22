@@ -111,6 +111,7 @@ use serde::de::IgnoredAny;
 use toml::Spanned;
 
 use crate::disposable::{BadGlob, PathGlob};
+use crate::host::ManifestNames;
 use crate::name::{WorkspaceName, is_unit_name};
 use crate::redacted::Redacted;
 use crate::service::{Backend, PROVISION_APP, RESERVED_PREFIX, Service};
@@ -119,7 +120,9 @@ mod services;
 #[cfg(test)]
 mod tests;
 
-/// The name of the manifest file at a repository's root.
+/// The name of the manifest file at a repository's root under mxv's
+/// profile, [`Host::mxv`](crate::Host::mxv). Another host's file is
+/// [`Host::manifest_file`](crate::Host::manifest_file).
 pub const MANIFEST_FILE: &str = "mxv.toml";
 
 /// The most bytes of a manifest that mxv reads. A larger file fails as
@@ -994,6 +997,8 @@ struct Errors<'a> {
     path: &'a Path,
     /// The manifest's text.
     text: &'a str,
+    /// The names of the host that reads the manifest.
+    names: &'a ManifestNames,
 }
 
 impl Errors<'_> {
@@ -1040,6 +1045,34 @@ impl Errors<'_> {
 /// them: mxv refuses it, because mxv sandboxes each process by its own
 /// `[processes.<name>.permissions]`.
 const PHASE_TABLES: &[&str] = &["app", "release", "build", "process", "needs"];
+
+/// Checks that no port, process or container of `raw` starts with the
+/// prefix that the host keeps for its own names, or with
+/// [`RESERVED_PREFIX`].
+fn check_reserved_names(errors: &Errors<'_>, raw: &RawManifest) -> Result<(), ManifestError> {
+    if let Some((name, prefix)) = raw
+        .ports
+        .iter()
+        .chain(raw.processes.keys())
+        .chain(raw.containers.keys())
+        .find_map(|name| {
+            reserved_prefix(name.get_ref(), &errors.names.unit_prefix).map(|prefix| (name, prefix))
+        })
+    {
+        return Err(errors.invalid(&name.span(), reserved_message(name.get_ref(), prefix)));
+    }
+    Ok(())
+}
+
+/// Returns the reserved prefix that `name` starts with: `unit_prefix`, the
+/// host's own, or [`RESERVED_PREFIX`], which names the apps and ledger
+/// ports that [`crate::Runs`] adds under every host, such as
+/// `mxv-services` and `mxv-aws`.
+pub(crate) fn reserved_prefix<'a>(name: &str, unit_prefix: &'a str) -> Option<&'a str> {
+    [unit_prefix, RESERVED_PREFIX]
+        .into_iter()
+        .find(|prefix| name.starts_with(prefix))
+}
 
 /// Checks that `raw`'s `version` is 1 or greater and no greater than
 /// [`MANIFEST_VERSION`], and that it holds none of the reserved table
@@ -1189,10 +1222,11 @@ fn is_variable(name: &str) -> bool {
 }
 
 /// Returns the sentence of a process, container or port named `name`,
-/// which starts with the prefix that mxv keeps for its own names.
-pub(crate) fn reserved_message(name: &str) -> String {
+/// which starts with `prefix`, the prefix that the host keeps for its own
+/// names.
+pub(crate) fn reserved_message(name: &str, prefix: &str) -> String {
     format!(
-        "`{name}` starts with `{RESERVED_PREFIX}`, which mxv keeps for the apps and ports of the services' backends"
+        "`{name}` starts with `{prefix}`, which mxv keeps for the apps and ports of the services' backends"
     )
 }
 
@@ -1342,7 +1376,22 @@ impl Manifest {
     /// Returns a [`ManifestError`] when the file cannot be read, is larger
     /// than [`MOST_MANIFEST_BYTES`], or breaks the schema.
     pub fn read(checkout: &Path) -> Result<Option<Self>, ManifestError> {
-        Self::read_file(&checkout.join(MANIFEST_FILE), checkout)
+        Self::read_as(checkout, &ManifestNames::MXV)
+    }
+
+    /// Returns the manifest at `<checkout>/<file>`, where `names` holds
+    /// the host's file name, read under the host's `names` as
+    /// [`Manifest::read`] reads mxv's.
+    pub(crate) fn read_as(
+        checkout: &Path,
+        names: &ManifestNames,
+    ) -> Result<Option<Self>, ManifestError> {
+        Self::read_file_as(
+            &checkout.join(&*names.file),
+            checkout,
+            &Joined::default(),
+            names,
+        )
     }
 
     /// Returns the manifest at `path`, whose paths are relative to
@@ -1369,10 +1418,21 @@ impl Manifest {
         checkout: &Path,
         joined: &Joined,
     ) -> Result<Option<Self>, ManifestError> {
+        Self::read_file_as(path, checkout, joined, &ManifestNames::MXV)
+    }
+
+    /// Returns the manifest at `path` as [`Manifest::read_file_joining`]
+    /// does, under the host's `names`.
+    pub(crate) fn read_file_as(
+        path: &Path,
+        checkout: &Path,
+        joined: &Joined,
+        names: &ManifestNames,
+    ) -> Result<Option<Self>, ManifestError> {
         let Some(text) = Self::read_unparsed(path)? else {
             return Ok(None);
         };
-        Self::parse_at(&text, path, checkout, joined).map(Some)
+        Self::parse_at_as(&text, path, checkout, joined, names).map(Some)
     }
 
     /// Parses the manifest `text` as [`Manifest::parse_joining`] does, as
@@ -1388,7 +1448,19 @@ impl Manifest {
         checkout: &Path,
         joined: &Joined,
     ) -> Result<Self, ManifestError> {
-        let manifest = Self::parse_in(text, path, joined, Some(checkout))?;
+        Self::parse_at_as(text, path, checkout, joined, &ManifestNames::MXV)
+    }
+
+    /// Parses the manifest `text` as [`Manifest::parse_at`] does, under
+    /// the host's `names`.
+    pub(crate) fn parse_at_as(
+        text: &str,
+        path: &Path,
+        checkout: &Path,
+        joined: &Joined,
+        names: &ManifestNames,
+    ) -> Result<Self, ManifestError> {
+        let manifest = Self::parse_in(text, path, joined, Some(checkout), names)?;
         manifest.check_cwds(checkout, path)?;
         Ok(manifest)
     }
@@ -1566,7 +1638,7 @@ impl Manifest {
     ///
     /// Returns the errors of [`Manifest::parse`].
     pub fn parse_joining(text: &str, path: &Path, joined: &Joined) -> Result<Self, ManifestError> {
-        Self::parse_in(text, path, joined, None)
+        Self::parse_in(text, path, joined, None, &ManifestNames::MXV)
     }
 
     /// Parses the manifest `text` as [`Manifest::parse_joining`] does, and
@@ -1577,22 +1649,15 @@ impl Manifest {
         path: &Path,
         joined: &Joined,
         checkout: Option<&Path>,
+        names: &ManifestNames,
     ) -> Result<Self, ManifestError> {
-        let errors = Errors { path, text };
+        let errors = Errors { path, text, names };
         let warnings = check_top_level(&errors, text)?;
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
         check_version_and_reserved(&errors, &raw)?;
         let ports = check_ports(&errors, &raw.ports)?;
         let routes = check_routes(&errors, &raw.routes, &ports, joined)?;
-        if let Some(name) = raw
-            .ports
-            .iter()
-            .chain(raw.processes.keys())
-            .chain(raw.containers.keys())
-            .find(|name| name.get_ref().starts_with(RESERVED_PREFIX))
-        {
-            return Err(errors.invalid(&name.span(), reserved_message(name.get_ref())));
-        }
+        check_reserved_names(&errors, &raw)?;
         let services = services::check_services(&errors, &raw.service)?;
         let names: BTreeSet<&str> = raw
             .processes
@@ -2098,10 +2163,6 @@ struct Hosted<'a> {
     routes: &'a [String],
 }
 
-/// The domain below which mxv's own host names live, which no `hosts` entry
-/// may name.
-const OWN_DOMAIN: &str = "mxv.localhost";
-
 /// The most bytes of a host name.
 const MOST_HOST_BYTES: usize = 253;
 
@@ -2204,7 +2265,7 @@ fn check_hosts(
     let mut hosts = Vec::new();
     for host in raw {
         let text = host.get_ref();
-        if let Some(reason) = host_problem(text) {
+        if let Some(reason) = host_problem(text, &errors.names.domain) {
             return Err(errors.invalid(
                 &host.span(),
                 format!("the host `{text}` of the {kind} `{name}` {reason}"),
@@ -2222,13 +2283,13 @@ fn check_hosts(
 }
 
 /// Returns why `host` cannot be an extra host name, or `None` when it can.
-fn host_problem(host: &str) -> Option<String> {
+fn host_problem(host: &str, own_domain: &str) -> Option<String> {
     if host.parse::<std::net::IpAddr>().is_ok() {
         return Some("is an IP address, and `hosts` takes DNS names".to_owned());
     }
-    if host == "localhost" || host == OWN_DOMAIN || host.ends_with(&format!(".{OWN_DOMAIN}")) {
+    if host == "localhost" || host == own_domain || host.ends_with(&format!(".{own_domain}")) {
         return Some(format!(
-            "is `localhost` or below `{OWN_DOMAIN}`, which mxv serves itself"
+            "is `localhost` or below `{own_domain}`, which mxv serves itself"
         ));
     }
     let label = |label: &str| {

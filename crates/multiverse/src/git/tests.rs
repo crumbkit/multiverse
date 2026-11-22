@@ -30,7 +30,8 @@ fn a_worktree_has_no_submodule_git_directories_to_read() {
         &["worktree", "add", "--quiet", "-b", "side", &path],
     );
     assert_eq!(
-        Git.unpushed_commits(&worktree).unwrap(),
+        Git.unpushed_commits(&worktree, &crate::Host::mxv())
+            .unwrap(),
         Vec::<String>::new()
     );
 }

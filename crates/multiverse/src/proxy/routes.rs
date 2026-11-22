@@ -6,12 +6,15 @@ use std::fmt;
 use std::net::SocketAddr;
 
 use crate::error::Error;
+use crate::host::Host;
 use crate::manifest::{MOST_LABEL_BYTES, host_label};
 use crate::name::WorkspaceName;
 use crate::store::Store;
 
 /// The domain below which every route lives. Browsers and resolvers send
 /// every name below `localhost` to the loopback address.
+/// This is the value of mxv's profile, [`Host::mxv`](crate::Host::mxv);
+/// another host's is [`Host::proxy_domain`](crate::Host::proxy_domain).
 pub const DOMAIN: &str = "mxv.localhost";
 
 /// One route: a host name that the proxy answers, and the host port it
@@ -208,8 +211,16 @@ impl fmt::Display for ProxyProblem {
 /// left out, because its workspace has never started. When two workspace
 /// names make one host label, the name that sorts first keeps it, and the
 /// same holds for an extra host name that two workspaces list.
+/// Each route's host name lies below [`DOMAIN`], mxv's domain.
 #[must_use]
-pub fn derive(mut declared: Vec<Declared>) -> Derived {
+pub fn derive(declared: Vec<Declared>) -> Derived {
+    derive_under(declared, DOMAIN)
+}
+
+/// Derives the routes of `declared` as [`derive`] does, with each route's
+/// host name below `domain`, such as a host's
+/// [`Host::proxy_domain`](crate::Host::proxy_domain).
+pub(crate) fn derive_under(mut declared: Vec<Declared>, domain: &str) -> Derived {
     declared.sort_by(|a, b| a.workspace.cmp(&b.workspace));
     let mut derived = Derived::default();
     let mut owners: BTreeMap<String, WorkspaceName> = BTreeMap::new();
@@ -237,7 +248,7 @@ pub fn derive(mut declared: Vec<Declared>) -> Derived {
             let mut route = Route {
                 name: name.clone(),
                 workspace: item.workspace.clone(),
-                host: format!("{}.{label}.{DOMAIN}", host_label(name)),
+                host: format!("{}.{label}.{domain}", host_label(name)),
                 port: *port,
                 unit: item.listeners.get(name).cloned(),
                 extra: Vec::new(),
@@ -279,7 +290,10 @@ pub fn derive(mut declared: Vec<Declared>) -> Derived {
 /// # Errors
 ///
 /// Returns the error of listing the store's directory.
-pub(super) fn declared(store: &Store) -> Result<(Vec<Declared>, Vec<ProxyProblem>), Error> {
+pub(super) fn declared(
+    store: &Store,
+    host: &Host,
+) -> Result<(Vec<Declared>, Vec<ProxyProblem>), Error> {
     let records = store.list()?;
     let mut problems: Vec<ProxyProblem> = records
         .problems
@@ -290,6 +304,7 @@ pub(super) fn declared(store: &Store) -> Result<(Vec<Declared>, Vec<ProxyProblem
         .collect();
     let mut found = Vec::new();
     for workspace in records.workspaces {
+        let workspace = workspace.with_host(host);
         match workspace.manifest() {
             Ok(Some(manifest)) if !manifest.routes.is_empty() => {
                 let listeners: BTreeMap<String, String> = manifest

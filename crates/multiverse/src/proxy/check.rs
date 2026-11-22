@@ -6,7 +6,7 @@
 use std::io;
 
 use super::hosts::{self, Resolution, Resolver};
-use super::{Proxy, ProxyError, Store, caddy_config, declared, derive, ports, process};
+use super::{Proxy, ProxyError, Store, caddy_config, declared, ports, process};
 
 /// How one check came out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,8 +75,8 @@ impl Proxy {
     ///
     /// Returns the error of reading the store.
     pub fn check(&self, store: &Store, resolver: &dyn Resolver) -> Result<Check, ProxyError> {
-        let (found, _) = declared(store)?;
-        let derived = derive(found);
+        let (found, _) = declared(store, &self.host)?;
+        let derived = super::derive_under(found, self.host.proxy_domain());
         let running = self.answering();
         let mut rows = vec![self.caddy_row()];
         rows.push(self.address_row("http", self.settings.http, "proxy_http", running));
@@ -527,9 +527,11 @@ mod tests {
     fn a_caddy_that_holds_the_current_routes_is_ok_and_says_they_are_loaded() {
         let dir = tempfile::tempdir().unwrap();
         let (store, proxy) = routed(dir.path());
-        let (found, _) = super::declared(&store).unwrap();
-        let wanted =
-            super::super::caddy_config::render(&proxy.settings, &super::derive(found).served);
+        let (found, _) = super::declared(&store, &crate::Host::mxv()).unwrap();
+        let wanted = super::super::caddy_config::render(
+            &proxy.settings,
+            &crate::proxy::derive(found).served,
+        );
         serve(&proxy, wanted.to_string());
         let check = proxy.check(&store, &Fake(BTreeMap::new())).unwrap();
         let row = check

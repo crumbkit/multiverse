@@ -152,6 +152,17 @@ pub enum Error {
         /// The name of the workspace that the method acts on.
         acted_on: crate::name::WorkspaceName,
     },
+    /// A method of [`crate::Workspaces`] was given an [`crate::Archives`]
+    /// of another host profile than its own, so the two would write and
+    /// read archive references, folders and commits under different names.
+    /// The method did nothing. mxv gives both [`crate::Host::mxv`], so
+    /// this is a defect of the program that paired them.
+    HostMismatch {
+        /// The name of the host of the workspaces.
+        workspaces: crate::host::HostName,
+        /// The name of the host of the archives.
+        archives: crate::host::HostName,
+    },
     /// The workspace's record holds no stable id, and the archive record of
     /// its name is an unfinished archive of an older multiverse without
     /// one, or cannot be read, so mxv gives the workspace no id and cannot
@@ -574,6 +585,19 @@ impl Error {
     }
 }
 
+/// Writes the message of [`Error::HostMismatch`], apart from
+/// [`Error`]'s `fmt`, which would otherwise pass clippy's line limit.
+fn host_mismatch(
+    formatter: &mut fmt::Formatter<'_>,
+    workspaces: &crate::host::HostName,
+    archives: &crate::host::HostName,
+) -> fmt::Result {
+    write!(
+        formatter,
+        "the workspaces belong to the host {workspaces} and the archives to the host {archives}, so nothing was done"
+    )
+}
+
 impl fmt::Display for Error {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -660,6 +684,10 @@ impl fmt::Display for Error {
                 formatter,
                 "the lock held is the lock of the workspace {locked}, not of {acted_on}, so mxv did nothing to {acted_on}"
             ),
+            Self::HostMismatch {
+                workspaces,
+                archives,
+            } => host_mismatch(formatter, workspaces, archives),
             Self::ArchiveUnfinished {
                 name,
                 readable: true,
@@ -933,6 +961,7 @@ impl std::error::Error for Error {
             | Self::TransitionRefused { .. }
             | Self::MismatchedCheckout { .. }
             | Self::WrongLock { .. }
+            | Self::HostMismatch { .. }
             | Self::ArchiveUnfinished { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }

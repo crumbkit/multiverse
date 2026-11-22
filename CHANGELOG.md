@@ -5,6 +5,51 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.6.0] - 2026-11-22
+
+### Added
+
+- multiverse has a host profile, `multiverse::Host`, which holds every name
+  that a program built on multiverse leaves on disk, in git and in docker.
+  `Host::mxv()` holds mxv's names. `Host::named(name)` derives another
+  profile from a name of at most 32 bytes of lowercase letters, digits and
+  dashes: the manifest file `<name>.toml`, the reserved unit prefix
+  `<name>-`, the git namespace `refs/<name>/`, the suffixes
+  `.<name>-removing` and `.<name>-archiving`, the author and message of the
+  work-in-progress commit, and the docker label prefix `<name>.`.
+  `with_manifest_file`, `with_proxy_domain` and `with_agents_text` override
+  the manifest file, the proxy domain below `.localhost` and the generated
+  `AGENTS.md`. A bad name or value returns `BadHost`.
+- `Workspaces`, `Archives`, `Runs`, `Proxy` and `Store` have `with_host`,
+  and each defaults to `Host::mxv()`. `Runs::with_host` gives phase the
+  profile's label prefix. A host lists, prunes, sweeps, restores
+  and deletes only its own references, folders and docker objects, so two
+  hosts can share a mirror and a docker daemon. `Archives` refuses an
+  archive record whose references lie in another host's namespace.
+- Each `Workspaces` method that takes an `Archives` refuses one of another
+  host with `Error::HostMismatch` before it reads or writes anything. mxv
+  reports it as `mxv::workspace::host_mismatch`, a defect to report,
+  because mxv gives both `Host::mxv()`.
+- `health::classify_for` classifies the records of a given host, so an
+  archive that the host started reads under the host's own folder suffix.
+  `health::classify` classifies mxv's.
+
+### Changed
+
+- The public constants `MANIFEST_FILE`, `RESERVED_PREFIX`, `proxy::DOMAIN`,
+  `AGENTS_FILE`, `KEPT_NAMESPACE` and `WIP_MESSAGE` keep their values, which
+  are mxv's profile. mxv's output, references, folders and labels are
+  unchanged.
+- `Backend::unpushed_commits`, `orphans`, `write_wip`, `concealed` and
+  `local_only_commits` take a `&Host`. `write_wip` takes the host in place
+  of the commit message, and writes the host's message and, when git has
+  no identity of the person, the host's author. A `Backend` outside this
+  repository adds the argument to each of these methods.
+- A manifest under any host refuses unit and port names that start with
+  `mxv-` as well as the host's own prefix, because `Runs` adds its internal
+  apps and ledger ports, such as `mxv-services` and `mxv-aws`, under that
+  prefix for every host.
+
 ## [0.5.1] - 2026-11-22
 
 ### Added

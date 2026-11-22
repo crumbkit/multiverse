@@ -13,11 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::ignored::{IGNORED_TAR, IgnoredEntry};
 use crate::archive::root::RootEntry;
-use crate::archive::{
-    ARCHIVE_VERSION, HEAD_PIN, KEPT_NAMESPACE, PIN_NAMESPACE, RECORD_FILE, WIP_INDEX,
-};
+use crate::archive::{ARCHIVE_VERSION, HEAD_PIN, RECORD_FILE, WIP_INDEX};
 use crate::backend::RefHolder;
 use crate::error::Error;
+use crate::host::{Host, HostName};
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Made, Workspace, WorkspaceKind};
 use crate::store::{self, MOST_RECORD_BYTES};
@@ -383,19 +382,22 @@ pub struct Archive {
     pub restoring: Option<RestoreMark>,
 }
 
-/// A reference below [`KEPT_NAMESPACE`], the only kind of reference that a
-/// restore creates in a person's repository and so the only kind that
-/// undoing one deletes. A record's text is untrusted, so a name outside the
-/// namespace, or one that climbs out of it, is refused when the record is
-/// read.
+/// A reference below a host's kept namespace, `refs/<host>/kept/`, such
+/// as [`KEPT_NAMESPACE`](crate::KEPT_NAMESPACE), the only kind of
+/// reference that a restore creates in a person's repository and so the
+/// only kind that undoing one deletes. A record's text is untrusted, so a
+/// name outside such a namespace, or one that climbs out of it, is refused
+/// when the record is read, and [`Archives`] refuses a record whose
+/// references lie in another host's namespace.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub(crate) struct KeptRef(String);
 
 impl KeptRef {
-    /// Returns the reference below [`KEPT_NAMESPACE`] that keeps `commit`.
-    pub(crate) fn of_commit(commit: &str) -> Result<Self, String> {
-        Self::try_from(format!("{KEPT_NAMESPACE}{commit}"))
+    /// Returns the reference below `host`'s kept namespace that keeps
+    /// `commit`.
+    pub(crate) fn of_commit(host: &Host, commit: &str) -> Result<Self, String> {
+        Self::try_from(format!("{}{commit}", host.kept_namespace()))
     }
 
     /// Returns the reference's full name.
@@ -408,11 +410,11 @@ impl TryFrom<String> for KeptRef {
     type Error = String;
 
     fn try_from(name: String) -> Result<Self, String> {
-        if name.strip_prefix(KEPT_NAMESPACE).is_some_and(stays_inside) {
+        if below_a_host(&name, "kept") {
             Ok(Self(name))
         } else {
             Err(format!(
-                "the reference {name} is not below {KEPT_NAMESPACE}"
+                "the reference {name} is not below refs/<host>/kept/"
             ))
         }
     }
@@ -555,6 +557,8 @@ pub struct Archives {
     /// The directory that holds each archive's private tar of ignored
     /// files, in a directory named by the archive's id.
     data: PathBuf,
+    /// The host whose references, suffixes and commits the archives write.
+    host: Host,
 }
 
 /// The archives that [`Archives::list`] found.
@@ -573,7 +577,29 @@ impl Archives {
     /// `data`, such as `~/.local/share/mxv/archives`.
     #[must_use]
     pub const fn new(dir: PathBuf, data: PathBuf) -> Self {
-        Self { dir, data }
+        Self {
+            dir,
+            data,
+            host: Host::mxv(),
+        }
+    }
+
+    /// Returns the archives with `host`'s names: its pins below
+    /// `refs/<host>/archives/`, its kept references below
+    /// `refs/<host>/kept/`, its quarantine suffix, its commit of
+    /// uncommitted work, its manifest file and its `AGENTS.md` text. They
+    /// read only the records whose references lie in `host`'s namespaces,
+    /// and refuse another host's record as corrupt. Without it they use
+    /// [`Host::mxv`].
+    #[must_use]
+    pub fn with_host(mut self, host: Host) -> Self {
+        self.host = host;
+        self
+    }
+
+    /// Returns the host whose names the archives write.
+    pub(crate) const fn host(&self) -> &Host {
+        &self.host
     }
 
     /// Returns the directory of the archive of `name`.
@@ -606,7 +632,11 @@ impl Archives {
                 path,
                 name: archive.name.to_string(),
             }),
-            found => Ok(found),
+            Some(archive) => match foreign_reference(&archive, &self.host, &path) {
+                Some(error) => Err(error),
+                None => Ok(Some(archive)),
+            },
+            None => Ok(None),
         }
     }
 
@@ -643,7 +673,10 @@ impl Archives {
         paths.sort();
         for path in paths {
             match read_record(&path) {
-                Ok(Some(archive)) => records.archives.push(archive),
+                Ok(Some(archive)) => match foreign_reference(&archive, &self.host, &path) {
+                    Some(error) => records.problems.push(error),
+                    None => records.archives.push(archive),
+                },
                 Ok(None) => {}
                 Err(error) => records.problems.push(error),
             }
@@ -938,16 +971,16 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
             .kept
             .orphans
             .iter()
-            .find(|commit| KeptRef::of_commit(commit).is_err())
+            .find(|commit| KeptRef::of_commit(&Host::mxv(), commit).is_err())
         {
             return Err(corrupt(serde::de::Error::custom(format!(
                 "the orphan {commit} of the checkout {} does not name a kept reference",
                 checkout.folder
             ))));
         }
-        if !is_pin(&checkout.pin) {
+        if !below_a_host(&checkout.pin, "archives") {
             return Err(corrupt(serde::de::Error::custom(format!(
-                "the pin {} leaves {PIN_NAMESPACE}",
+                "the pin {} leaves refs/<host>/archives/",
                 checkout.pin
             ))));
         }
@@ -1012,10 +1045,52 @@ fn strange_start<'a>(archive: &Archive, mark: &'a RestoreMark) -> Option<&'a str
         .find_map(|(start, checkout)| start.as_deref().filter(|start| *start != checkout.commit))
 }
 
-/// Reports whether `pin`, a reference from a record, lies below the
-/// namespace of the archives' pins.
-fn is_pin(pin: &str) -> bool {
-    pin.strip_prefix(PIN_NAMESPACE).is_some_and(stays_inside)
+/// Reports whether `reference`, a reference from a record, lies below
+/// `refs/<host>/<kind>/` for some valid host name, such as below
+/// `refs/mxv/archives/` for the kind `archives`.
+fn below_a_host(reference: &str, kind: &str) -> bool {
+    reference
+        .strip_prefix("refs/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(name, rest)| {
+            HostName::new(name).is_ok()
+                && rest
+                    .strip_prefix(kind)
+                    .and_then(|rest| rest.strip_prefix('/'))
+                    .is_some_and(stays_inside)
+        })
+}
+
+/// Returns the error of the record `archive` at `path` when one of its
+/// pins or kept references lies outside `host`'s namespaces, as when
+/// another host wrote it, or `None` when every one lies inside. A host
+/// never pins, restores or deletes another host's references.
+fn foreign_reference(archive: &Archive, host: &Host, path: &Path) -> Option<Error> {
+    let pins = host.pin_namespace();
+    let kept = host.kept_namespace();
+    let pin = archive
+        .checkouts
+        .iter()
+        .map(|checkout| checkout.pin.as_str())
+        .find(|pin| !pin.starts_with(&pins));
+    let restored = archive.restoring.as_ref().and_then(|mark| {
+        mark.0
+            .refs
+            .iter()
+            .map(|(_, reference)| reference.as_str())
+            .find(|reference| !reference.starts_with(&kept))
+    });
+    let (reference, namespace) = match (pin, restored) {
+        (Some(pin), _) => (pin, pins),
+        (None, Some(reference)) => (reference, kept),
+        (None, None) => return None,
+    };
+    Some(Error::CorruptRecord {
+        path: path.to_path_buf(),
+        source: serde::de::Error::custom(format!(
+            "the reference {reference} is not below {namespace}, so another host wrote the archive"
+        )),
+    })
 }
 
 /// Reports whether `path`, a path from a record, names something below the

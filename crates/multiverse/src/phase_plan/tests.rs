@@ -1017,6 +1017,7 @@ fn urls_of(workspace: &str, port: u16, others: &[&str]) -> ProxyUrls {
         &WorkspaceName::try_from(workspace.to_owned()).unwrap(),
         &derive(declared).served,
         https(port),
+        crate::proxy::DOMAIN,
     )
 }
 

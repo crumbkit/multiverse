@@ -12,16 +12,19 @@ use crate::backend::{Backend, INITIALIZING, RefHolder};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
 use crate::git::{FETCH_DEADLINE, LOCAL_DEADLINE};
+use crate::host::Host;
 use crate::lookup::{ManifestSource, checkout_prefix, prefixed};
 use crate::manifest::{Manifest, ManifestError};
 use crate::mirror::Origin;
 use crate::name::WorkspaceName;
-use crate::record::{self, Checkout, Workspace, WorkspaceKind, WorkspaceState, agents_text};
+use crate::record::{self, Checkout, Workspace, WorkspaceKind, WorkspaceState};
 use crate::store::{self, Created, Records, Store};
 use crate::template::Found as FoundTemplate;
 
 #[cfg(test)]
 mod clone_tests;
+#[cfg(test)]
+mod host_tests;
 #[cfg(test)]
 mod multi_tests;
 #[cfg(test)]
@@ -69,6 +72,9 @@ pub struct Workspaces<B> {
     /// waits, when another command holds the lock of a mirror, so a person
     /// at a terminal learns why the command pauses.
     pub(crate) mirror_notice: Option<fn(&Path, Duration)>,
+    /// The host whose names the workspaces write: its manifest file, its
+    /// `AGENTS.md` text, its aside suffix and its git references.
+    pub(crate) host: Host,
 }
 
 /// How long `create` waits for another command to finish with a mirror: a
@@ -749,15 +755,12 @@ fn partial_refusal(workspace: Workspace, checkout: &str) -> RemovalPlan {
     }
 }
 
-/// The suffix of the name under which mxv moves a clone aside before it
-/// deletes it, such as `.app.mxv-removing` beside `app`.
-const ASIDE_SUFFIX: &str = ".mxv-removing";
-
 /// Returns the path beside `checkout` under which [`delete_clone`] moves
-/// it before deleting it, or `None` for a path without a name.
-pub(crate) fn aside(checkout: &Path) -> Option<PathBuf> {
+/// it before deleting it, such as `.app.mxv-removing` beside `app` under
+/// `host`'s aside suffix, or `None` for a path without a name.
+pub(crate) fn aside(checkout: &Path, host: &Host) -> Option<PathBuf> {
     let name = checkout.file_name()?.to_str()?;
-    Some(checkout.with_file_name(format!(".{name}{ASIDE_SUFFIX}")))
+    Some(checkout.with_file_name(format!(".{name}{}", host.aside_suffix())))
 }
 
 /// Deletes the clone at `checkout` and everything in it. It first moves
@@ -766,8 +769,8 @@ pub(crate) fn aside(checkout: &Path) -> Option<PathBuf> {
 /// its `.git`, and the next removal finds the clone gone and deletes what
 /// is left aside. It then deletes the moved clone as [`delete_directory`]
 /// does. A clone that is already gone is no error.
-pub(crate) fn delete_clone(checkout: &Path) -> Result<(), Error> {
-    let Some(aside) = aside(checkout) else {
+pub(crate) fn delete_clone(checkout: &Path, host: &Host) -> Result<(), Error> {
+    let Some(aside) = aside(checkout, host) else {
         return Err(Error::Unwritable {
             path: checkout.to_path_buf(),
             source: io::ErrorKind::InvalidInput.into(),
@@ -931,6 +934,35 @@ impl<B: Backend> Workspaces<B> {
             mirror_wait: MIRROR_WAIT,
             checkpoint: crate::archive::no_checkpoint,
             mirror_notice: None,
+            host: Host::mxv(),
+        }
+    }
+
+    /// Returns the workspaces with `host`'s names: a new workspace reads
+    /// `host`'s manifest file and gets `host`'s `AGENTS.md` text, a removal
+    /// moves a clone aside under `host`'s suffix, and the copies of a
+    /// clone's mirror lie below `refs/<host>/origin/`. The store's records
+    /// read with `host`'s names, as [`Store::with_host`] says. Without it
+    /// the workspaces use [`Host::mxv`].
+    #[must_use]
+    pub fn with_host(mut self, host: Host) -> Self {
+        self.store = self.store.with_host(&host);
+        self.host = host;
+        self
+    }
+
+    /// Refuses `archives` when its host is not the workspaces' host, so an
+    /// archive's references, folders and commits are written and read
+    /// under one host's names. Each method that takes an [`Archives`]
+    /// calls it first, before it reads or writes anything.
+    pub(crate) fn same_host(&self, archives: &crate::archive::Archives) -> Result<(), Error> {
+        if archives.host().name() == self.host.name() {
+            Ok(())
+        } else {
+            Err(Error::HostMismatch {
+                workspaces: self.host.name().clone(),
+                archives: archives.host().name().clone(),
+            })
         }
     }
 
@@ -1037,7 +1069,7 @@ impl<B: Backend> Workspaces<B> {
     ) -> (DisposableSet, Option<String>) {
         let mut set = DisposableSet::built_in();
         let mut warnings = Vec::new();
-        match crate::manifest::Manifest::read(&checkout.path) {
+        match crate::manifest::Manifest::read_as(&checkout.path, &workspace.names) {
             Ok(manifest) => {
                 if let Some(manifest) = manifest {
                     set = set.with(&manifest.disposable, DisposableSource::Manifest);
@@ -1074,7 +1106,7 @@ impl<B: Backend> Workspaces<B> {
                 checkout.name
             )),
             // The checkout's own file was reported above.
-            Err(error) if error.path == checkout.path.join(crate::manifest::MANIFEST_FILE) => {}
+            Err(error) if error.path == checkout.path.join(&*workspace.names.file) => {}
             Err(error) => warnings.push(format!(
                 "the manifest {} of another checkout is invalid, so mxv adds none of the workspace manifest's globs in the checkout {}: {error}",
                 error.path.display(),
@@ -1286,7 +1318,13 @@ impl<B: Backend> Workspaces<B> {
                     reason,
                 });
             }
-            if folder_taken(&folder, found.iter().map(|(_, taken)| taken.as_str())) {
+            if folder_taken(
+                &folder,
+                found
+                    .iter()
+                    .map(|(_, taken)| taken.as_str())
+                    .chain([self.host.manifest_file()]),
+            ) {
                 return Ok(NewOutcome::FolderTaken {
                     folder,
                     repository: repository.root,
@@ -1330,7 +1368,9 @@ impl<B: Backend> Workspaces<B> {
                 record::Made::Worktree,
             ));
         }
-        let mut workspace = Workspace::new(name.clone(), path, checkouts).of_worktrees();
+        let mut workspace = Workspace::new(name.clone(), path, checkouts)
+            .of_worktrees()
+            .with_host(&self.host);
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
@@ -1400,7 +1440,7 @@ impl<B: Backend> Workspaces<B> {
             checkouts.push(checkout);
             urls.push(url);
         }
-        let mut workspace = Workspace::new(name.clone(), path, checkouts);
+        let mut workspace = Workspace::new(name.clone(), path, checkouts).with_host(&self.host);
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
@@ -1514,7 +1554,8 @@ impl<B: Backend> Workspaces<B> {
             workspace
                 .checkouts
                 .iter()
-                .map(|checkout| checkout.name.as_str()),
+                .map(|checkout| checkout.name.as_str())
+                .chain([self.host.manifest_file()]),
         ) || (!resumed && Entry::at(&workspace.path.join(&folder))? != Entry::Absent);
         if taken {
             return Ok(AddOutcome::FolderTaken {
@@ -1627,7 +1668,7 @@ impl<B: Backend> Workspaces<B> {
         match leftover {
             Leftover::Finished(commit) => checkout.commit = Some(commit),
             Leftover::Debris => {
-                delete_clone(&checkout.path)?;
+                delete_clone(&checkout.path, &self.host)?;
                 self.make_clone(checkout, url, &mut 0)?;
             }
             Leftover::Absent | Leftover::Kept(_) => self.make_clone(checkout, url, &mut 0)?,
@@ -1679,7 +1720,7 @@ impl<B: Backend> Workspaces<B> {
         if finished && let Some(work) = self.work_in(workspace, checkout, true) {
             return Some(work);
         }
-        if delete_clone(&checkout.path).is_ok() {
+        if delete_clone(&checkout.path, &self.host).is_ok() {
             let mut before = before;
             let _ = self.store.update(&mut before);
         }
@@ -1702,7 +1743,7 @@ impl<B: Backend> Workspaces<B> {
         if !stashes.is_empty() {
             return Some(format!("the clone holds {} stash entries", stashes.len()));
         }
-        let Ok(unpushed) = self.backend.unpushed_commits(path) else {
+        let Ok(unpushed) = self.backend.unpushed_commits(path, &self.host) else {
             return unknown();
         };
         if !unpushed.is_empty() {
@@ -1954,7 +1995,7 @@ impl<B: Backend> Workspaces<B> {
                 Err(error) => Err(error),
             })
             .collect::<Result<_, _>>()?;
-        Ok(agents_text(workspace, &origins))
+        Ok(self.host.agents_text(workspace, &origins))
     }
 
     /// Copies the `info/exclude` file of the person's repository into the
@@ -2067,7 +2108,7 @@ impl<B: Backend> Workspaces<B> {
                 .is_ok();
         }
         for checkout in workspace.checkouts.iter().take(made.clones) {
-            clean &= delete_clone(&checkout.path).is_ok();
+            clean &= delete_clone(&checkout.path, &self.host).is_ok();
         }
         for (checkout, start) in workspace.checkouts.iter().zip(&made.branches) {
             if let Ok(Some(listed)) = self
@@ -2407,7 +2448,7 @@ impl<B: Backend> Workspaces<B> {
                 stashes: count(&stashes),
             });
         }
-        let lost = self.backend.unpushed_commits(&checkout.path)?;
+        let lost = self.backend.unpushed_commits(&checkout.path, &self.host)?;
         let unpushed = count(&lost);
         if unpushed > 0 && !allow.delete_unmerged {
             return refused(CloneRefusal::Unpushed {
@@ -2482,7 +2523,7 @@ impl<B: Backend> Workspaces<B> {
         for (planned, seen) in removal.checkouts.iter_mut().zip(&confirmed.checkouts) {
             let checkout = &planned.checkout;
             // What an interrupted deletion of a clone left aside goes first.
-            if let Some(aside) = aside(&checkout.path) {
+            if let Some(aside) = aside(&checkout.path, &self.host) {
                 delete_directory(&aside)?;
             }
             if planned.directory == Fate::Removed && !planned.partial_worktree() {
@@ -2492,7 +2533,7 @@ impl<B: Backend> Workspaces<B> {
                 // The clone holds its branch, so deleting the clone deletes
                 // the branch, and nothing of the person's repository changes.
                 if planned.directory == Fate::Removed {
-                    delete_clone(&checkout.path)?;
+                    delete_clone(&checkout.path, &self.host)?;
                 }
                 planned.branch = seen.branch;
                 continue;

@@ -4,6 +4,7 @@
 use crumbkit::{Batch, Call, Document, Listing, Prose, Run};
 use std::path::PathBuf;
 
+use multiverse::Host;
 use multiverse::health::{self, Problem};
 use multiverse::{
     AddOutcome, Allow, ArchiveState, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined,
@@ -86,7 +87,9 @@ fn store(environment: &Environment) -> Result<Store, MxvFailure> {
 
 /// Returns the workspaces whose records `environment` names, made by git.
 fn workspaces(environment: &Environment) -> Result<Workspaces<Git>, MxvFailure> {
-    Ok(Workspaces::new(store(environment)?, Git).with_mirrors(environment.mirrors()?))
+    Ok(Workspaces::new(store(environment)?, Git)
+        .with_host(Host::mxv())
+        .with_mirrors(environment.mirrors()?))
 }
 
 /// Returns the workspaces whose records `environment` names, made by git,

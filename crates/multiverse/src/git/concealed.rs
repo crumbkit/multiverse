@@ -9,13 +9,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use super::{
-    CHECKOUT_DEADLINE, Git, LOCAL_DEADLINE, MOST_LISTING_BYTES, ORIGIN_REFS, lines, module_dirs,
-    run, run_keeping, trimmed,
+    CHECKOUT_DEADLINE, Git, LOCAL_DEADLINE, MOST_LISTING_BYTES, lines, module_dirs, run,
+    run_keeping, trimmed,
 };
 use crate::backend::{
     Backend, Concealed, Hidden, LargeFile, LocalNames, Operation, Paused, SubmoduleWork,
 };
 use crate::error::Error;
+use crate::host::Host;
 
 /// The most levels of nested submodules that mxv reads.
 const MOST_SUBMODULE_DEPTH: usize = 8;
@@ -26,14 +27,6 @@ const GITLINK: &str = "160000";
 
 /// The file mode that git gives a symbolic link.
 const SYMLINK: &str = "120000";
-
-/// The name of the fallback identity of an archive's commit of uncommitted
-/// work, which is used when git has no identity of the person.
-const FALLBACK_NAME: &str = "mxv";
-
-/// The email of the fallback identity of an archive's commit of uncommitted
-/// work.
-const FALLBACK_EMAIL: &str = "mxv@localhost.invalid";
 
 /// One entry of git's index.
 struct IndexEntry {
@@ -322,6 +315,7 @@ fn read_checkout(
     prefix: &str,
     depth: usize,
     found: &mut Found,
+    host: &Host,
 ) -> Result<(), Error> {
     let dir = git_dir(checkout)?;
     found
@@ -350,9 +344,16 @@ fn read_checkout(
             path: path.clone(),
             changes: Git.changes(&dir)?,
             stashes: Git.stashes(&dir)?,
-            commits: Git.unpushed_commits(&dir)?,
+            commits: Git.unpushed_commits(&dir, host)?,
         });
-        read_checkout(&dir, &index(&dir)?, &format!("{path}/"), depth + 1, found)?;
+        read_checkout(
+            &dir,
+            &index(&dir)?,
+            &format!("{path}/"),
+            depth + 1,
+            found,
+            host,
+        )?;
     }
     Ok(())
 }
@@ -360,7 +361,11 @@ fn read_checkout(
 /// Returns the stashes and commits of each git directory below `top`, the
 /// git directory of a checkout, that `read` does not name. Git keeps a
 /// submodule's git directory after `git submodule deinit` takes its files.
-fn orphaned(top: &Path, read: &BTreeSet<PathBuf>) -> Result<Vec<SubmoduleWork>, Error> {
+fn orphaned(
+    top: &Path,
+    read: &BTreeSet<PathBuf>,
+    host: &Host,
+) -> Result<Vec<SubmoduleWork>, Error> {
     let modules = top.join("modules");
     let mut found = Vec::new();
     for dir in module_dirs(&modules)? {
@@ -374,7 +379,7 @@ fn orphaned(top: &Path, read: &BTreeSet<PathBuf>) -> Result<Vec<SubmoduleWork>, 
                 .to_string_lossy()
                 .into_owned(),
             stashes: Git.stashes(&dir)?,
-            commits: Git.unpushed_commits(&dir)?,
+            commits: Git.unpushed_commits(&dir, host)?,
             ..SubmoduleWork::default()
         };
         if !work.stashes.is_empty() || !work.commits.is_empty() {
@@ -389,7 +394,9 @@ fn orphaned(top: &Path, read: &BTreeSet<PathBuf>) -> Result<Vec<SubmoduleWork>, 
 /// that reference, leaving out what `HEAD` reaches, which the pin keeps. A
 /// stash has its own report, and mxv's own references copy what `origin`
 /// holds. `refs/prefetch` holds git's copies of remote branches.
-fn kept_by_other_references(dir: &Path) -> Result<Vec<String>, Error> {
+fn kept_by_other_references(dir: &Path, host: &Host) -> Result<Vec<String>, Error> {
+    let own = format!("--exclude={}*", host.ref_namespace());
+    let origin = super::origin_refs(host);
     let listed = run(
         dir,
         [
@@ -402,7 +409,7 @@ fn kept_by_other_references(dir: &Path) -> Result<Vec<String>, Error> {
             "--exclude=refs/notes/*",
             "--exclude=refs/remotes/*",
             "--exclude=refs/prefetch/*",
-            "--exclude=refs/mxv/*",
+            &own,
             "--exclude=refs/stash",
             "--all",
             "--not",
@@ -411,7 +418,7 @@ fn kept_by_other_references(dir: &Path) -> Result<Vec<String>, Error> {
             "--tags",
             "--glob=refs/notes/*",
             "--remotes=origin",
-            ORIGIN_REFS,
+            &origin,
             "--",
         ],
         "log",
@@ -423,10 +430,10 @@ fn kept_by_other_references(dir: &Path) -> Result<Vec<String>, Error> {
 
 /// Returns what `git status` does not show about the checkout at
 /// `checkout`.
-pub(super) fn concealed(checkout: &Path) -> Result<Concealed, Error> {
+pub(super) fn concealed(checkout: &Path, host: &Host) -> Result<Concealed, Error> {
     let entries = index(checkout)?;
     let mut found = Found::default();
-    read_checkout(checkout, &entries, "", 0, &mut found)?;
+    read_checkout(checkout, &entries, "", 0, &mut found, host)?;
     let top = git_dir(checkout)?;
     // The checkout's own other references are read by `orphans`, whose
     // commits the archive keeps, and a worktree's stay in its repository.
@@ -434,12 +441,12 @@ pub(super) fn concealed(checkout: &Path) -> Result<Concealed, Error> {
     // archive deletes with the checkout and cannot pin.
     let mut module_referenced = Vec::new();
     for dir in module_dirs(&top.join("modules"))? {
-        module_referenced.extend(kept_by_other_references(&dir)?);
+        module_referenced.extend(kept_by_other_references(&dir, host)?);
     }
     Ok(Concealed {
         nested: nested(checkout)?,
         hidden: hidden(checkout, &entries)?,
-        orphaned: orphaned(&top, &found.dirs)?,
+        orphaned: orphaned(&top, &found.dirs, host)?,
         submodules: found.submodules,
         unlisted: found.unlisted,
         paused: found.paused,
@@ -448,19 +455,21 @@ pub(super) fn concealed(checkout: &Path) -> Result<Concealed, Error> {
 }
 
 /// Returns the configuration that gives a commit in the checkout at
-/// `checkout` an identity: nothing when git has one, or else mxv's own, as
-/// on a machine or in a CI runner where nobody set `user.name`.
-pub(super) fn identity(checkout: &Path) -> Result<Vec<String>, Error> {
+/// `checkout` an identity: nothing when git has one, or else `host`'s
+/// [`Host::wip_author`], such as `mxv <mxv@localhost.invalid>`, as on a
+/// machine or in a CI runner where nobody set `user.name`.
+pub(super) fn identity(checkout: &Path, host: &Host) -> Result<Vec<String>, Error> {
     for variable in ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"] {
         if !run(checkout, ["var", variable], "var", LOCAL_DEADLINE)?
             .status
             .success()
         {
+            let (name, email) = host.wip_author();
             return Ok(vec![
                 "-c".to_owned(),
-                format!("user.name={FALLBACK_NAME}"),
+                format!("user.name={name}"),
                 "-c".to_owned(),
-                format!("user.email={FALLBACK_EMAIL}"),
+                format!("user.email={email}"),
             ]);
         }
     }

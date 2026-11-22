@@ -32,6 +32,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::error::Error;
+use crate::host::Host;
 use crate::mirror::directory;
 
 mod admit;
@@ -73,6 +74,8 @@ pub use root::{RootEntry, RootKind};
 pub const ARCHIVE_VERSION: u32 = 3;
 
 /// The message of the commits that keep a checkout's uncommitted work.
+/// This is the value of mxv's profile, [`Host::mxv`](crate::Host::mxv);
+/// another host's is [`Host::wip_message`](crate::Host::wip_message).
 pub const WIP_MESSAGE: &str = "wip: archived by mxv";
 
 /// The largest file of a checkout's uncommitted work, and the largest
@@ -96,20 +99,13 @@ const MANIFEST_COPY: &str = "manifest";
 /// The name of the directory that holds an archive's root files.
 const ROOT_DIR: &str = "root";
 
-/// The suffix of the name under which `mxv archive` moves a checkout while
-/// it compares the checkout with what it admitted, such as
-/// `.app.mxv-archiving` beside `app`. A checkout that passes moves on to
-/// the name that [`aside`] returns, so what stands under this name is whole.
-const QUARANTINE_SUFFIX: &str = ".mxv-archiving";
-
-/// The start of every pin's reference.
-const PIN_NAMESPACE: &str = "refs/mxv/archives/";
-
 /// The end of the pin of a checkout's `HEAD` in a record of version 2.
 const HEAD_PIN: &str = "/head";
 
 /// The start of the reference that a restore gives each kept commit that
 /// no other reference reaches, such as `refs/mxv/kept/<commit>`.
+/// This is the value of mxv's profile, [`Host::mxv`](crate::Host::mxv);
+/// another host's is [`Host::kept_namespace`](crate::Host::kept_namespace).
 pub const KEPT_NAMESPACE: &str = "refs/mxv/kept/";
 
 /// The checkpoint of a run outside the tests, which does nothing. A test
@@ -124,19 +120,23 @@ pub(crate) const fn no_checkpoint(_step: &str) -> Result<(), Error> {
 }
 
 /// Returns the name of the pin of the `HEAD` of the checkout in `folder`
-/// of the archive `id`. The folder is encoded as one reference component,
+/// of the archive `id`, below `host`'s pin namespace, such as
+/// `refs/mxv/archives/`. The folder is encoded as one reference component,
 /// because a repository's name can hold bytes that a reference may not.
-fn pin_ref(id: &str, folder: &str) -> String {
+fn pin_ref(host: &Host, id: &str, folder: &str) -> String {
     format!(
-        "{PIN_NAMESPACE}{id}/{}{HEAD_PIN}",
+        "{}{id}/{}{HEAD_PIN}",
+        host.pin_namespace(),
         directory(folder).replace("..", ".%2E")
     )
 }
 
-/// Returns the path beside `checkout` under which `archive` holds it while
-/// it compares it with what it admitted, or `None` for a path without a
-/// name.
-pub(crate) fn quarantine(checkout: &Path) -> Option<PathBuf> {
+/// Returns the path beside `checkout` under which an archive holds it
+/// while it compares it with what it admitted, such as `.app.mxv-archiving`
+/// beside `app` under `host`'s quarantine suffix, or `None` for a path
+/// without a name. A checkout that passes moves on to the name that
+/// [`aside`] returns, so what stands under this name is whole.
+pub(crate) fn quarantine(checkout: &Path, host: &Host) -> Option<PathBuf> {
     let name = checkout.file_name()?.to_str()?;
-    Some(checkout.with_file_name(format!(".{name}{QUARANTINE_SUFFIX}")))
+    Some(checkout.with_file_name(format!(".{name}{}", host.quarantine_suffix())))
 }

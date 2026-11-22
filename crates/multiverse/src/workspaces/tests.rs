@@ -7,6 +7,7 @@ use crate::backend::{Backend, Changes, Head, Listed, RefHolder, Repository};
 use crate::disposable::PathGlob;
 use crate::error::Error;
 use crate::git::Git;
+use crate::host::Host;
 use crate::name::WorkspaceName;
 use crate::record::{Workspace, WorkspaceState};
 use crate::store::Store;
@@ -877,8 +878,8 @@ impl Backend for Scripted {
     fn switch_branch(&self, checkout: &Path, branch: &str) -> Result<String, Error> {
         Git.switch_branch(checkout, branch)
     }
-    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {
-        Git.unpushed_commits(checkout)
+    fn unpushed_commits(&self, checkout: &Path, host: &Host) -> Result<Vec<String>, Error> {
+        Git.unpushed_commits(checkout, host)
     }
     fn stashes(&self, checkout: &Path) -> Result<Vec<String>, Error> {
         Git.stashes(checkout)
@@ -913,8 +914,9 @@ impl Backend for Scripted {
         checkout: &Path,
         kept: &[String],
         shared: bool,
+        host: &Host,
     ) -> Result<Vec<String>, Error> {
-        Git.orphans(checkout, kept, shared)
+        Git.orphans(checkout, kept, shared, host)
     }
     fn large_files(
         &self,
@@ -937,9 +939,9 @@ impl Backend for Scripted {
         index: &Path,
         left_out: &[String],
         time: u64,
-        message: &str,
+        host: &Host,
     ) -> Result<crate::backend::WipCommits, Error> {
-        Git.write_wip(checkout, index, left_out, time, message)
+        Git.write_wip(checkout, index, left_out, time, host)
     }
     fn tree_of(&self, dir: &Path, commit: &str) -> Result<String, Error> {
         Git.tree_of(dir, commit)
@@ -969,8 +971,8 @@ impl Backend for Scripted {
         }
         Git.resolve_commit(holder, revision)
     }
-    fn concealed(&self, checkout: &Path) -> Result<crate::backend::Concealed, Error> {
-        Git.concealed(checkout)
+    fn concealed(&self, checkout: &Path, host: &Host) -> Result<crate::backend::Concealed, Error> {
+        Git.concealed(checkout, host)
     }
     fn local_names(
         &self,
@@ -982,8 +984,13 @@ impl Backend for Scripted {
     fn remove_origin(&self, checkout: &Path) -> Result<(), Error> {
         Git.remove_origin(checkout)
     }
-    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error> {
-        Git.local_only_commits(dir, revision)
+    fn local_only_commits(
+        &self,
+        dir: &Path,
+        revision: &str,
+        host: &Host,
+    ) -> Result<Vec<String>, Error> {
+        Git.local_only_commits(dir, revision, host)
     }
     fn upstream(&self, checkout: &Path, branch: &str) -> Result<Option<String>, Error> {
         Git.upstream(checkout, branch)

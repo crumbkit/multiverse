@@ -228,6 +228,18 @@ fn a_mismatched_checkout_names_its_folder_and_its_workspace_and_says_mxv_wrote_n
 }
 
 #[test]
+fn a_host_mismatch_names_both_hosts_and_says_nothing_was_done() {
+    let error = Error::HostMismatch {
+        workspaces: crate::HostName::new("example").unwrap(),
+        archives: crate::HostName::new("mxv").unwrap(),
+    };
+    assert_eq!(
+        error.to_string(),
+        "the workspaces belong to the host example and the archives to the host mxv, so nothing was done"
+    );
+}
+
+#[test]
 fn a_wrong_lock_names_both_workspaces_and_says_mxv_did_nothing() {
     let error = Error::WrongLock {
         locked: "other".parse().unwrap(),

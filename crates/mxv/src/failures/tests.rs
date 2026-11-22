@@ -261,3 +261,19 @@ fn a_lock_of_another_workspace_reads_as_a_defect_of_mxv_to_report() {
     };
     assert!(hint.contains("this is a defect of mxv"), "{hint}");
 }
+
+#[test]
+fn archives_of_another_host_read_as_a_defect_of_mxv_to_report() {
+    let failure = MxvFailure::from(multiverse::Error::HostMismatch {
+        workspaces: multiverse::HostName::new("example").unwrap(),
+        archives: multiverse::HostName::new("mxv").unwrap(),
+    });
+
+    let code = failure.code();
+    assert_eq!(code, super::WORKSPACE_HOST_MISMATCH);
+    assert_eq!((code.area(), code.reason()), ("workspace", "host_mismatch"));
+    let Recovery::Hint(hint) = failure.recovery() else {
+        panic!("{failure:?} offers no hint");
+    };
+    assert!(hint.contains("this is a defect of mxv"), "{hint}");
+}

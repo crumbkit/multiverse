@@ -628,14 +628,14 @@ fn the_served_routes_come_with_a_sentence_for_each_manifest_left_out() {
         "ports = [\"web\"]\nroutes = [\"web\"]\n[processes.web]\nargv = [\"web\"]\nports = { PORT = \"web\" }\nlisten = \"web\"\n",
         &[("web", 21001)],
     );
-    let (routes, problems) = super::served(&store);
+    let (routes, problems) = super::served(&store, &crate::Host::mxv());
     assert_eq!(routes.len(), 1);
     assert!(problems.is_empty(), "{problems:?}");
     write(
         dir.path().join("workspaces/triage/app/mxv.toml"),
         "routes = [",
     );
-    let (routes, problems) = super::served(&store);
+    let (routes, problems) = super::served(&store, &crate::Host::mxv());
     assert!(routes.is_empty());
     assert_eq!(problems.len(), 1, "{problems:?}");
     assert!(
@@ -670,7 +670,7 @@ fn the_problems_of_a_workspace_leave_out_those_of_the_others() {
             "routes = [",
         );
     }
-    let (_, problems) = super::served(&store);
+    let (_, problems) = super::served(&store, &crate::Host::mxv());
     assert_eq!(problems.len(), 2, "{problems:?}");
     let synced = super::Synced {
         problems,
@@ -755,4 +755,45 @@ fn a_workspace_name_that_makes_a_label_over_63_bytes_is_a_label_too_long_problem
             bytes: 64
         }]
     );
+}
+
+#[test]
+fn routes_under_a_second_profile_use_its_domain() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join("records"));
+    let routed = |port: &str| {
+        format!(
+            "ports = [\"{port}\"]\nroutes = [\"{port}\"]\n[processes.{port}]\nargv = [\"{port}\"]\nports = {{ PORT = \"{port}\" }}\nlisten = \"{port}\"\n"
+        )
+    };
+    workspace(
+        &store,
+        dir.path(),
+        "triage",
+        &routed("web"),
+        &[("web", 21001), ("api", 21002)],
+    );
+    write(
+        dir.path().join("workspaces/triage/app/example.toml"),
+        routed("api"),
+    );
+    let host = crate::Host::named("example").unwrap();
+    let proxy = Proxy::new(settings(dir.path()).with_search(vec![dir.path().join("empty")]))
+        .with_host(host.clone());
+
+    let status = proxy.status(&store).unwrap();
+
+    let served: Vec<&str> = status
+        .routes
+        .served
+        .iter()
+        .map(|route| route.host.as_str())
+        .collect();
+    assert_eq!(served, ["api.triage.example.localhost"]);
+    let (served, problems) = super::served(&store, &host);
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(served[0].host, "api.triage.example.localhost");
+    let mxv = Proxy::new(settings(dir.path()).with_search(vec![dir.path().join("empty")]));
+    let status = mxv.status(&store).unwrap();
+    assert_eq!(status.routes.served[0].host, "web.triage.mxv.localhost");
 }

@@ -53,6 +53,21 @@ Later commands find the processes through the run record. The keeper's `Recorder
 2. `proxy::sync` in `crates/mxv/src/proxy.rs` calls `Proxy::sync` in `crates/multiverse/src/proxy.rs` and turns a failure into a warning with an error code.
 3. `Proxy::sync` derives `Route` values from the records (`proxy/routes.rs`), renders Caddy's JSON configuration (`proxy/caddy_config.rs`), starts Caddy through phase when needed (`proxy/process.rs`) and talks to its admin socket (`proxy/admin.rs`).
 
+## Host profiles
+
+A host is a program built on `multiverse`, such as `mxv`. `multiverse::Host` (`crates/multiverse/src/host.rs`) holds every name that a host leaves on disk, in git or in docker.
+
+- `Host::mxv()` is mxv's profile. Its values are those that the public constants `MANIFEST_FILE`, `RESERVED_PREFIX`, `proxy::DOMAIN`, `AGENTS_FILE`, `KEPT_NAMESPACE` and `WIP_MESSAGE` hold.
+- `Host::named(name)` derives another profile from a name of at most 32 bytes of lowercase letters, digits and dashes.
+- The profile derives the manifest file `<name>.toml`, the reserved unit prefix `<name>-`, the git namespace `refs/<name>/`, the archive pins under `refs/<name>/archives/`, the kept commits under `refs/<name>/kept/`, the origin copies under `refs/<name>/origin/`, the work-in-progress commit's author and message, the suffixes `.<name>-removing` and `.<name>-archiving` of folders set aside, and phase's docker label prefix `<name>.`.
+- `with_manifest_file`, `with_proxy_domain` and `with_agents_text` override the manifest file name, the proxy domain below `.localhost` and the text of a workspace's generated `AGENTS.md`.
+- `Workspaces`, `Archives`, `Runs` and `Proxy` each take a profile with `with_host`, and default to `Host::mxv()`. `Runs::with_host` passes the label prefix to `phase::Phase::with_labels`.
+- `Store::with_host` sets the manifest file, the unit prefix and the proxy domain that a record's manifest reads use. The proxy domain is the domain that a manifest's `hosts` entries may not lie below. A record on disk does not store its host, and two records that differ only in their host compare equal.
+- Each `Workspaces` method that takes an `Archives` refuses one of another host with `Error::HostMismatch` before it reads or writes anything, so one host names every archive reference, folder and commit.
+- A manifest under any host refuses unit names that start with `mxv-` as well as the host's own prefix, because `Runs` adds its internal apps and ledger ports under `mxv-` for every host.
+- mxv passes `Host::mxv()` to each of these in `crates/mxv/src/environment.rs`, `crates/mxv/src/verbs.rs` and `crates/mxv/src/archive.rs`.
+- The state directory, the `MXV_*` environment variables, the names of mxv's own apps (including the proxy's phase workspace `mxv-proxy`), the Caddy server name `mxv` in the generated Caddy configuration and the text of error messages do not change with the profile.
+
 ## Key decisions
 
 Decision records in `crates/mxv/docs/decisions/`:

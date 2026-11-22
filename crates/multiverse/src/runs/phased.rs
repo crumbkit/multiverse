@@ -540,6 +540,17 @@ impl Runs {
         phase_plan::build(&self.inputs(workspace, id, manifest)).ok()
     }
 
+    /// Returns the manifest that `workspace` reads under these runs' host,
+    /// or `None` when it has none or it cannot be read.
+    fn manifest_of(&self, workspace: &Workspace) -> Option<Manifest> {
+        workspace
+            .clone()
+            .with_host(&self.host)
+            .manifest()
+            .ok()
+            .flatten()
+    }
+
     /// Returns what the plan of `workspace`'s `manifest` is built from.
     fn inputs<'a>(
         &'a self,
@@ -553,7 +564,7 @@ impl Runs {
             id,
             checkout: checkout(workspace),
             roots: phase_plan::roots(workspace),
-            workspace_dir: Some(&workspace.path),
+            workspace_dir: Some((&workspace.path, self.host.manifest_file())),
             ports: &workspace.ports,
             grace: self.grace,
             caller: &self.caller,
@@ -571,8 +582,14 @@ impl Runs {
                 // The sentences about records left out are for `mxv up`, which
                 // prints them after the proxy syncs; a unit's variables need
                 // only the routes.
-                let (served, _) = crate::proxy::served(&crate::store::Store::new(records.clone()));
-                phase_plan::ProxyUrls::of(&workspace.name, &served, *https)
+                let (served, _) =
+                    crate::proxy::served(&crate::store::Store::new(records.clone()), &self.host);
+                phase_plan::ProxyUrls::of(
+                    &workspace.name,
+                    &served,
+                    *https,
+                    self.host.proxy_domain(),
+                )
             })
     }
 
@@ -717,7 +734,7 @@ impl Runs {
     pub fn renamed_volumes(&self, workspace: &Workspace) -> Result<Vec<RenamedVolume>, Error> {
         // An unfinished checkout never ran, so the workspace ran as the
         // checkouts that have a commit.
-        let mut workspace = workspace.clone();
+        let mut workspace = workspace.clone().with_host(&self.host);
         workspace
             .checkouts
             .retain(|checkout| checkout.commit.is_some());
@@ -733,7 +750,7 @@ impl Runs {
         else {
             return Ok(Vec::new());
         };
-        let Ok(Some(own)) = Manifest::read(&checkout.path) else {
+        let Ok(Some(own)) = Manifest::read_as(&checkout.path, &workspace.names) else {
             return Ok(Vec::new());
         };
         let volumes: BTreeSet<&String> = own
@@ -773,7 +790,7 @@ impl Runs {
     ///
     /// Returns the errors of [`Runs::status`].
     pub fn footprint(&self, workspace: &Workspace) -> Result<Footprint, Error> {
-        let manifest = workspace.manifest().ok().flatten();
+        let manifest = self.manifest_of(workspace);
         let mut footprint = Footprint::default();
         for row in self.phase_rows(workspace, manifest.as_ref())?.values() {
             if !row.state.may_run() {
@@ -812,7 +829,7 @@ impl Runs {
     /// Returns the errors of [`Runs::status`].
     pub fn running(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
         let mut running = Vec::new();
-        let manifest = workspace.manifest().ok().flatten();
+        let manifest = self.manifest_of(workspace);
         for (name, row) in self.phase_rows(workspace, manifest.as_ref())? {
             if row.state.may_run() && !running.contains(&name) {
                 running.push(name);
@@ -1558,7 +1575,7 @@ impl Runs {
     /// read, and the errors of [`Runs::status`].
     pub fn docker_containers(&self, workspace: &Workspace) -> Result<Vec<String>, Error> {
         let mut containers = BTreeSet::new();
-        let manifest = workspace.manifest().ok().flatten();
+        let manifest = self.manifest_of(workspace);
         for (name, row) in self.phase_rows(workspace, manifest.as_ref())? {
             if row.runner == RunnerKind::Container && row.handle.is_some() {
                 containers.insert(name);

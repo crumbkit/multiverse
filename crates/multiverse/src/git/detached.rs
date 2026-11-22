@@ -7,10 +7,9 @@ use std::process::{Command, Stdio};
 use wait_timeout::ChildExt as _;
 
 use super::ssh::git_command;
-use super::{
-    Finished, GIT, LOCAL_DEADLINE, MOST_OUTPUT_BYTES, ORIGIN_REFS, drain, joined, lines, run,
-};
+use super::{Finished, GIT, LOCAL_DEADLINE, MOST_OUTPUT_BYTES, drain, joined, lines, run};
 use crate::error::Error;
+use crate::host::Host;
 
 /// How far before the oldest detached commit [`detached_commits`] looks for
 /// a copy of it, in seconds, so a clock that was a little wrong when the
@@ -29,7 +28,8 @@ const COPY_MARGIN: i64 = 24 * 60 * 60;
 /// commit whose patch matches a commit that `origin` or a local branch
 /// holds, such as one that was cherry-picked onto the branch, does not
 /// count either.
-pub(super) fn detached_commits(dir: &Path) -> Result<Vec<String>, Error> {
+pub(super) fn detached_commits(dir: &Path, host: &Host) -> Result<Vec<String>, Error> {
+    let origin = super::origin_refs(host);
     let branches = run(
         dir,
         ["for-each-ref", "--format=%(refname)", "refs/heads"],
@@ -68,7 +68,7 @@ pub(super) fn detached_commits(dir: &Path) -> Result<Vec<String>, Error> {
             "--tags",
             "--glob=refs/notes/*",
             "--remotes=origin",
-            ORIGIN_REFS,
+            &origin,
         ]
         .map(str::to_owned),
     );
@@ -98,7 +98,7 @@ pub(super) fn detached_commits(dir: &Path) -> Result<Vec<String>, Error> {
             format!("--max-age={}", oldest.saturating_sub(COPY_MARGIN).max(0)),
             "--branches".to_owned(),
             "--remotes=origin".to_owned(),
-            ORIGIN_REFS.to_owned(),
+            origin,
         ],
     )?;
     let known: Vec<&String> = known.values().collect();

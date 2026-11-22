@@ -1152,7 +1152,7 @@ fn a_refused_archive_abandons_its_archive_and_leaves_the_workspace_live() {
     let setup = fresh();
     let workspace = setup.create();
     let checkout = workspace.checkouts[0].path.clone();
-    let late = crate::archive::quarantine(&checkout)
+    let late = crate::archive::quarantine(&checkout, &crate::Host::mxv())
         .unwrap()
         .join("late.txt");
     let plan = setup.archive_plan();

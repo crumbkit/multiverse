@@ -13,6 +13,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Args;
 use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
+use multiverse::Host;
 use multiverse::health::{self, Broken, Problem};
 use multiverse::phase::host::TableEntry;
 use multiverse::{
@@ -959,10 +960,7 @@ impl fmt::Display for RestoreResult {
 
 /// Returns the archives that `environment` names.
 pub(crate) fn archives(environment: &Environment) -> Result<Archives, MxvFailure> {
-    Ok(Archives::new(
-        environment.archives()?,
-        environment.archive_data()?,
-    ))
+    Ok(Archives::new(environment.archives()?, environment.archive_data()?).with_host(Host::mxv()))
 }
 
 /// Returns the pids of the ancestors of `own` in `table`, which walks the

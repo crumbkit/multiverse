@@ -835,7 +835,9 @@ fn a_file_written_into_target_after_the_move_is_named_as_deleted() {
     setup.create();
     let checkout = setup.checkout();
     leave_build_output(&checkout);
-    let late = quarantine(&checkout).unwrap().join("target/late.o");
+    let late = quarantine(&checkout, &crate::Host::mxv())
+        .unwrap()
+        .join("target/late.o");
     set_hook(move |step| {
         if step == "moved:app" {
             write(&late, "late\n");
@@ -868,7 +870,9 @@ fn a_disposable_directory_deleted_after_the_move_puts_the_checkout_back_and_refu
     setup.create();
     let checkout = setup.checkout();
     leave_build_output(&checkout);
-    let target = quarantine(&checkout).unwrap().join("target");
+    let target = quarantine(&checkout, &crate::Host::mxv())
+        .unwrap()
+        .join("target");
     set_hook(move |step| {
         if step == "moved:app" {
             fs::remove_dir_all(&target).unwrap();
@@ -902,7 +906,9 @@ fn an_ignored_file_edited_after_the_tar_puts_the_checkout_back_and_refuses() {
     setup.ignore_env();
     let checkout = setup.checkout();
     write(checkout.join(".env"), "SECRET=1\n");
-    let edited = quarantine(&checkout).unwrap().join(".env");
+    let edited = quarantine(&checkout, &crate::Host::mxv())
+        .unwrap()
+        .join(".env");
     set_hook(move |step| {
         if step == "moved:app" {
             write(&edited, "SECRET=2\n");
@@ -988,7 +994,9 @@ fn keeps_uncommitted_work(kind: Kind) {
             "the restore keeps the objects of the work"
         );
     }
-    let pins = Git.refs_under(holder, PIN_NAMESPACE).unwrap();
+    let pins = Git
+        .refs_under(holder, &crate::Host::mxv().pin_namespace())
+        .unwrap();
     assert!(pins.is_empty(), "the restore deletes every pin: {pins:?}");
 }
 
@@ -1292,7 +1300,7 @@ fn a_file_written_during_retirement_comes_back_in_place(kind: Kind) {
     let setup = setup(kind);
     setup.create();
     let checkout = setup.checkout();
-    let held = quarantine(&checkout).unwrap();
+    let held = quarantine(&checkout, &crate::Host::mxv()).unwrap();
     let late = held.join("late.txt");
     set_hook(move |step| {
         if step == "moved:app" {
@@ -2174,7 +2182,7 @@ fn the_listing_reports_a_bad_record_beside_the_good_ones() {
 
 #[test]
 fn a_pin_name_stays_one_reference_component_for_an_odd_folder() {
-    let pin = pin_ref("abc", "a..b/c d");
+    let pin = pin_ref(&crate::Host::mxv(), "abc", "a..b/c d");
     assert!(pin.starts_with("refs/mxv/archives/abc/"));
     assert!(!pin.contains(".."), "{pin}");
     assert_eq!(pin.matches('/').count(), 5, "{pin}");
@@ -2576,7 +2584,7 @@ fn an_error_after_the_rename_puts_the_checkout_back_under_its_own_name() {
     let setup = setup(Kind::Clone);
     setup.create();
     let checkout = setup.checkout();
-    let held = quarantine(&checkout).unwrap();
+    let held = quarantine(&checkout, &crate::Host::mxv()).unwrap();
     let head = held.join(".git/HEAD");
     let plan = setup.plan(ArchiveOptions::default());
     set_hook(move |step| {
@@ -2589,7 +2597,7 @@ fn an_error_after_the_rename_puts_the_checkout_back_under_its_own_name() {
     clear_hook();
     assert!(result.is_err(), "{result:?}");
     assert!(checkout.join(".git").is_dir());
-    assert!(!quarantine(&checkout).unwrap().exists());
+    assert!(!quarantine(&checkout, &crate::Host::mxv()).unwrap().exists());
 }
 
 #[test]
@@ -2679,7 +2687,9 @@ fn a_rerun_copies_a_root_file_again_after_a_second_checkout_stopped_the_first_ru
         .unwrap();
     let web = setup.root.join("triage/web");
     let late = web.join("late.txt");
-    let held = quarantine(&web).unwrap().join("late.txt");
+    let held = quarantine(&web, &crate::Host::mxv())
+        .unwrap()
+        .join("late.txt");
     let plan = setup.plan(ArchiveOptions::default());
     set_hook(move |step| {
         if step == "moved:web" {

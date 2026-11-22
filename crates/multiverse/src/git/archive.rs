@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use super::{
-    CHECKOUT_DEADLINE, FETCH_DEADLINE, LOCAL_DEADLINE, MOST_OUTPUT_BYTES, ORIGIN_REFS, concealed,
-    detached, lines, run, run_in_holder, run_in_mirror, run_with, run_with_input, trimmed,
+    CHECKOUT_DEADLINE, FETCH_DEADLINE, LOCAL_DEADLINE, MOST_OUTPUT_BYTES, concealed, detached,
+    lines, origin_refs, run, run_in_holder, run_in_mirror, run_with, run_with_input, trimmed,
 };
 use crate::backend::{RefHolder, StashEntry, WipCommits, WipTrees};
 use crate::error::Error;
+use crate::host::Host;
 
 /// The configuration that makes git sync references and loose objects before
 /// it reports success, so a pin survives a power cut. The components add to
@@ -150,6 +151,7 @@ pub(super) fn orphans(
     checkout: &Path,
     kept: &[String],
     shared: bool,
+    host: &Host,
 ) -> Result<Vec<String>, Error> {
     let mut held: Vec<String> = vec!["--not".to_owned(), "HEAD".to_owned()];
     held.extend(kept.iter().cloned());
@@ -163,18 +165,22 @@ pub(super) fn orphans(
             "rev-list",
             "--exclude=refs/remotes/*",
             "--exclude=refs/prefetch/*",
-            "--exclude=refs/mxv/origin/*",
-            "--all",
         ]
         .map(str::to_owned)
         .to_vec();
+        args.push(format!("--exclude={}*", host.origin_namespace()));
+        args.push("--all".to_owned());
         args.extend(held.iter().cloned());
-        args.extend(["--remotes=origin", ORIGIN_REFS, "--"].map(str::to_owned));
+        args.extend([
+            "--remotes=origin".to_owned(),
+            origin_refs(host),
+            "--".to_owned(),
+        ]);
         found.extend(lines(
             &run(checkout, &args, "rev-list", LOCAL_DEADLINE)?.ok("rev-list", checkout)?,
         ));
     }
-    let detached = detached::detached_commits(checkout)?;
+    let detached = detached::detached_commits(checkout, host)?;
     if !detached.is_empty() {
         let mut args: Vec<String> = vec!["rev-list".to_owned(), "--ignore-missing".to_owned()];
         args.extend(detached.iter().cloned());
@@ -419,6 +425,7 @@ pub(super) fn write_wip(
     left_out: &[String],
     time: u64,
     message: &str,
+    host: &Host,
 ) -> Result<WipCommits, Error> {
     let trees = wip_trees(checkout, index, left_out)?;
     let head = trimmed(
@@ -430,7 +437,7 @@ pub(super) fn write_wip(
         )?
         .ok("rev-parse", checkout)?,
     );
-    let identity = concealed::identity(checkout)?;
+    let identity = concealed::identity(checkout, host)?;
     let staged = commit_tree(checkout, &identity, &trees.index, &[&head], message, time)?;
     let worktree = commit_tree(
         checkout,
@@ -565,7 +572,12 @@ pub(super) fn remove_origin(checkout: &Path) -> Result<(), Error> {
 }
 
 /// Returns the commits of `revision` in `dir` that `origin` does not hold.
-pub(super) fn local_only_commits(dir: &Path, revision: &str) -> Result<Vec<String>, Error> {
+pub(super) fn local_only_commits(
+    dir: &Path,
+    revision: &str,
+    host: &Host,
+) -> Result<Vec<String>, Error> {
+    let origin = origin_refs(host);
     let listed = run(
         dir,
         [
@@ -573,7 +585,7 @@ pub(super) fn local_only_commits(dir: &Path, revision: &str) -> Result<Vec<Strin
             revision,
             "--not",
             "--remotes=origin",
-            ORIGIN_REFS,
+            &origin,
             "--",
         ],
         "rev-list",

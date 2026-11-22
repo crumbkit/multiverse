@@ -20,6 +20,7 @@ use phase::Phase;
 
 use crate::archive::PortChange;
 use crate::error::Error;
+use crate::host::Host;
 use crate::manifest::{Manifest, Process};
 use crate::name::WorkspaceName;
 use crate::phase_plan::CallerEnvironment;
@@ -487,6 +488,9 @@ pub struct Runs {
     locks: PathBuf,
     /// The phase whose state directory is `<mxv state>/phase`.
     phase: Phase,
+    /// The host whose names the runs use: its manifest file and reserved
+    /// unit prefix, its docker labels and its proxy domain.
+    host: Host,
     /// How long [`Runs::down`] waits after SIGTERM.
     grace: Duration,
     /// The host ports that [`Runs::up`] allocates from.
@@ -528,7 +532,21 @@ impl Runs {
             caller: CallerEnvironment::default(),
             own_command: None,
             proxy_urls: None,
+            host: Host::mxv(),
         }
+    }
+
+    /// Returns these run files with `host`'s names: each workspace's
+    /// manifest is read from `host`'s manifest file with `host`'s reserved
+    /// unit prefix, phase labels the docker objects it creates, finds and
+    /// removes under `host`'s label prefix, and the proxy's names of a
+    /// workspace lie below `host`'s domain. Without it the runs use
+    /// [`Host::mxv`].
+    #[must_use]
+    pub fn with_host(mut self, host: Host) -> Self {
+        self.phase = self.phase.with_labels(host.labels().clone());
+        self.host = host;
+        self
     }
 
     /// Returns these run files with `records`, the directory of the

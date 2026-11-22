@@ -502,7 +502,7 @@ fn a_record_without_a_mark_has_no_restoring_key_and_a_mark_round_trips() {
     mark.0.directory = true;
     mark.0.refs.push((
         archive.checkouts[0].source.clone(),
-        KeptRef::of_commit("abc").unwrap(),
+        KeptRef::of_commit(&crate::Host::mxv(), "abc").unwrap(),
     ));
     archive.restoring = Some(mark);
     setup.archives.write(&archive).unwrap();
