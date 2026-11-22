@@ -1032,11 +1032,7 @@ impl Backend for Git {
         Ok(trimmed(&commit))
     }
 
-    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error> {
-        self.unpushed_commits_for(checkout, &Host::mxv())
-    }
-
-    fn unpushed_commits_for(&self, checkout: &Path, host: &Host) -> Result<Vec<String>, Error> {
+    fn unpushed_commits(&self, checkout: &Path, host: &Host) -> Result<Vec<String>, Error> {
         let mut unpushed = Vec::new();
         copy_mirror_refs(checkout, host)?;
         let origin = origin_refs(host);
@@ -1132,15 +1128,6 @@ impl Backend for Git {
         checkout: &Path,
         kept: &[String],
         shared: bool,
-    ) -> Result<Vec<String>, Error> {
-        archive::orphans(checkout, kept, shared, &Host::mxv())
-    }
-
-    fn orphans_for(
-        &self,
-        checkout: &Path,
-        kept: &[String],
-        shared: bool,
         host: &Host,
     ) -> Result<Vec<String>, Error> {
         archive::orphans(checkout, kept, shared, host)
@@ -1160,17 +1147,6 @@ impl Backend for Git {
     }
 
     fn write_wip(
-        &self,
-        checkout: &Path,
-        index: &Path,
-        left_out: &[String],
-        time: u64,
-        message: &str,
-    ) -> Result<WipCommits, Error> {
-        archive::write_wip(checkout, index, left_out, time, message, &Host::mxv())
-    }
-
-    fn write_wip_for(
         &self,
         checkout: &Path,
         index: &Path,
@@ -1213,11 +1189,7 @@ impl Backend for Git {
         archive::resolve_commit(holder, revision)
     }
 
-    fn concealed(&self, checkout: &Path) -> Result<Concealed, Error> {
-        concealed::concealed(checkout, &Host::mxv())
-    }
-
-    fn concealed_for(&self, checkout: &Path, host: &Host) -> Result<Concealed, Error> {
+    fn concealed(&self, checkout: &Path, host: &Host) -> Result<Concealed, Error> {
         concealed::concealed(checkout, host)
     }
 
@@ -1229,11 +1201,7 @@ impl Backend for Git {
         archive::remove_origin(checkout)
     }
 
-    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error> {
-        archive::local_only_commits(dir, revision, &Host::mxv())
-    }
-
-    fn local_only_commits_for(
+    fn local_only_commits(
         &self,
         dir: &Path,
         revision: &str,

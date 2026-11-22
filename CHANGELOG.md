@@ -26,6 +26,13 @@ workspace may need to act on.
   and deletes only its own references, folders and docker objects, so two
   hosts can share a mirror and a docker daemon. `Archives` refuses an
   archive record whose references lie in another host's namespace.
+- Each `Workspaces` method that takes an `Archives` refuses one of another
+  host with `Error::HostMismatch` before it reads or writes anything. mxv
+  reports it as `mxv::workspace::host_mismatch`, a defect to report,
+  because mxv gives both `Host::mxv()`.
+- `health::classify_for` classifies the records of a given host, so an
+  archive that the host started reads under the host's own folder suffix.
+  `health::classify` classifies mxv's.
 
 ### Changed
 
@@ -33,8 +40,15 @@ workspace may need to act on.
   `AGENTS_FILE`, `KEPT_NAMESPACE` and `WIP_MESSAGE` keep their values, which
   are mxv's profile. mxv's output, references, folders and labels are
   unchanged.
-- `Backend` has new methods that take a `&Host`, each with a default that
-  calls the method without one. `Git` implements each for any host.
+- `Backend::unpushed_commits`, `orphans`, `write_wip`, `concealed` and
+  `local_only_commits` take a `&Host`. `write_wip` takes the host in place
+  of the commit message, and writes the host's message and, when git has
+  no identity of the person, the host's author. A `Backend` outside this
+  repository adds the argument to each of these methods.
+- A manifest under any host refuses unit and port names that start with
+  `mxv-` as well as the host's own prefix, because `Runs` adds its internal
+  apps and ledger ports, such as `mxv-services` and `mxv-aws`, under that
+  prefix for every host.
 
 ## [0.5.1] - 2026-11-22
 

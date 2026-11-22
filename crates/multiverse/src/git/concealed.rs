@@ -344,7 +344,7 @@ fn read_checkout(
             path: path.clone(),
             changes: Git.changes(&dir)?,
             stashes: Git.stashes(&dir)?,
-            commits: Git.unpushed_commits_for(&dir, host)?,
+            commits: Git.unpushed_commits(&dir, host)?,
         });
         read_checkout(
             &dir,
@@ -379,7 +379,7 @@ fn orphaned(
                 .to_string_lossy()
                 .into_owned(),
             stashes: Git.stashes(&dir)?,
-            commits: Git.unpushed_commits_for(&dir, host)?,
+            commits: Git.unpushed_commits(&dir, host)?,
             ..SubmoduleWork::default()
         };
         if !work.stashes.is_empty() || !work.commits.is_empty() {

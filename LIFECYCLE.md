@@ -62,10 +62,12 @@ Each `Workspaces`, `Archives`, `Runs` and `Proxy` value acts for one host profil
 
 - git references below `refs/<name>/`, such as the archive pins below `refs/<name>/archives/` and the kept commits below `refs/<name>/kept/`. The search for commits that only a workspace holds, the copy of a mirror's references and the check of a checkout's concealed commits each leave the references of another host's namespace alone. Two hosts can archive into one mirror, and each restores its own archive.
 - the folders that a removal or an archive moves aside, whose names end in `.<name>-removing` or `.<name>-archiving`.
-- docker containers, networks and volumes whose labels start with `<name>.`. phase's sweep lists and deletes only objects that carry its own label prefix.
+- docker containers and volumes whose labels start with `<name>.`. phase's sweep lists and deletes only objects that carry its own label prefix.
 - the work-in-progress commit, whose author and message the profile names.
 
 `Archives::read` and `Archives::list` (`multiverse/src/archive/record.rs`) refuse an archive record whose pins or kept references lie outside their host's namespace with `Error::CorruptRecord`, which says that another host wrote the archive. A restore under another host's profile therefore writes nothing.
+
+Each `Workspaces` method that takes an `Archives` (`plan_archive`, `archive`, `plan_restore`, `restore`, `remove_archive`, `abandon_archive`, `repair`, `orphans` and `sweep_orphan`) first calls `Workspaces::same_host` (`multiverse/src/workspaces.rs`), which refuses an `Archives` of another host with `Error::HostMismatch` before anything is read or written, so the rules above hold for every archive. mxv reports the error as `mxv::workspace::host_mismatch`, a defect to report, because mxv gives both `Host::mxv()`. `workspaces_refuse_archives_of_another_host_before_they_write_anything` in `multiverse/src/workspaces/host_tests.rs` checks that no file and no record changes. `health::classify_for` and `Workspaces::repair` read an archive's quarantine under the host that started it.
 
 ## Workspace creation
 

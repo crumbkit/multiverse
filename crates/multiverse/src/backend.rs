@@ -470,7 +470,7 @@ pub trait Backend {
     /// # Errors
     ///
     /// Returns the failure of the listing.
-    fn unpushed_commits(&self, checkout: &Path) -> Result<Vec<String>, Error>;
+    fn unpushed_commits(&self, checkout: &Path, host: &Host) -> Result<Vec<String>, Error>;
 
     /// Returns the commit of each stash entry of the clone at `checkout`,
     /// newest first.
@@ -546,8 +546,13 @@ pub trait Backend {
     /// # Errors
     ///
     /// Returns the failure of a listing.
-    fn orphans(&self, checkout: &Path, kept: &[String], shared: bool)
-    -> Result<Vec<String>, Error>;
+    fn orphans(
+        &self,
+        checkout: &Path,
+        kept: &[String],
+        shared: bool,
+        host: &Host,
+    ) -> Result<Vec<String>, Error>;
 
     /// Returns each file of the uncommitted work of the checkout at
     /// `checkout`, changed, staged or untracked and not ignored, that is
@@ -579,7 +584,9 @@ pub trait Backend {
 
     /// Writes the two commits of the uncommitted work of the checkout at
     /// `checkout`, as [`Backend::wip_trees`] reads it through `index`
-    /// without `left_out`, with `message`, and with author and committer
+    /// without `left_out`, with `host`'s [`Host::wip_message`], with
+    /// `host`'s [`Host::wip_author`] as author when git has no identity of
+    /// the person, and with author and committer
     /// dates of `time`, seconds since the Unix epoch, so the same work
     /// gives the same commits. The objects are on disk when it returns.
     /// Nothing names the commits until the caller writes a reference.
@@ -593,7 +600,7 @@ pub trait Backend {
         index: &Path,
         left_out: &[String],
         time: u64,
-        message: &str,
+        host: &Host,
     ) -> Result<WipCommits, Error>;
 
     /// Returns the tree of `commit` in the repository at `dir`.
@@ -665,7 +672,7 @@ pub trait Backend {
     /// # Errors
     ///
     /// Returns the failure of a listing.
-    fn concealed(&self, checkout: &Path) -> Result<Concealed, Error>;
+    fn concealed(&self, checkout: &Path, host: &Host) -> Result<Concealed, Error>;
 
     /// Returns what the clone at `checkout` holds that neither an archive
     /// keeps nor a clone rebuilt from its mirror and the person's
@@ -689,7 +696,12 @@ pub trait Backend {
     /// # Errors
     ///
     /// Returns the failure of the listing.
-    fn local_only_commits(&self, dir: &Path, revision: &str) -> Result<Vec<String>, Error>;
+    fn local_only_commits(
+        &self,
+        dir: &Path,
+        revision: &str,
+        host: &Host,
+    ) -> Result<Vec<String>, Error>;
 
     /// Returns the remote branch that `branch` of the checkout at
     /// `checkout` tracks, as a reference on the remote such as
@@ -751,89 +763,4 @@ pub trait Backend {
     ///
     /// Returns the failure of the checkout.
     fn detach_head(&self, checkout: &Path, commit: &str) -> Result<String, Error>;
-
-    /// Returns what [`Backend::unpushed_commits`] returns, counting the
-    /// copies of the mirror's heads and tags below `host`'s
-    /// [`Host::origin_namespace`] as pushed. The library calls this method
-    /// with the host of the [`crate::Workspaces`] that runs it. A backend
-    /// that keeps no copies of its own returns what
-    /// [`Backend::unpushed_commits`] returns, which this method does unless
-    /// it is implemented.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure of the listing.
-    fn unpushed_commits_for(&self, checkout: &Path, host: &Host) -> Result<Vec<String>, Error> {
-        let _ = host;
-        self.unpushed_commits(checkout)
-    }
-
-    /// Returns what [`Backend::orphans`] returns, counting the copies
-    /// below `host`'s [`Host::origin_namespace`] as what `origin` holds.
-    /// It returns what [`Backend::orphans`] returns unless it is
-    /// implemented.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure of a listing.
-    fn orphans_for(
-        &self,
-        checkout: &Path,
-        kept: &[String],
-        shared: bool,
-        host: &Host,
-    ) -> Result<Vec<String>, Error> {
-        let _ = host;
-        self.orphans(checkout, kept, shared)
-    }
-
-    /// Writes the commits of uncommitted work as [`Backend::write_wip`]
-    /// does, with `host`'s [`Host::wip_message`], and with `host`'s
-    /// [`Host::wip_author`] as their author when git has no identity of
-    /// the person. It calls [`Backend::write_wip`] with the message unless
-    /// it is implemented.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure of a git command.
-    fn write_wip_for(
-        &self,
-        checkout: &Path,
-        index: &Path,
-        left_out: &[String],
-        time: u64,
-        host: &Host,
-    ) -> Result<WipCommits, Error> {
-        self.write_wip(checkout, index, left_out, time, &host.wip_message())
-    }
-
-    /// Returns what [`Backend::concealed`] returns, leaving out the
-    /// references below `host`'s [`Host::ref_namespace`]. It returns what
-    /// [`Backend::concealed`] returns unless it is implemented.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure of a listing.
-    fn concealed_for(&self, checkout: &Path, host: &Host) -> Result<Concealed, Error> {
-        let _ = host;
-        self.concealed(checkout)
-    }
-
-    /// Returns what [`Backend::local_only_commits`] returns, counting the
-    /// copies below `host`'s [`Host::origin_namespace`] as what `origin`
-    /// holds. It returns what [`Backend::local_only_commits`] returns
-    /// unless it is implemented.
-    ///
-    /// # Errors
-    ///
-    /// Returns the failure of the listing.
-    fn local_only_commits_for(
-        &self,
-        dir: &Path,
-        revision: &str,
-        host: &Host,
-    ) -> Result<Vec<String>, Error> {
-        let _ = host;
-        self.local_only_commits(dir, revision)
-    }
 }

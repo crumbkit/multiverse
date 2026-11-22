@@ -302,6 +302,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns the failures of the backend's commands and of the writes.
     /// The record stays, so the same command finishes the archive.
     pub fn archive(
@@ -309,6 +311,7 @@ impl<B: Backend> Workspaces<B> {
         archives: &Archives,
         confirmed: ArchivePlan,
     ) -> Result<ArchiveOutcome, Error> {
+        self.same_host(archives)?;
         let name = confirmed.removal.workspace.name.clone();
         let index = archives.wip_index(&name)?;
         // What counts is what the checkouts hold from here on: anything that
@@ -472,7 +475,7 @@ impl<B: Backend> Workspaces<B> {
                 .iter()
                 .any(|work| work.folder == planned.checkout.name && !work.changes.is_empty());
             archived.kept.wip = if has_work {
-                let written = self.backend.write_wip_for(
+                let written = self.backend.write_wip(
                     &planned.checkout.path,
                     index,
                     plan.left_out(&planned.checkout.name),
@@ -607,7 +610,7 @@ impl<B: Backend> Workspaces<B> {
         // The top level is the directory itself, which moves.
         head.toplevel = None;
         let changes = self.backend.changes(dir)?;
-        let concealed = self.backend.concealed_for(dir, &self.host)?;
+        let concealed = self.backend.concealed(dir, &self.host)?;
         let mut hidden = concealed.nested.clone();
         hidden.extend(concealed.hidden.iter().map(|item| item.path.clone()));
         hidden.extend(
@@ -626,7 +629,7 @@ impl<B: Backend> Workspaces<B> {
         let (stashes, unpushed, refs) = if kind == WorkspaceKind::Clone {
             (
                 self.backend.stashes(dir)?,
-                self.backend.unpushed_commits_for(dir, &self.host)?,
+                self.backend.unpushed_commits(dir, &self.host)?,
                 self.backend.refs_under(own, "refs/")?,
             )
         } else {

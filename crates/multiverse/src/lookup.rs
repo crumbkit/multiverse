@@ -342,12 +342,13 @@ fn declare<'a>(
                 ),
             }));
         }
-        // A checkout folder named `mxv` would prefix its names `mxv-`.
-        if name.starts_with(unit_prefix) {
+        // A checkout folder named `mxv`, or the host's name, would prefix
+        // its names with a reserved prefix.
+        if let Some(prefix) = crate::manifest::reserved_prefix(name, unit_prefix) {
             return Err(failure(ManifestProblem::Invalid {
                 message: format!(
                     "the merged name {}, so give its checkout another folder name with `--as`",
-                    crate::manifest::reserved_message(name, unit_prefix)
+                    crate::manifest::reserved_message(name, prefix)
                 ),
             }));
         }

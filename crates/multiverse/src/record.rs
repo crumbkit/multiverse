@@ -291,7 +291,8 @@ pub struct Workspace {
     pub board_mounts: Vec<BoardMount>,
     /// The names of the host whose manifest files the workspace reads,
     /// which the record never stores. A record reads with mxv's names, and
-    /// [`Workspace::with_host`] gives it another host's.
+    /// [`Store::with_host`](crate::Store::with_host) gives it another
+    /// host's.
     #[serde(skip)]
     pub(crate) names: ManifestNames,
 }
@@ -498,7 +499,7 @@ impl Workspace {
     /// refuse the unit names that `host` keeps. The record's stored form
     /// does not change.
     #[must_use]
-    pub fn with_host(mut self, host: &Host) -> Self {
+    pub(crate) fn with_host(mut self, host: &Host) -> Self {
         self.names = host.manifest_names();
         self
     }

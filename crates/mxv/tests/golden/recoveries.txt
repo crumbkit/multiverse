@@ -246,6 +246,7 @@ codes that no start provokes:
   mxv::workspace::transition_refused: No command asks the store for a move that no workspace makes; the library's store tests provoke it.
   mxv::workspace::mismatched_checkout: No command builds a record whose checkout does not match its kind; the library's store tests provoke it.
   mxv::workspace::wrong_lock: No command passes the lock of one workspace to an operation on another; the library's runs and lifecycle tests provoke it.
+  mxv::workspace::host_mismatch: mxv gives its workspaces and archives one host profile; the library's host tests provoke it.
   mxv::workspace::archive_unfinished: Only a live checkout whose record has no stable id, beside an archive record of its name that an older mxv left retiring without one or that cannot be read, provokes it; tests/processes.rs provokes it.
 
 codes whose recoveries the check did not follow, because no declared code spells them: 0

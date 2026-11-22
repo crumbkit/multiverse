@@ -114,7 +114,7 @@ use crate::disposable::{BadGlob, PathGlob};
 use crate::host::ManifestNames;
 use crate::name::{WorkspaceName, is_unit_name};
 use crate::redacted::Redacted;
-use crate::service::{Backend, PROVISION_APP, Service};
+use crate::service::{Backend, PROVISION_APP, RESERVED_PREFIX, Service};
 
 mod services;
 #[cfg(test)]
@@ -1047,19 +1047,31 @@ impl Errors<'_> {
 const PHASE_TABLES: &[&str] = &["app", "release", "build", "process", "needs"];
 
 /// Checks that no port, process or container of `raw` starts with the
-/// prefix that the host keeps for its own names.
+/// prefix that the host keeps for its own names, or with
+/// [`RESERVED_PREFIX`].
 fn check_reserved_names(errors: &Errors<'_>, raw: &RawManifest) -> Result<(), ManifestError> {
-    let prefix = &errors.names.unit_prefix;
-    if let Some(name) = raw
+    if let Some((name, prefix)) = raw
         .ports
         .iter()
         .chain(raw.processes.keys())
         .chain(raw.containers.keys())
-        .find(|name| name.get_ref().starts_with(&**prefix))
+        .find_map(|name| {
+            reserved_prefix(name.get_ref(), &errors.names.unit_prefix).map(|prefix| (name, prefix))
+        })
     {
         return Err(errors.invalid(&name.span(), reserved_message(name.get_ref(), prefix)));
     }
     Ok(())
+}
+
+/// Returns the reserved prefix that `name` starts with: `unit_prefix`, the
+/// host's own, or [`RESERVED_PREFIX`], which names the apps and ledger
+/// ports that [`crate::Runs`] adds under every host, such as
+/// `mxv-services` and `mxv-aws`.
+pub(crate) fn reserved_prefix<'a>(name: &str, unit_prefix: &'a str) -> Option<&'a str> {
+    [unit_prefix, RESERVED_PREFIX]
+        .into_iter()
+        .find(|prefix| name.starts_with(prefix))
 }
 
 /// Checks that `raw`'s `version` is 1 or greater and no greater than

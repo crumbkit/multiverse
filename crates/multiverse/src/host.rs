@@ -29,7 +29,7 @@ mod tests;
 /// The most bytes of a host's name. The longest docker label key that a
 /// host's name starts is the name, `.` and `workspace-id`, 45 bytes, far
 /// below docker's limit of 255.
-pub const MOST_HOST_NAME_BYTES: usize = 32;
+pub const MOST_HOST_NAME_BYTES: usize = LabelPrefix::MOST_NAME_BYTES;
 
 /// The most bytes of a host's manifest file name.
 pub const MOST_MANIFEST_FILE_BYTES: usize = 64;
@@ -55,25 +55,23 @@ impl HostName {
     /// Returns [`BadHost`] for the field `name` when `text` breaks the
     /// rule of the type.
     pub fn new(text: &str) -> Result<Self, BadHost> {
-        let valid = (1..=MOST_HOST_NAME_BYTES).contains(&text.len())
-            && text
-                .chars()
-                .next()
-                .is_some_and(|first| first.is_ascii_lowercase())
-            && text.chars().all(|character| {
-                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
-            });
-        if valid {
-            Ok(Self(Cow::Owned(text.to_owned())))
-        } else {
-            Err(BadHost::new(
+        Self::with_labels(text).map(|(name, _)| name)
+    }
+
+    /// Returns the host name `text` and the label prefix `<text>.`. A host
+    /// name follows the rule of a [`LabelPrefix`]'s name, so phase's check
+    /// is the only copy of the rule.
+    fn with_labels(text: &str) -> Result<(Self, LabelPrefix), BadHost> {
+        let labels = LabelPrefix::new(text).map_err(|_| {
+            BadHost::new(
                 "name",
                 text,
                 format!(
                     "a host name is 1 to {MOST_HOST_NAME_BYTES} bytes of lowercase letters, digits and `-`, starting with a letter"
                 ),
-            ))
-        }
+            )
+        })?;
+        Ok((Self(Cow::Owned(text.to_owned())), labels))
     }
 
     /// Returns the name as text.
@@ -180,10 +178,7 @@ impl Host {
     ///
     /// Returns [`BadHost`] when `name` is not a [`HostName`].
     pub fn named(name: &str) -> Result<Self, BadHost> {
-        let name = HostName::new(name)?;
-        let labels = LabelPrefix::new(name.as_str()).map_err(|_| {
-            BadHost::new("name", name.as_str(), "docker refuses the label".to_owned())
-        })?;
+        let (name, labels) = HostName::with_labels(name)?;
         Ok(Self {
             manifest_file: Cow::Owned(format!("{name}.toml")),
             proxy_domain: Cow::Owned(format!("{name}.localhost")),
@@ -395,7 +390,12 @@ fn generic_agents_text(workspace: &Workspace, origins: &[String]) -> String {
 /// domain, below which no `hosts` entry may lie. A [`Workspace`] carries
 /// the names of the host that read it, so its manifest methods read the
 /// host's file.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Every two `ManifestNames` compare equal. A [`Workspace`] derives its
+/// equality, and its record never stores these names, so the same record
+/// read by stores of two hosts compares equal, as a confirmed record and a
+/// fresh read of it must.
+#[derive(Clone, Debug)]
 pub(crate) struct ManifestNames {
     /// The manifest file name, such as `mxv.toml`.
     pub(crate) file: Cow<'static, str>,
@@ -413,6 +413,14 @@ impl ManifestNames {
         domain: Cow::Borrowed("mxv.localhost"),
     };
 }
+
+impl PartialEq for ManifestNames {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for ManifestNames {}
 
 impl Default for ManifestNames {
     fn default() -> Self {

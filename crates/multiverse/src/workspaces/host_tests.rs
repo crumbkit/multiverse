@@ -303,6 +303,46 @@ fn a_restore_under_another_profile_than_the_archive_s_writes_nothing() {
 }
 
 #[test]
+fn workspaces_refuse_archives_of_another_host_before_they_write_anything() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let fixture = fixture();
+    let example = hosted(&base, &base.join("mirrors"), &example());
+    example.create(&fixture);
+    leave_work(&example.checkout());
+    let record = example.workspaces.store.read(&name()).unwrap();
+    let before = names_below(&base);
+    let mxv = Archives::new(base.join("archives"), base.join("data"));
+
+    let planned =
+        example
+            .workspaces
+            .plan_archive(&mxv, &name(), ArchiveOptions::default(), Mode::Change);
+    let restored = example
+        .workspaces
+        .plan_restore(&mxv, &name(), RestoreOptions::default());
+    let repaired = example.workspaces.repair(&mxv, &name(), Mode::Change);
+
+    for outcome in [
+        planned.map(|_| ()),
+        restored.map(|_| ()),
+        repaired.map(|_| ()),
+    ] {
+        let error = outcome.unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                crate::Error::HostMismatch { workspaces, archives }
+                    if workspaces.as_str() == "example" && archives.as_str() == "mxv"
+            ),
+            "{error:?}"
+        );
+    }
+    assert_eq!(names_below(&base), before);
+    assert_eq!(example.workspaces.store.read(&name()).unwrap(), record);
+}
+
+#[test]
 fn a_workspace_under_a_second_profile_reads_its_own_manifest_file_and_ignores_mxv_toml() {
     let dir = TempDir::new().unwrap();
     let base = dir.path().canonicalize().unwrap();
@@ -330,10 +370,12 @@ fn a_workspace_under_a_second_profile_reads_its_own_manifest_file_and_ignores_mx
     );
     assert_eq!(read.manifest().unwrap().unwrap().ports, ["api"]);
     // The host keeps the unit names that start with its own prefix, and
-    // mxv's prefix is free.
-    write(read.manifest_file(), "ports = [\"mxv-api\"]\n");
-    assert_eq!(read.manifest().unwrap().unwrap().ports, ["mxv-api"]);
+    // every host keeps mxv's prefix, because Runs adds its internal apps
+    // and ledger ports under it for every host.
     write(read.manifest_file(), "ports = [\"example-api\"]\n");
     let refused = read.manifest().unwrap_err();
     assert!(refused.to_string().contains("`example-`"), "{refused}");
+    write(read.manifest_file(), "ports = [\"mxv-aws\"]\n");
+    let refused = read.manifest().unwrap_err();
+    assert!(refused.to_string().contains("`mxv-`"), "{refused}");
 }

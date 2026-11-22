@@ -105,6 +105,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns the errors of reading the records and the pins, and of the
     /// moves and deletions, and [`Error::DatedNamesTaken`] when every dated
     /// name is taken.
@@ -114,6 +116,7 @@ impl<B: Backend> Workspaces<B> {
         name: &WorkspaceName,
         mode: Mode,
     ) -> Result<Repaired, Error> {
+        self.same_host(archives)?;
         let all = archives.list()?;
         let Some(archive) = all.archives.iter().find(|archive| archive.name == *name) else {
             // `list` keeps a record that it cannot read in `problems`, so
@@ -135,7 +138,7 @@ impl<B: Backend> Workspaces<B> {
             &all.archives,
             count_as_there(&self.backend),
         );
-        let broken = reading.broken(name);
+        let broken = reading.broken(name, &self.host);
         let case = reading.case;
         let archive = archive.clone();
         if let Some((Problem::ArchiveNotStarted, _)) = broken {

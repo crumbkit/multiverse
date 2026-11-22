@@ -176,6 +176,9 @@ pub const WORKSPACE_MISMATCHED_CHECKOUT: Code =
 /// The code of a method that acts on one workspace and was given the lock of
 /// another, which is a defect of mxv.
 pub const WORKSPACE_WRONG_LOCK: Code = Code::from_spelling("mxv::workspace::wrong_lock");
+/// The code of a workspace method that was given archives of another host
+/// profile than its own, which is a defect of mxv.
+pub const WORKSPACE_HOST_MISMATCH: Code = Code::from_spelling("mxv::workspace::host_mismatch");
 /// The code of a workspace without a stable id beside an archive record of
 /// its name that an older mxv did not finish, or that cannot be read, so
 /// mxv cannot name its containers.
@@ -586,6 +589,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     WORKSPACE_TRANSITION_REFUSED,
     WORKSPACE_MISMATCHED_CHECKOUT,
     WORKSPACE_WRONG_LOCK,
+    WORKSPACE_HOST_MISMATCH,
     WORKSPACE_ARCHIVE_UNFINISHED,
     REPAIR_NAMES_TAKEN,
     REPAIR_CHANGED,
@@ -735,6 +739,7 @@ impl Failure for MxvFailure {
                 Error::TransitionRefused { .. } => WORKSPACE_TRANSITION_REFUSED,
                 Error::MismatchedCheckout { .. } => WORKSPACE_MISMATCHED_CHECKOUT,
                 Error::WrongLock { .. } => WORKSPACE_WRONG_LOCK,
+                Error::HostMismatch { .. } => WORKSPACE_HOST_MISMATCH,
                 Error::ArchiveUnfinished { .. } => WORKSPACE_ARCHIVE_UNFINISHED,
                 Error::DatedNamesTaken { .. } => REPAIR_NAMES_TAKEN,
                 Error::StoppedRestoreHoldsOtherFiles { .. } => RESTORE_STOPPED_HOLDS_OTHER_FILES,
@@ -1188,7 +1193,8 @@ fn library_recovery(error: &Error) -> Recovery {
         ),
         Error::TransitionRefused { .. }
         | Error::MismatchedCheckout { .. }
-        | Error::WrongLock { .. } => Recovery::hint(
+        | Error::WrongLock { .. }
+        | Error::HostMismatch { .. } => Recovery::hint(
             "this is a defect of mxv, and no command should reach it; report it with the command that you ran",
         ),
         Error::ArchiveUnfinished {
@@ -1258,6 +1264,13 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         Error::WrongLock { locked, acted_on } => vec![
             Field::new("locked", locked.as_str()),
             Field::new("acted_on", acted_on.as_str()),
+        ],
+        Error::HostMismatch {
+            workspaces,
+            archives,
+        } => vec![
+            Field::new("workspaces", workspaces.as_str()),
+            Field::new("archives", archives.as_str()),
         ],
         Error::DatedNamesTaken { name, last } => {
             vec![Field::new("name", name.as_str()), Field::new("last", last)]

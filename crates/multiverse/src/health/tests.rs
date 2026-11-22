@@ -291,6 +291,27 @@ fn an_archive_that_quarantined_or_deleted_one_checkout_is_finished_by_archiving_
 }
 
 #[test]
+fn a_quarantine_under_another_host_s_suffix_reads_as_unfinished_under_that_host() {
+    let example = crate::Host::named("example").unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut triage = workspace(dir.path(), "triage", '1', &["app", "web"]);
+    triage.set_state(WorkspaceState::retiring(archive_id('1')));
+    let web = dir.path().join("triage/web");
+    fs::create_dir_all(crate::archive::quarantine(&web, &example).unwrap()).unwrap();
+    let records = records(vec![triage], vec![]);
+    let archives = archives(vec![archive("triage", '1', ArchiveState::Retiring)], vec![]);
+
+    let under_example = super::classify_for(&Git, &records, &archives, &example);
+    let under_mxv = classify(&records, &archives);
+
+    assert_eq!(
+        under_example.workspaces[0].problem,
+        Problem::ArchiveUnfinished
+    );
+    assert_eq!(under_mxv.workspaces[0].problem, Problem::ArchiveNotStarted);
+}
+
+#[test]
 fn a_retired_archive_beside_its_workspace_is_finished_by_archiving_it() {
     assert_eq!(
         stopped_archive_problem(ArchiveState::Retired, |_| {}),

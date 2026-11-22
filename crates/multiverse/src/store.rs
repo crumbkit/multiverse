@@ -44,7 +44,7 @@ pub struct Store {
     /// The directory that holds one `<name>.json` for each workspace.
     dir: PathBuf,
     /// The names of the host whose manifest files the records it reads
-    /// name, which [`Workspace::with_host`] describes.
+    /// name.
     names: ManifestNames,
 }
 
@@ -90,8 +90,11 @@ impl Store {
     }
 
     /// Returns the store with `host`'s names, which every record it reads
-    /// carries, as [`Workspace::with_host`] gives them. Without it the
-    /// records carry mxv's names.
+    /// carries, so a record's manifest methods, such as
+    /// [`Workspace::manifest`], read `host`'s manifest file, refuse the
+    /// unit names that `host` keeps, and refuse `hosts` entries below
+    /// `host`'s proxy domain. A record's stored form does not change.
+    /// Without it the records carry mxv's names.
     #[must_use]
     pub fn with_host(mut self, host: &Host) -> Self {
         self.names = host.manifest_names();

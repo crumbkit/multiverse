@@ -283,6 +283,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns [`Error::StoppedRestoreHoldsOtherFiles`] when the archive
     /// holds the mark of a restore that stopped after it made the
     /// workspace's directory, and the directory holds an entry that the
@@ -294,6 +296,7 @@ impl<B: Backend> Workspaces<B> {
         name: &WorkspaceName,
         options: RestoreOptions,
     ) -> Result<RestorePlanned, Error> {
+        self.same_host(archives)?;
         let RestoreOptions { force, from_origin } = options;
         let refused = |refusal| Ok(RestorePlanned::Refused(refusal));
         let workspace = self.store.read(name)?;
@@ -396,6 +399,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns the errors of the backend's commands and of the writes.
     pub fn restore(
         &self,
@@ -403,6 +408,7 @@ impl<B: Backend> Workspaces<B> {
         confirmed: RestorePlan,
         runs: &Runs,
     ) -> Result<RestoreOutcome, Error> {
+        self.same_host(archives)?;
         let name = confirmed.archive.name.clone();
         let options = RestoreOptions::new(confirmed.force, confirmed.from_origin);
         let plan = match self.plan_restore(archives, &name, options)? {
@@ -1108,6 +1114,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns [`Error::Unwritable`] when the archive cannot be deleted.
     pub fn remove_archive(
         &self,
@@ -1115,6 +1123,7 @@ impl<B: Backend> Workspaces<B> {
         archive: Archive,
         mode: Mode,
     ) -> Result<ArchivedRemoval, Error> {
+        self.same_host(archives)?;
         if mode == Mode::DryRun {
             return Ok(ArchivedRemoval {
                 archive,
@@ -1143,6 +1152,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns the errors of reading the workspace record, of
     /// [`Workspaces::remove_archive`] and of [`Store::abandon`](crate::Store::abandon).
     pub fn abandon_archive(
@@ -1151,6 +1162,7 @@ impl<B: Backend> Workspaces<B> {
         archive: Archive,
         mode: Mode,
     ) -> Result<Option<ArchivedRemoval>, Error> {
+        self.same_host(archives)?;
         let Some(mut workspace) = self.store.read(&archive.name)? else {
             return Ok(None);
         };

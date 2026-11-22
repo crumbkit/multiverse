@@ -156,3 +156,22 @@ fn sample() -> Workspace {
         vec![checkout],
     )
 }
+
+#[test]
+fn the_mxv_manifest_names_are_the_mxv_profile_s() {
+    let names = Host::mxv().manifest_names();
+    let mxv = super::ManifestNames::MXV;
+    assert_eq!(
+        (&*names.file, &*names.unit_prefix, &*names.domain),
+        (&*mxv.file, &*mxv.unit_prefix, &*mxv.domain)
+    );
+}
+
+#[test]
+fn a_record_read_under_two_hosts_compares_equal() {
+    let workspace = Workspace::new("triage".parse().unwrap(), "/work/triage".into(), Vec::new());
+    let example = workspace
+        .clone()
+        .with_host(&Host::named("example").unwrap());
+    assert_eq!(workspace, example);
+}

@@ -151,6 +151,18 @@ pub enum Repair {
 /// counts as there, so the repair stays `mxv archive -w`.
 #[must_use]
 pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRecords) -> Health {
+    classify_for(backend, records, archives, &crate::Host::mxv())
+}
+
+/// Returns what [`classify`] returns, for the records of `host`, so an
+/// archive that `host` started reads under `host`'s quarantine suffix.
+#[must_use]
+pub fn classify_for<B: Backend>(
+    backend: &B,
+    records: &Records,
+    archives: &ArchiveRecords,
+    host: &crate::Host,
+) -> Health {
     let mut health = Health {
         workspaces: records
             .problems
@@ -170,7 +182,7 @@ pub fn classify<B: Backend>(backend: &B, records: &Records, archives: &ArchiveRe
             .iter()
             .find(|workspace| workspace.name == archive.name);
         let Ok(reading) = archive_case(archive, live, &archives.archives, count_as_there(backend));
-        let Some((problem, repair)) = reading.broken(&archive.name) else {
+        let Some((problem, repair)) = reading.broken(&archive.name, host) else {
             continue;
         };
         // A newer workspace of the name is whole, so its row stays as it is.
@@ -269,18 +281,17 @@ pub(crate) struct ArchiveReading<'a> {
 }
 
 impl ArchiveReading<'_> {
-    /// Returns what is wrong with the archive of `name`, and its repair,
-    /// or `None` when nothing is. A stopped rename comes first, whatever
+    /// Returns what is wrong with the archive of `name`, which `host`
+    /// started, and its repair, or `None` when nothing is. A stopped rename comes first, whatever
     /// state each of its records says, and both of its rows name the
     /// repair of the older name.
-    fn broken(&self, name: &WorkspaceName) -> Option<(Problem, Repair)> {
+    fn broken(&self, name: &WorkspaceName, host: &crate::Host) -> Option<(Problem, Repair)> {
         if let Some((old, _)) = self.rename {
             return Some((Problem::RenameUnfinished, Repair::Repair(old.name.clone())));
         }
         let problem = match self.case {
             ArchiveCase::Resumable(workspace)
-                if self.state == ArchiveState::Retiring
-                    && untouched(workspace, &crate::Host::mxv()) =>
+                if self.state == ArchiveState::Retiring && untouched(workspace, host) =>
             {
                 Problem::ArchiveNotStarted
             }

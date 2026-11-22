@@ -951,6 +951,21 @@ impl<B: Backend> Workspaces<B> {
         self
     }
 
+    /// Refuses `archives` when its host is not the workspaces' host, so an
+    /// archive's references, folders and commits are written and read
+    /// under one host's names. Each method that takes an [`Archives`]
+    /// calls it first, before it reads or writes anything.
+    pub(crate) fn same_host(&self, archives: &crate::archive::Archives) -> Result<(), Error> {
+        if archives.host().name() == self.host.name() {
+            Ok(())
+        } else {
+            Err(Error::HostMismatch {
+                workspaces: self.host.name().clone(),
+                archives: archives.host().name().clone(),
+            })
+        }
+    }
+
     /// Returns the workspaces with `dir` as the directory of the bare
     /// mirrors, so [`Workspaces::create`] makes each checkout a clone of a
     /// mirror there, with a `.git` of its own.
@@ -1728,7 +1743,7 @@ impl<B: Backend> Workspaces<B> {
         if !stashes.is_empty() {
             return Some(format!("the clone holds {} stash entries", stashes.len()));
         }
-        let Ok(unpushed) = self.backend.unpushed_commits_for(path, &self.host) else {
+        let Ok(unpushed) = self.backend.unpushed_commits(path, &self.host) else {
             return unknown();
         };
         if !unpushed.is_empty() {
@@ -2433,9 +2448,7 @@ impl<B: Backend> Workspaces<B> {
                 stashes: count(&stashes),
             });
         }
-        let lost = self
-            .backend
-            .unpushed_commits_for(&checkout.path, &self.host)?;
+        let lost = self.backend.unpushed_commits(&checkout.path, &self.host)?;
         let unpushed = count(&lost);
         if unpushed > 0 && !allow.delete_unmerged {
             return refused(CloneRefusal::Unpushed {

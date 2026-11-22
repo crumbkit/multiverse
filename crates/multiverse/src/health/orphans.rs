@@ -136,6 +136,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns the read error of the first workspace or archive record that
     /// cannot be read, a moved-aside one included, because such a record
     /// may name what would otherwise look orphaned, the errors of reading
@@ -146,6 +148,7 @@ impl<B: Backend> Workspaces<B> {
         runs: &Runs,
         volumes: bool,
     ) -> Result<Vec<Orphan>, Error> {
+        self.same_host(archives)?;
         self.scan(archives, runs, volumes, true)
     }
 
@@ -273,6 +276,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns the errors of the lock and of the fresh listing, which come
     /// before anything of the item changes. A failure after that returns
     /// [`Swept::PartlyDeleted`].
@@ -283,6 +288,7 @@ impl<B: Backend> Workspaces<B> {
         orphan: &Orphan,
         delete_volumes: bool,
     ) -> Result<Swept, Error> {
+        self.same_host(archives)?;
         let _lock = match &orphan.kind {
             OrphanKind::Unrecorded => return Ok(Swept::Kept(vec![UNRECORDED.to_owned()])),
             OrphanKind::RunFiles { name } => Some(runs.lock(name)?),

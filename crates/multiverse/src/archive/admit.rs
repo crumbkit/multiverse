@@ -607,6 +607,8 @@ impl<B: Backend> Workspaces<B> {
     ///
     /// # Errors
     ///
+    /// Returns [`Error::HostMismatch`] when `archives` belongs to another
+    /// host than the workspaces, before it reads or writes anything.
     /// Returns the errors of [`Workspaces::plan_removal`] and of the
     /// backend's commands.
     pub fn plan_archive(
@@ -616,6 +618,7 @@ impl<B: Backend> Workspaces<B> {
         options: ArchiveOptions,
         mode: Mode,
     ) -> Result<ArchivePlanned, Error> {
+        self.same_host(archives)?;
         self.admit(archives, name, options, mode, None, true)
     }
 
@@ -698,7 +701,7 @@ impl<B: Backend> Workspaces<B> {
             let Some(commit) = head.commit.clone() else {
                 return Ok(unusable(folder, "its HEAD names no commit"));
             };
-            let concealed = self.backend.concealed_for(path, &self.host)?;
+            let concealed = self.backend.concealed(path, &self.host)?;
             if workspace.kind == WorkspaceKind::Worktree
                 && let Some(submodule) = concealed.submodules.first()
             {
@@ -721,9 +724,7 @@ impl<B: Backend> Workspaces<B> {
             if refresh {
                 warnings.extend(self.unkept_names(planned)?);
             }
-            let local_only = self
-                .backend
-                .local_only_commits_for(path, "HEAD", &self.host)?;
+            let local_only = self.backend.local_only_commits(path, "HEAD", &self.host)?;
             let kept = self.kept(workspace.kind, planned, head.branch.as_deref())?;
             checkouts.push(self.archived(planned, head, commit, local_only, kept, &id)?);
         }
@@ -932,7 +933,7 @@ impl<B: Backend> Workspaces<B> {
                 .filter(|tag| !held.contains(tag))
                 .collect();
         }
-        kept.orphans = self.backend.orphans_for(
+        kept.orphans = self.backend.orphans(
             path,
             &kept.references(),
             kind == WorkspaceKind::Worktree,
