@@ -93,6 +93,7 @@ fn read(
     logs(
         &RunStore::new(state),
         state,
+        &crate::engine::container::LabelPrefix::mxv(),
         &workspace(),
         request,
         sink,

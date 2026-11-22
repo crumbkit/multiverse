@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::clock::pause;
+use crate::engine::container::LabelPrefix;
 use crate::engine::host::LogFollower;
 use crate::error::{Operation, PhaseError};
 use crate::name::{AppName, ProcessName, WorkspaceId};
@@ -121,6 +122,7 @@ fn tail_before(path: &Path, lines: usize, end: u64) -> (Vec<String>, Vec<u8>) {
 pub(crate) fn logs(
     store: &RunStore,
     state_dir: &Path,
+    labels: &LabelPrefix,
     workspace: &WorkspaceId,
     request: &LogRequest,
     sink: &mut dyn LineSink,
@@ -156,7 +158,7 @@ pub(crate) fn logs(
         // A container that has not started yet, or that phase stopped, has
         // no log, and the sink hears why.
         return match id {
-            Ok(id) => container_logs(state_dir, workspace, &id, request, sink),
+            Ok(id) => container_logs(state_dir, labels, workspace, &id, request, sink),
             Err(note) => {
                 sink.note(note);
                 Ok(())
@@ -232,6 +234,7 @@ pub(crate) fn logs(
 /// describes.
 fn container_logs(
     state_dir: &Path,
+    labels: &LabelPrefix,
     workspace: &WorkspaceId,
     id: &crate::record::ContainerId,
     request: &LogRequest,
@@ -245,8 +248,9 @@ fn container_logs(
         };
         sink.line(&LogLine::new(stream, text))
     };
-    let note =
-        crate::engine::container::recorded_logs(state_dir, workspace, id, request, &mut pass)?;
+    let note = crate::engine::container::recorded_logs(
+        state_dir, labels, workspace, id, request, &mut pass,
+    )?;
     if let Some(note) = note {
         sink.note(note);
     }

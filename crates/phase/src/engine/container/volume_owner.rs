@@ -58,8 +58,7 @@ use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, check_with, quick_with, run_program_until,
 };
 use crate::engine::container::names::{
-    APP_LABEL, ContainerId, Identity, ROLE_LABEL, Scope, VOLUME_OWNER_ROLE, VolumeKey,
-    WORKSPACE_ID_LABEL,
+    ContainerId, Identity, Label, Scope, VOLUME_OWNER_ROLE, VolumeKey,
 };
 use crate::engine::container::secrets::{self, run_as};
 use crate::error::{PhaseError, VolumeOwnerProblem};
@@ -255,8 +254,8 @@ pub(crate) fn helper_of(identity: &Identity, app: Option<&AppName>, labels: &str
     };
     let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
     identity.names(&labels)
-        && is(ROLE_LABEL, VOLUME_OWNER_ROLE)
-        && app.is_none_or(|app| is(APP_LABEL, app.as_str()))
+        && is(&identity.key(Label::Role), VOLUME_OWNER_ROLE)
+        && app.is_none_or(|app| is(&identity.key(Label::App), app.as_str()))
 }
 
 /// Returns Docker's line when `error` says that Docker refused to create
@@ -488,9 +487,9 @@ pub(crate) fn remove_helpers_with(
             "--quiet",
             "--no-trunc",
             "--filter",
-            &format!("label={WORKSPACE_ID_LABEL}={}", identity.id),
+            &format!("label={}={}", identity.key(Label::WorkspaceId), identity.id),
             "--filter",
-            &format!("label={ROLE_LABEL}={VOLUME_OWNER_ROLE}"),
+            &format!("label={}={VOLUME_OWNER_ROLE}", identity.key(Label::Role)),
         ],
         "container ls",
     )?

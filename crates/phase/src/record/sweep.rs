@@ -54,6 +54,9 @@ pub(crate) struct Reach<'a> {
     pub(crate) processes: &'a dyn Processes,
     /// The host runner, which stops a keeper and its process.
     pub(crate) host: &'a dyn HostRunner,
+    /// The prefix of the keys of the labels that a Docker object must
+    /// carry.
+    pub(crate) labels: &'a crate::engine::container::LabelPrefix,
 }
 
 /// Sweeps the workspace `workspace`, as the module docs say. A workspace
@@ -80,6 +83,7 @@ pub(crate) fn sweep(
     let identity = WorkspaceIdentity {
         id: workspace.clone(),
         run_record: store.path(workspace),
+        labels: reach.labels.clone(),
     };
     if dry_run {
         let mut sweeper = Sweeper {

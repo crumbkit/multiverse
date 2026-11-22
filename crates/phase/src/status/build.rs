@@ -30,6 +30,9 @@ pub(crate) struct Sources<'a> {
     pub(crate) processes: &'a dyn Processes,
     /// Docker.
     pub(crate) docker: &'a dyn Docker,
+    /// The prefix of the keys of the labels that a Docker object must
+    /// carry.
+    pub(crate) labels: &'a crate::engine::container::LabelPrefix,
 }
 
 /// Returns the status of the workspace whose stable id is `workspace`.
@@ -57,6 +60,7 @@ pub(crate) fn status(
     let identity = WorkspaceIdentity {
         id: workspace.clone(),
         run_record: store.path(workspace),
+        labels: sources.labels.clone(),
     };
     let mut rows = Vec::new();
     if let Some(plan) = plan {

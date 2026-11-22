@@ -2870,6 +2870,7 @@ fn a_failed_up_leaves_the_process_that_ended_exited_with_its_code_until_down() {
     world.up(&plan, &Selection::All, &Env::default()).unwrap();
 
     let sources = crate::status::Sources {
+        labels: &crate::engine::container::LabelPrefix::mxv(),
         state_dir: world.state.path(),
         processes: &crate::record::testing::FakeProcesses::default(),
         docker: &crate::record::testing::Unreachable,
@@ -2939,6 +2940,7 @@ fn a_down_of_other_apps_keeps_the_exit_of_a_process_it_did_not_select() {
     world.down(&only("web"));
 
     let sources = crate::status::Sources {
+        labels: &crate::engine::container::LabelPrefix::mxv(),
         state_dir: world.state.path(),
         processes: &crate::record::testing::FakeProcesses::default(),
         docker: &crate::record::testing::Unreachable,
@@ -2980,6 +2982,7 @@ fn a_down_of_one_process_keeps_the_exit_of_another_process_of_its_app_until_a_sw
         &workspace(),
         false,
         crate::record::sweep::Reach {
+            labels: &crate::engine::container::LabelPrefix::mxv(),
             docker: &crate::record::testing::Unreachable,
             processes: &processes,
             host: &processes,

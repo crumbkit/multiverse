@@ -122,7 +122,7 @@ use crate::engine::container::command::{
     quick, secret_exec, write_secret,
 };
 use crate::engine::container::compose::{AppStep, AppUp, Up, app_up};
-use crate::engine::container::names::{self, Identity, Scope, VolumeKey};
+use crate::engine::container::names::{self, Identity, LabelPrefix, Scope, VolumeKey};
 use crate::engine::container::objects::{
     self, ContainerState, Inspected, ensure_image, ensure_volume, inspect_id, inspect_named,
     no_restart, reinspect, remove, stop, stop_until,
@@ -172,6 +172,9 @@ pub(crate) struct ComposeRunner {
     /// The image that `start` makes sure Docker has before it runs a
     /// volume-owner helper, which only a test changes.
     helper_image: String,
+    /// The prefix of the keys of the labels of the objects that the runner
+    /// creates and finds.
+    labels: LabelPrefix,
 }
 
 /// The values of the file secrets of a process, by secret name.
@@ -221,13 +224,15 @@ fn delivered(
 
 impl ComposeRunner {
     /// Returns the runner of the phase whose state is in `state_dir` and
-    /// which watches a process without a probe for `start_grace`.
-    pub(crate) fn new(state_dir: PathBuf, start_grace: Duration) -> Self {
+    /// which watches a process without a probe for `start_grace` and
+    /// labels its objects under `labels`.
+    pub(crate) fn new(state_dir: PathBuf, start_grace: Duration, labels: LabelPrefix) -> Self {
         Self {
             state_dir,
             start_grace,
             docker_environment: None,
             helper_image: volume_owner::HELPER_IMAGE.to_owned(),
+            labels,
         }
     }
 
@@ -255,6 +260,7 @@ impl ComposeRunner {
             Identity {
                 id: workspace.clone(),
                 run_record: RunStore::new(&self.state_dir).path(workspace),
+                labels: self.labels.clone(),
             },
             app,
         )
@@ -335,6 +341,7 @@ pub(crate) fn docker_error(error: &ContainerError) -> PhaseError {
 /// fails.
 pub(crate) fn recorded_logs(
     state_dir: &std::path::Path,
+    labels: &LabelPrefix,
     workspace: &WorkspaceId,
     id: &ContainerId,
     request: &crate::logs::LogRequest,
@@ -345,6 +352,7 @@ pub(crate) fn recorded_logs(
         Identity {
             id: workspace.clone(),
             run_record: RunStore::new(state_dir).path(workspace),
+            labels: labels.clone(),
         },
         &request.app,
     );

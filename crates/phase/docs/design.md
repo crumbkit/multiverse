@@ -562,6 +562,15 @@ never removes an object without an mxv label. It compares each label's
 exact value, read as JSON, so a value that holds a tab, a newline or a
 trailing space never matches another value.
 
+Every label key starts with phase's label prefix, `mxv.` unless the host
+gives another with `Phase::with_labels`, such as `example.` in
+`example.workspace-id`. The prefix is 1 to 32 bytes of lowercase letters,
+digits and `-`, starting with a letter, followed by `.`, so the longest
+key, `<prefix>workspace-id`, is at most 45 bytes. A phase lists, inspects,
+sweeps and removes only the objects whose labels carry its own prefix, so
+two hosts that share a Docker daemon never touch each other's objects. The
+rest of this document writes the keys with mxv's prefix.
+
 The `mxv.run-record` label holds an absolute path. A run of mxv with
 another `XDG_STATE_HOME` keeps the run record elsewhere, so the label of
 an object that an earlier run created then names a path that this run

@@ -32,6 +32,7 @@ fn scope() -> Scope {
     let app: AppName = "db".parse().unwrap();
     Scope::app(
         Identity {
+            labels: crate::engine::container::LabelPrefix::mxv(),
             id: "0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21".parse().unwrap(),
             run_record: PathBuf::from("/state/runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json"),
         },
@@ -231,6 +232,7 @@ const HELPER_RUN_RECORD: &str = "/state/runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.js
 /// Returns the identity of the tests' workspace.
 fn helper_identity() -> Identity {
     Identity {
+        labels: crate::engine::container::LabelPrefix::mxv(),
         id: HELPER_WORKSPACE.parse().unwrap(),
         run_record: PathBuf::from(HELPER_RUN_RECORD),
     }

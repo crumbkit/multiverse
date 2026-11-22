@@ -56,9 +56,14 @@ fn record(store: &RunStore, planned: RunRecord, started: Vec<(ObjectKey, Started
     }
 }
 
+/// mxv's label prefix, which the tests' objects carry.
+static MXV_LABELS: crate::engine::container::LabelPrefix =
+    crate::engine::container::LabelPrefix::mxv();
+
 /// Returns the real process table with `docker`.
 fn real(docker: &dyn Docker) -> Reach<'_> {
     Reach {
+        labels: &MXV_LABELS,
         docker,
         processes: &System,
         host: &System,
@@ -68,6 +73,7 @@ fn real(docker: &dyn Docker) -> Reach<'_> {
 /// Returns the fake process table `processes` with no Docker.
 fn fake(processes: &FakeProcesses) -> Reach<'_> {
     Reach {
+        labels: &MXV_LABELS,
         docker: &Unreachable,
         processes,
         host: processes,

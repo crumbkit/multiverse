@@ -1294,7 +1294,7 @@ dependencies = [
 
 [[package]]
 name = "multiverse"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crumbkit-durable",
  "crumbkit-process",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "mxv"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "clap",
  "crumbkit",
@@ -1337,7 +1337,7 @@ dependencies = [
 
 [[package]]
 name = "mxv-phase"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "crumbkit-durable",
  "crumbkit-process",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "mxv-services"
-version = "0.5.0"
+version = "0.5.1"
 dependencies = [
  "dynoxide-rs",
  "tokio",

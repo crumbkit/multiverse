@@ -53,10 +53,10 @@ crumbkit-skills = { workspace = true }
 etcetera = { workspace = true }
 # multiverse holds the workspace operations, their records and the git
 # backend that the verbs run.
-multiverse = { path = "../multiverse", version = "0.5.0" }
+multiverse = { path = "../multiverse", version = "0.5.1" }
 # mxv-services serves a workspace's local AWS services in memory when phase
 # starts mxv as the app `mxv-services`.
-mxv-services = { path = "../services", version = "0.5.0" }
+mxv-services = { path = "../services", version = "0.5.1" }
 # schemars and serde describe and write the JSON documents that the verbs
 # print.
 schemars = { workspace = true }

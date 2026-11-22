@@ -6,9 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::engine::container::command::quick;
-use crate::engine::container::names::{
-    Identity, RUN_RECORD_LABEL, Scope, VOLUME_LABEL, VolumeKey, VolumeName, WORKSPACE_ID_LABEL,
-};
+use crate::engine::container::names::{Identity, Label, Scope, VolumeKey, VolumeName};
 use crate::engine::container::objects::{
     OwnedVolume, delete_volume, inspect_volume, reinspect_volume,
 };
@@ -54,6 +52,7 @@ fn app_volume_scope(phase: &Phase, id: &WorkspaceId) -> Result<Scope, ContainerE
     let identity = Identity {
         id: id.clone(),
         run_record: phase.run_record(id),
+        labels: phase.labels().clone(),
     };
     Ok(Scope::app(identity, &app))
 }
@@ -77,7 +76,7 @@ pub fn app_volume_labels(phase: &Phase, id: &WorkspaceId, volume: &VolumeKey) ->
     let Ok(scope) = app_volume_scope(phase, id) else {
         return Vec::new();
     };
-    match scope.labels(VOLUME_LABEL, volume.as_str()) {
+    match scope.labels(Label::Volume, volume.as_str()) {
         serde_json::Value::Object(labels) => labels
             .into_iter()
             .map(|(label, value)| format!("{label}={}", value.as_str().unwrap_or_default()))
@@ -98,15 +97,19 @@ pub fn app_volume_labels(phase: &Phase, id: &WorkspaceId, volume: &VolumeKey) ->
 ///
 /// Returns the errors of `docker version` and [`ContainerError::Failed`].
 pub fn labelled_volumes(phase: &Phase) -> Result<Vec<(WorkspaceId, Vec<String>)>, ContainerError> {
+    let labels = phase.labels();
     let format = format!(
-        "{{{{.Name}}}}\t{{{{.Label \"{WORKSPACE_ID_LABEL}\"}}}}\t{{{{.Label \"{RUN_RECORD_LABEL}\"}}}}"
+        "{{{{.Name}}}}\t{{{{.Label \"{}\"}}}}\t{{{{.Label \"{}\"}}}}",
+        labels.key(Label::WorkspaceId),
+        labels.key(Label::RunRecord),
     );
+    let volume_filter = format!("label={}", labels.key(Label::Volume));
     let listed = quick(
         [
             "volume",
             "ls",
             "--filter",
-            &format!("label={VOLUME_LABEL}"),
+            &volume_filter,
             "--format",
             format.as_str(),
         ],
@@ -148,7 +151,9 @@ pub fn labelled_volumes(phase: &Phase) -> Result<Vec<(WorkspaceId, Vec<String>)>
 /// Returns the errors of `docker version` and [`ContainerError::Failed`].
 pub fn app_volumes(phase: &Phase, id: &WorkspaceId) -> Result<WorkspaceVolumes, ContainerError> {
     let scope = app_volume_scope(phase, id)?;
-    let filter = format!("label={WORKSPACE_ID_LABEL}={id}");
+    let labels = phase.labels();
+    let filter = format!("label={}={id}", labels.key(Label::WorkspaceId));
+    let volume_filter = format!("label={}", labels.key(Label::Volume));
     let listed = quick(
         [
             "volume",
@@ -157,7 +162,7 @@ pub fn app_volumes(phase: &Phase, id: &WorkspaceId) -> Result<WorkspaceVolumes, 
             "--filter",
             filter.as_str(),
             "--filter",
-            &format!("label={VOLUME_LABEL}"),
+            &volume_filter,
         ],
         "volume ls",
     )?

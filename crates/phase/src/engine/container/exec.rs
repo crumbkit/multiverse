@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::process::Command;
 
 use crate::engine::container::command::DOCKER;
-use crate::engine::container::names::{self, Identity, Scope};
+use crate::engine::container::names::{self, Identity, LabelPrefix, Scope};
 use crate::engine::container::objects::{ContainerState, inspect_id};
 use crate::engine::container::runner::docker_error;
 use crate::error::PhaseError;
@@ -42,6 +42,8 @@ pub(crate) struct ContainerExec<'a> {
     /// The only variables of the `docker` program's environment, or `None`
     /// for the host program's whole environment.
     pub(crate) docker_environment: Option<&'a BTreeMap<String, String>>,
+    /// The prefix of the keys of the labels that the container must carry.
+    pub(crate) labels: &'a LabelPrefix,
 }
 
 /// The `docker exec` of one command, and the container it runs in, which
@@ -118,6 +120,7 @@ pub(crate) fn exec_command(exec: &ContainerExec<'_>) -> Result<ContainerCommand,
         Identity {
             id: exec.workspace.clone(),
             run_record: store.path(exec.workspace),
+            labels: exec.labels.clone(),
         },
         exec.app,
     );

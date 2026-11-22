@@ -42,7 +42,7 @@ use std::time::Duration;
 use serde_json::{Map, Value, json};
 
 use crate::engine::container::compose::{literal, variable_of};
-use crate::engine::container::names::{CONTAINER_LABEL, Scope, ServiceName, VolumeKey};
+use crate::engine::container::names::{Label, Scope, ServiceName, VolumeKey};
 use crate::engine::container::objects::stop_seconds;
 use crate::engine::container::secrets::{ImageConfig, SECRETS_DIR, SECRETS_MODE, entrypoint};
 use crate::engine::containers::ContainerObjects;
@@ -77,13 +77,11 @@ const VOLUME_OWNER_FIELD: &str = "x-phase-volume-owner";
 /// has no optional variable, so the hash of such a service is unchanged.
 const OPTIONAL_ENV_FIELD: &str = "x-phase-optional-env";
 
-/// The label of a container whose process receives secret files, which
-/// `status` reads to tell a container that waits for its files after a
-/// restart from one that runs, and which a rewrite of the files reads to
-/// tell a container that has the tmpfs from one that must be replaced.
-pub(crate) const SECRETS_LABEL: &str = "mxv.secrets";
-
-/// The value of [`SECRETS_LABEL`].
+/// The value of the label [`Label::Secrets`] of a container whose process
+/// receives secret files, which `status` reads to tell a container that
+/// waits for its files after a restart from one that runs, and which a
+/// rewrite of the files reads to tell a container that has the tmpfs from
+/// one that must be replaced.
 pub(crate) const SECRET_FILES: &str = "files";
 
 /// Returns the service of `process`, whose name follows the same rule.
@@ -463,10 +461,10 @@ fn compose_file_with(
             "network_mode".to_owned(),
             Value::String("bridge".to_owned()),
         );
-        let mut labels = scope.labels(CONTAINER_LABEL, service.as_str());
+        let mut labels = scope.labels(Label::Container, service.as_str());
         if let (false, Value::Object(labels)) = (secrets.is_empty(), &mut labels) {
             labels.insert(
-                SECRETS_LABEL.to_owned(),
+                scope.identity().key(Label::Secrets),
                 Value::String(SECRET_FILES.to_owned()),
             );
         }

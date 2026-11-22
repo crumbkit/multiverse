@@ -5,6 +5,18 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.5.1] - 2026-11-22
+
+### Added
+
+- mxv-phase has `LabelPrefix` and `Phase::with_labels`, which set the
+  prefix of the labels on phase's docker containers, networks and volumes.
+  A prefix is a name of at most 32 bytes that starts with a lowercase
+  letter and holds lowercase letters, digits and dashes, followed by a dot.
+  `LabelPrefix::mxv()` is `mxv.`, the default, so mxv's labels are
+  unchanged. phase's sweep lists, stops and deletes only objects that
+  carry its own prefix.
+
 ## [0.5.0] - 2026-11-22
 
 ### Added
