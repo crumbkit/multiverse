@@ -81,10 +81,18 @@ fn a_sweep_under_one_label_prefix_leaves_objects_of_another_untouched() {
     assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
     let id = world.container("db", "server").unwrap();
 
+    let volume = crate::engine::container::app_volume_name(
+        &world.phase,
+        &world.id,
+        &crate::engine::container::VolumeKey::new("data").unwrap(),
+    )
+    .unwrap();
+
     // A phase over the same state directory under mxv's prefix finds the
     // record's container foreign, and stops and removes nothing.
     let mxv = Phase::new(world.state.path().to_path_buf());
-    let _swept = mxv.sweep(&world.id, false);
+    let swept = mxv.sweep(&world.id, false);
+    assert!(swept.is_ok(), "{swept:?}");
     let volumes = crate::engine::container::labelled_volumes(&mxv).unwrap();
 
     let state = docker(&[
@@ -100,5 +108,7 @@ fn a_sweep_under_one_label_prefix_leaves_objects_of_another_untouched() {
         volumes.iter().all(|(found, _)| found != &world.id),
         "{volumes:?}"
     );
+    let kept = labels_of("volume", &volume);
+    assert!(kept.contains("\"example.volume\":\"data\""), "{kept}");
     world.down();
 }

@@ -568,8 +568,12 @@ gives another with `Phase::with_labels`, such as `example.` in
 digits and `-`, starting with a letter, followed by `.`, so the longest
 key, `<prefix>workspace-id`, is at most 45 bytes. A phase lists, inspects,
 sweeps and removes only the objects whose labels carry its own prefix, so
-two hosts that share a Docker daemon never touch each other's objects. The
-rest of this document writes the keys with mxv's prefix.
+two hosts that share a Docker daemon never touch each other's objects.
+The prefix separates Docker objects only. Two hosts that share one state
+directory share its run records, so a sweep by one host finds the other
+host's containers foreign, marks them gone and drops them from the record,
+while the containers keep running. Each host therefore keeps its own state
+directory. The rest of this document writes the keys with mxv's prefix.
 
 The `mxv.run-record` label holds an absolute path. A run of mxv with
 another `XDG_STATE_HOME` keeps the run record elsewhere, so the label of

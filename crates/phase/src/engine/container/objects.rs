@@ -233,7 +233,7 @@ pub(super) fn mint_container(
 /// Reports whether `labels`, a container's labels printed as JSON, carry
 /// `scope`'s label of a container that receives secret files.
 fn has_secret_files(scope: &Scope, labels: &str) -> bool {
-    let secrets = scope.identity().key(Label::Secrets);
+    let secrets = scope.identity().labels.key(Label::Secrets);
     serde_json::from_str::<Option<std::collections::BTreeMap<String, String>>>(labels)
         .ok()
         .flatten()

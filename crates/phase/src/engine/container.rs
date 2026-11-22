@@ -74,7 +74,9 @@ mod tests;
 pub(crate) use crate::engine::container::cli::DockerCli;
 pub use crate::engine::container::error::ContainerError;
 pub(crate) use crate::engine::container::names::Identity;
-pub use crate::engine::container::names::{BadDockerName, LabelPrefix, ServiceName, VolumeKey};
+pub use crate::engine::container::names::{
+    BadDockerName, BadLabelPrefix, LabelPrefix, ServiceName, VolumeKey,
+};
 pub(crate) use crate::engine::container::objects::answers_within;
 pub use crate::engine::container::objects::{ContainerState, Inspected, OwnedContainer, reinspect};
 pub(crate) use crate::engine::container::runner::{ComposeRunner, recorded_logs};

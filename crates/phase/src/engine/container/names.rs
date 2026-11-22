@@ -37,10 +37,10 @@ impl LabelPrefix {
     ///
     /// # Errors
     ///
-    /// Returns [`BadDockerName`] when `name` is not 1 to
+    /// Returns [`BadLabelPrefix`] when `name` is not 1 to
     /// [`LabelPrefix::MOST_NAME_BYTES`] bytes of lowercase ASCII letters,
     /// digits and `-`, starting with a letter.
-    pub fn new(name: &str) -> Result<Self, BadDockerName> {
+    pub fn new(name: &str) -> Result<Self, BadLabelPrefix> {
         let valid = (1..=Self::MOST_NAME_BYTES).contains(&name.len())
             && name
                 .chars()
@@ -52,7 +52,7 @@ impl LabelPrefix {
         if valid {
             Ok(Self(Cow::Owned(format!("{name}."))))
         } else {
-            Err(BadDockerName(name.to_owned()))
+            Err(BadLabelPrefix(name.to_owned()))
         }
     }
 
@@ -75,6 +75,23 @@ impl LabelPrefix {
         format!("{}{}", self.0, label.suffix())
     }
 }
+
+/// The text that [`LabelPrefix::new`] refused as the name of a prefix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BadLabelPrefix(String);
+
+impl fmt::Display for BadLabelPrefix {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the label prefix {:?} is refused: a label prefix is 1 to {} bytes of lowercase ASCII letters, digits and `-`, starting with a letter",
+            self.0,
+            LabelPrefix::MOST_NAME_BYTES
+        )
+    }
+}
+
+impl std::error::Error for BadLabelPrefix {}
 
 impl Default for LabelPrefix {
     fn default() -> Self {
@@ -334,16 +351,11 @@ impl Identity {
     /// foreign, and leaves it alone.
     pub(crate) fn names(&self, labels: &BTreeMap<String, String>) -> bool {
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-        is(&self.key(Label::WorkspaceId), self.id.as_str())
+        is(&self.labels.key(Label::WorkspaceId), self.id.as_str())
             && is(
-                &self.key(Label::RunRecord),
+                &self.labels.key(Label::RunRecord),
                 &self.run_record.to_string_lossy(),
             )
-    }
-
-    /// Returns the key of the label `label` under the workspace's prefix.
-    pub(crate) fn key(&self, label: Label) -> String {
-        self.labels.key(label)
     }
 }
 
@@ -437,7 +449,10 @@ impl Scope {
     pub(super) fn labels(&self, label: Label, object: &str) -> Value {
         let mut labels = Map::new();
         let mut put = |key: Label, value: &str| {
-            labels.insert(self.identity.key(key), Value::String(value.to_owned()));
+            labels.insert(
+                self.identity.labels.key(key),
+                Value::String(value.to_owned()),
+            );
         };
         put(label, object);
         put(Label::WorkspaceId, self.identity.id.as_str());
@@ -458,7 +473,7 @@ impl Scope {
     /// no `<prefix>container` label, so nothing that finds an app's
     /// containers by their process finds it.
     pub(super) fn helper_labels(&self, volume: Option<&VolumeKey>) -> BTreeMap<String, String> {
-        let key = |label: Label| self.identity.key(label);
+        let key = |label: Label| self.identity.labels.key(label);
         let mut labels = BTreeMap::new();
         labels.insert(key(Label::App), self.app.as_str().to_owned());
         labels.insert(
@@ -498,7 +513,8 @@ impl Scope {
         };
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
         self.identity.names(&labels)
-            && (label != Label::Container || is(&self.identity.key(Label::App), self.app.as_str()))
-            && is(&self.identity.key(label), object)
+            && (label != Label::Container
+                || is(&self.identity.labels.key(Label::App), self.app.as_str()))
+            && is(&self.identity.labels.key(label), object)
     }
 }
