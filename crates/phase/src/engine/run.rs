@@ -64,7 +64,7 @@ use crate::error::{NotRunnable, PhaseError};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::phase::UpDeadlines;
 use crate::plan::container::KEEP_OWNER;
-use crate::plan::probe::{LogPattern, ProbeCheck};
+use crate::plan::probe::{HttpStatus, LogPattern, ProbeCheck};
 use crate::plan::restart::DEFAULT_STOP_GRACE;
 use crate::plan::{AppPlan, Plan, ProcessKind, ProcessPlan, RunnerKind};
 use crate::record::DockerName;
@@ -1961,9 +1961,11 @@ fn check<'a>(
             })
     };
     Ok(match probe {
-        ProbeCheck::Http { path } => Check::Http {
+        ProbeCheck::Http { path, status, json } => Check::Http {
             port: port(process.port.as_ref())?,
             path,
+            status: status.map(HttpStatus::get),
+            json,
         },
         ProbeCheck::Tcp { port: name } => Check::Tcp {
             port: port(Some(name))?,

@@ -10,13 +10,15 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use super::{
-    Attempt, Check, CommandEnd, Failure, Goal, HostExec, LogLines, LogWatch, Outcome, ProbeExec,
-    READY_INTERVAL, Tally, Verdict, run_bounded, wait,
+    Attempt, Check, CommandEnd, Failure, Goal, HostExec, LogLines, LogWatch, MOST_BODY_BYTES,
+    Outcome, ProbeExec, READY_INTERVAL, Tally, Verdict, run_bounded, wait,
 };
 use crate::cancel::Cancel;
 use crate::clock::pause;
 use crate::env::AppliedEnvironment;
-use crate::plan::probe::{BadLogPattern, LogPattern, Probe, ProbeCheck};
+use crate::plan::probe::{
+    BadLogPattern, JsonExpectation, JsonPointer, JsonScalar, LogPattern, Probe, ProbeCheck,
+};
 
 /// A generous upper limit for an attempt or a wait that should end much
 /// sooner, so a slow machine does not fail a timing test.
@@ -95,6 +97,8 @@ fn an_http_check_passes_on_a_2xx_status() {
     let mut check = Check::Http {
         port,
         path: "/health?deep=1",
+        status: None,
+        json: &[],
     };
     assert_eq!(
         check.attempt(Duration::from_secs(2), &Cancel::new()),
@@ -112,7 +116,12 @@ fn an_http_check_passes_on_a_2xx_status() {
 #[test]
 fn an_http_check_fails_on_a_status_outside_2xx() {
     let (port, _) = serve(b"HTTP/1.1 503 Service Unavailable\r\n\r\nbusy");
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     assert_eq!(
         check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Status(503))
@@ -123,7 +132,12 @@ fn an_http_check_fails_on_a_status_outside_2xx() {
 fn an_http_check_follows_no_redirect_so_a_3xx_status_fails() {
     let (port, requests) =
         serve(b"HTTP/1.1 302 Found\r\nLocation: /elsewhere\r\nContent-Length: 0\r\n\r\n");
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     assert_eq!(
         check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::Status(302))
@@ -134,7 +148,12 @@ fn an_http_check_follows_no_redirect_so_a_3xx_status_fails() {
 #[test]
 fn an_http_check_fails_on_a_response_that_is_not_http() {
     let (port, _) = serve(b"SSH-2.0-OpenSSH_9.6\r\n");
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     assert_eq!(
         check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::BadResponse)
@@ -145,7 +164,12 @@ fn an_http_check_fails_on_a_response_that_is_not_http() {
 fn an_http_check_reads_no_more_than_its_bound_of_a_status_line() {
     static ENDLESS: [u8; 64 * 1024] = [b'x'; 64 * 1024];
     let (port, _) = serve(&ENDLESS);
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     assert_eq!(
         check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Failed(Failure::BadResponse)
@@ -157,6 +181,8 @@ fn an_http_check_fails_when_nothing_listens() {
     let mut check = Check::Http {
         port: closed_port(),
         path: "/",
+        status: None,
+        json: &[],
     };
     assert!(matches!(
         check.attempt(Duration::from_secs(2), &Cancel::new()),
@@ -171,7 +197,12 @@ fn an_http_check_passes_on_a_server_that_listens_only_on_ipv6_loopback() {
         return;
     };
     let (port, requests) = serve_on(listener, port, b"HTTP/1.1 200 OK\r\n\r\n");
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     assert_eq!(
         check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Passed
@@ -225,7 +256,15 @@ fn a_check_that_finds_nothing_on_either_loopback_address_fails_within_its_timeou
         }
     };
     let started = Instant::now();
-    for mut check in [Check::Tcp { port }, Check::Http { port, path: "/" }] {
+    for mut check in [
+        Check::Tcp { port },
+        Check::Http {
+            port,
+            path: "/",
+            status: None,
+            json: &[],
+        },
+    ] {
         assert_eq!(
             check.attempt(Duration::from_secs(2), &Cancel::new()),
             Attempt::Failed(Failure::Connect(io::ErrorKind::ConnectionRefused)),
@@ -238,7 +277,12 @@ fn a_check_that_finds_nothing_on_either_loopback_address_fails_within_its_timeou
 #[test]
 fn an_http_check_times_out_on_a_server_that_never_answers() {
     let (listener, port) = listener();
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     let started = Instant::now();
     assert_eq!(
         check.attempt(Duration::from_millis(200), &Cancel::new()),
@@ -254,7 +298,12 @@ fn an_http_check_times_out_on_a_server_that_never_answers() {
 fn an_http_check_refuses_a_path_with_a_space_or_a_control_character() {
     let (port, requests) = serve(b"HTTP/1.1 200 OK\r\n\r\n");
     for path in ["/a b", "/a\r\nX-Injected: 1", "/caf\u{e9}", "/page#top"] {
-        let mut check = Check::Http { port, path };
+        let mut check = Check::Http {
+            port,
+            path,
+            status: None,
+            json: &[],
+        };
         assert_eq!(
             check.attempt(Duration::from_secs(2), &Cancel::new()),
             Attempt::Failed(Failure::BadPath)
@@ -544,7 +593,12 @@ fn a_readiness_wait_ends_when_a_late_server_answers() {
         stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").unwrap();
     });
     let probe = quick(ProbeCheck::http("/".to_owned()));
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     let started = Instant::now();
     let outcome = wait(
         &probe,
@@ -747,7 +801,12 @@ fn no_attempt_outlasts_the_wait_s_deadline() {
     let (listener, port) = listener();
     let mut probe = quick(ProbeCheck::http("/".to_owned()));
     probe.timeout = Duration::from_secs(30);
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     let started = Instant::now();
     let outcome = wait(
         &probe,
@@ -784,7 +843,12 @@ fn an_http_check_reads_a_status_line_written_in_pauses() {
             pause(Duration::from_millis(60));
         }
     });
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     assert_eq!(
         check.attempt(Duration::from_secs(2), &Cancel::new()),
         Attempt::Passed
@@ -801,7 +865,12 @@ fn an_http_check_stops_reading_when_it_is_cancelled() {
         pause(Duration::from_millis(150));
         canceller.cancel();
     });
-    let mut check = Check::Http { port, path: "/" };
+    let mut check = Check::Http {
+        port,
+        path: "/",
+        status: None,
+        json: &[],
+    };
     let started = Instant::now();
     assert_eq!(
         check.attempt(Duration::from_secs(30), &cancel),
@@ -1138,4 +1207,379 @@ fn a_matched_log_reaches_the_success_threshold_without_waiting_an_interval() {
         "took {:?}",
         started.elapsed()
     );
+}
+
+/// Returns the expectation that the field at `pointer` is present.
+fn present(pointer: &str) -> JsonExpectation {
+    JsonExpectation::present(JsonPointer::new(pointer.to_owned()))
+}
+
+/// Returns the expectation that the field at `pointer` equals `value`.
+fn equal(pointer: &str, value: JsonScalar) -> JsonExpectation {
+    JsonExpectation::equals(JsonPointer::new(pointer.to_owned()), value)
+}
+
+/// Returns an HTTP check of `/` at `port` that expects `status` and `json`.
+fn expecting(port: u16, status: Option<u16>, json: &[JsonExpectation]) -> Check<'_> {
+    Check::Http {
+        port,
+        path: "/",
+        status,
+        json,
+    }
+}
+
+/// Makes one attempt of `check` with a timeout of two seconds.
+fn attempt_once(mut check: Check<'_>) -> Attempt {
+    check.attempt(Duration::from_secs(2), &Cancel::new())
+}
+
+/// Serves `response`, which the test builds at run time, as [`serve`] does.
+fn serve_built(response: Vec<u8>) -> u16 {
+    serve(response.leak()).0
+}
+
+/// Serves the connections to a fresh listener in turn with `responses`,
+/// and every later connection with the last response, and returns the
+/// port and the count of connections served.
+fn serve_each(responses: Vec<&'static [u8]>) -> (u16, Arc<std::sync::atomic::AtomicUsize>) {
+    let (listener, port) = listener();
+    let served = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = Arc::clone(&served);
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { return };
+            let mut head = Vec::new();
+            let mut byte = [0_u8; 1];
+            while !head.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                head.push(byte[0]);
+            }
+            let index = count.fetch_add(1, Ordering::SeqCst);
+            let response = responses
+                .get(index)
+                .or_else(|| responses.last())
+                .copied()
+                .unwrap_or_default();
+            let _ = stream.write_all(response);
+        }
+    });
+    (port, served)
+}
+
+#[test]
+fn an_http_check_with_an_expected_status_fails_on_another_2xx_status() {
+    let (port, _) = serve(b"HTTP/1.1 204 No Content\r\n\r\n");
+    assert_eq!(
+        attempt_once(expecting(port, Some(200), &[])),
+        Attempt::Failed(Failure::StatusDiffers {
+            expected: 200,
+            got: 204
+        })
+    );
+}
+
+#[test]
+fn an_http_check_with_an_expected_status_passes_on_that_status_even_outside_2xx() {
+    let (port, _) = serve(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+    assert_eq!(
+        attempt_once(expecting(port, Some(401), &[])),
+        Attempt::Passed
+    );
+}
+
+#[test]
+fn an_http_check_without_an_expected_status_still_passes_on_any_2xx() {
+    let (port, _) = serve(b"HTTP/1.1 202 Accepted\r\nContent-Length: 11\r\n\r\n{\"ok\":true}");
+    assert_eq!(attempt_once(expecting(port, None, &[])), Attempt::Passed);
+    assert_eq!(
+        attempt_once(expecting(
+            port,
+            None,
+            &[equal("/ok", JsonScalar::Bool(true))]
+        )),
+        Attempt::Passed
+    );
+}
+
+#[test]
+fn an_http_check_judges_the_status_before_it_reads_the_body() {
+    let (port, _) = serve(b"HTTP/1.1 503 Service Unavailable\r\n\r\nbusy");
+    assert_eq!(
+        attempt_once(expecting(port, None, &[present("/ok")])),
+        Attempt::Failed(Failure::Status(503))
+    );
+    assert_eq!(
+        attempt_once(expecting(port, Some(200), &[present("/ok")])),
+        Attempt::Failed(Failure::StatusDiffers {
+            expected: 200,
+            got: 503
+        })
+    );
+}
+
+#[test]
+fn an_http_check_fails_when_an_expected_json_field_is_missing() {
+    let (port, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}");
+    assert_eq!(
+        attempt_once(expecting(
+            port,
+            None,
+            &[present("/ok"), present("/revision")]
+        )),
+        Attempt::Failed(Failure::FieldMissing(JsonPointer::new(
+            "/revision".to_owned()
+        )))
+    );
+}
+
+#[test]
+fn an_http_check_fails_when_a_json_boolean_is_false_and_true_is_expected() {
+    let (port, _) = serve(b"HTTP/1.1 200 OK\r\ncontent-length: 12\r\n\r\n{\"ok\":false}");
+    assert_eq!(
+        attempt_once(expecting(
+            port,
+            None,
+            &[equal("/ok", JsonScalar::Bool(true))]
+        )),
+        Attempt::Failed(Failure::FieldDiffers(JsonPointer::new("/ok".to_owned())))
+    );
+}
+
+#[test]
+fn an_http_check_fails_when_the_body_is_not_json() {
+    let (port, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>ok</html>");
+    assert_eq!(
+        attempt_once(expecting(port, None, &[present("/ok")])),
+        Attempt::Failed(Failure::NotJson)
+    );
+}
+
+#[test]
+fn an_http_check_passes_when_every_json_field_matches() {
+    // The response has no length, so the body ends when the server closes
+    // the connection.
+    let (port, _) = serve(
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"ok\":true,\"revision\":\"4f2a9c1\",\"paths\":{\"a/b\":[1]},\"count\":3,\"gone\":null,\"build\":{\"n\":-1}}",
+    );
+    let json = [
+        equal("/ok", JsonScalar::Bool(true)),
+        equal("/revision", JsonScalar::String("4f2a9c1".to_owned())),
+        present("/paths"),
+        present("/paths/a~1b/0"),
+        equal("/count", JsonScalar::Integer(3)),
+        equal("/gone", JsonScalar::Null),
+        equal("/build/n", JsonScalar::Integer(-1)),
+        present(""),
+    ];
+    assert_eq!(
+        attempt_once(expecting(port, Some(200), &json)),
+        Attempt::Passed
+    );
+}
+
+#[test]
+fn an_http_check_compares_an_integer_only_with_a_whole_number_of_the_same_value() {
+    let (port, _) = serve(b"HTTP/1.1 200 OK\r\n\r\n{\"a\":3.5,\"b\":\"3\",\"c\":4}");
+    for pointer in ["/a", "/b", "/c"] {
+        assert_eq!(
+            attempt_once(expecting(
+                port,
+                None,
+                &[equal(pointer, JsonScalar::Integer(3))]
+            )),
+            Attempt::Failed(Failure::FieldDiffers(JsonPointer::new(pointer.to_owned()))),
+            "{pointer}"
+        );
+    }
+}
+
+#[test]
+fn an_http_check_reads_a_chunked_body() {
+    let (port, _) = serve(
+        b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n7\r\n{\"ok\":t\r\n5;ext=1\r\nrue}\r\n0\r\n\r\n",
+    );
+    assert_eq!(
+        attempt_once(expecting(
+            port,
+            None,
+            &[equal("/ok", JsonScalar::Bool(true))]
+        )),
+        Attempt::Passed
+    );
+}
+
+#[test]
+fn an_http_check_fails_a_chunked_body_with_a_bad_chunk_size() {
+    let (port, _) =
+        serve(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\n{}\r\n0\r\n\r\n");
+    assert_eq!(
+        attempt_once(expecting(port, None, &[present("/ok")])),
+        Attempt::Failed(Failure::BadBody)
+    );
+}
+
+#[test]
+fn an_http_check_fails_a_body_longer_than_its_limit_without_reading_past_it() {
+    let long = vec![b' '; MOST_BODY_BYTES + 1];
+    let mut closed = b"HTTP/1.1 200 OK\r\n\r\n".to_vec();
+    closed.extend_from_slice(&long);
+    let port = serve_built(closed);
+    assert_eq!(
+        attempt_once(expecting(port, None, &[present("/ok")])),
+        Attempt::Failed(Failure::BodyTooLong)
+    );
+
+    let mut chunked = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+    for _ in 0..2 {
+        chunked.extend_from_slice(format!("{:x}\r\n", MOST_BODY_BYTES / 2).as_bytes());
+        chunked.extend_from_slice(&long[..MOST_BODY_BYTES / 2]);
+        chunked.extend_from_slice(b"\r\n");
+    }
+    chunked.extend_from_slice(b"1\r\n \r\n0\r\n\r\n");
+    let port = serve_built(chunked);
+    assert_eq!(
+        attempt_once(expecting(port, None, &[present("/ok")])),
+        Attempt::Failed(Failure::BodyTooLong)
+    );
+}
+
+#[test]
+fn an_http_check_fails_before_reading_a_body_whose_content_length_is_over_the_limit() {
+    // The server sends no body and closes, so a check that read the body
+    // would fail for a short body instead.
+    let port = serve_built(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            MOST_BODY_BYTES + 1
+        )
+        .into_bytes(),
+    );
+    assert_eq!(
+        attempt_once(expecting(port, None, &[present("/ok")])),
+        Attempt::Failed(Failure::BodyTooLong)
+    );
+}
+
+#[test]
+fn an_http_check_fails_a_body_shorter_than_its_content_length() {
+    let (port, _) = serve(b"HTTP/1.1 200 OK\r\nContent-Length: 50\r\n\r\n{\"ok\":true}");
+    assert_eq!(
+        attempt_once(expecting(port, None, &[present("/ok")])),
+        Attempt::Failed(Failure::BadBody)
+    );
+}
+
+#[test]
+fn a_readiness_wait_passes_before_its_deadline_once_the_body_matches() {
+    let (port, served) = serve_each(vec![
+        b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":false}",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n{\"ok\":false}",
+        b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n{\"ok\":true}",
+    ]);
+    let json = [equal("/ok", JsonScalar::Bool(true))];
+    let probe = quick(ProbeCheck::http_expecting(
+        "/".to_owned(),
+        None,
+        json.to_vec(),
+    ));
+    let mut check = expecting(port, None, &json);
+    let outcome = wait(
+        &probe,
+        &mut check,
+        Goal::Ready,
+        Instant::now() + SLACK,
+        &mut never_ended(),
+        &Cancel::new(),
+    );
+    assert_eq!(outcome, Outcome::Ready);
+    assert!(served.load(Ordering::SeqCst) >= 3);
+}
+
+#[test]
+fn no_failure_text_quotes_the_response_body() {
+    const CANARY: &str = "canary-5d1e";
+    const EXPECTED: &str = "expected-9b04";
+    let cases: [(&'static [u8], JsonExpectation); 4] = [
+        (
+            b"HTTP/1.1 200 OK\r\n\r\nnot json canary-5d1e",
+            present("/ok"),
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":\"canary-5d1e\"}",
+            equal("/ok", JsonScalar::Bool(true)),
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\n\r\n{\"canary-5d1e\":1}",
+            present("/ok"),
+        ),
+        (
+            b"HTTP/1.1 200 OK\r\n\r\n{\"ok\":\"canary-5d1e\"}",
+            equal("/ok", JsonScalar::String(EXPECTED.to_owned())),
+        ),
+    ];
+    for (response, expectation) in cases {
+        let (port, _) = serve(response);
+        let json = [expectation];
+        let Attempt::Failed(failure) = attempt_once(expecting(port, None, &json)) else {
+            panic!("the attempt passed");
+        };
+        let probe = quick(ProbeCheck::http_expecting(
+            "/".to_owned(),
+            None,
+            json.to_vec(),
+        ));
+        let outcome = wait(
+            &probe,
+            &mut expecting(port, None, &json),
+            Goal::Ready,
+            Instant::now() + Duration::from_millis(200),
+            &mut never_ended(),
+            &Cancel::new(),
+        );
+        for text in [
+            failure.to_string(),
+            format!("{failure:?}"),
+            format!("{outcome:?}"),
+            format!("{:?}", expecting(port, None, &json)),
+        ] {
+            assert!(!text.contains(CANARY), "{text}");
+            assert!(!text.contains(EXPECTED), "{text}");
+        }
+    }
+}
+
+#[test]
+fn an_http_body_read_notices_a_cancel_within_its_read_slice() {
+    let (listener, port) = listener();
+    let server = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut head = [0_u8; 256];
+        let _ = stream.read(&mut head).unwrap();
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\"")
+            .unwrap();
+        pause(Duration::from_secs(2));
+    });
+    let cancel = Cancel::new();
+    let canceller = cancel.clone();
+    let cancelled_at = Arc::new(std::sync::Mutex::new(None));
+    let stamp = Arc::clone(&cancelled_at);
+    let setter = thread::spawn(move || {
+        pause(Duration::from_millis(200));
+        *stamp.lock().unwrap() = Some(Instant::now());
+        canceller.cancel();
+    });
+    let json = [present("/ok")];
+    let mut check = expecting(port, None, &json);
+    assert_eq!(
+        check.attempt(Duration::from_secs(30), &cancel),
+        Attempt::Failed(Failure::Cancelled)
+    );
+    let ended = Instant::now();
+    setter.join().unwrap();
+    let cancelled = cancelled_at.lock().unwrap().unwrap();
+    // One read slice is 50 ms. A busy machine may stretch it.
+    let took = ended.saturating_duration_since(cancelled);
+    assert!(took < Duration::from_millis(500), "took {took:?}");
+    server.join().unwrap();
 }
