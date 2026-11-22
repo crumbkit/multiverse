@@ -179,6 +179,9 @@ pub const WORKSPACE_WRONG_LOCK: Code = Code::from_spelling("mxv::workspace::wron
 /// The code of a workspace method that was given archives of another host
 /// profile than its own, which is a defect of mxv.
 pub const WORKSPACE_HOST_MISMATCH: Code = Code::from_spelling("mxv::workspace::host_mismatch");
+/// The code of a workspace or archive that another program owns through its
+/// own host profile, which mxv leaves to that program.
+pub const WORKSPACE_OTHER_HOST: Code = Code::from_spelling("mxv::workspace::other_host");
 /// The code of a workspace without a stable id beside an archive record of
 /// its name that an older mxv did not finish, or that cannot be read, so
 /// mxv cannot name its containers.
@@ -590,6 +593,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     WORKSPACE_MISMATCHED_CHECKOUT,
     WORKSPACE_WRONG_LOCK,
     WORKSPACE_HOST_MISMATCH,
+    WORKSPACE_OTHER_HOST,
     WORKSPACE_ARCHIVE_UNFINISHED,
     REPAIR_NAMES_TAKEN,
     REPAIR_CHANGED,
@@ -740,6 +744,7 @@ impl Failure for MxvFailure {
                 Error::MismatchedCheckout { .. } => WORKSPACE_MISMATCHED_CHECKOUT,
                 Error::WrongLock { .. } => WORKSPACE_WRONG_LOCK,
                 Error::HostMismatch { .. } => WORKSPACE_HOST_MISMATCH,
+                Error::OtherHost { .. } => WORKSPACE_OTHER_HOST,
                 Error::ArchiveUnfinished { .. } => WORKSPACE_ARCHIVE_UNFINISHED,
                 Error::DatedNamesTaken { .. } => REPAIR_NAMES_TAKEN,
                 Error::StoppedRestoreHoldsOtherFiles { .. } => RESTORE_STOPPED_HOLDS_OTHER_FILES,
@@ -1197,6 +1202,9 @@ fn library_recovery(error: &Error) -> Recovery {
         | Error::HostMismatch { .. } => Recovery::hint(
             "this is a defect of mxv, and no command should reach it; report it with the command that you ran",
         ),
+        Error::OtherHost { owner, .. } => Recovery::hint(format!(
+            "the program whose host profile is {owner} made it; change or remove it with that program"
+        )),
         Error::ArchiveUnfinished {
             name,
             readable: true,
@@ -1271,6 +1279,10 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         } => vec![
             Field::new("workspaces", workspaces.as_str()),
             Field::new("archives", archives.as_str()),
+        ],
+        Error::OtherHost { workspace, owner } => vec![
+            Field::new("name", workspace.as_str()),
+            Field::new("owner", owner.as_str()),
         ],
         Error::DatedNamesTaken { name, last } => {
             vec![Field::new("name", name.as_str()), Field::new("last", last)]

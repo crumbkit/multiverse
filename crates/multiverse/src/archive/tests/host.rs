@@ -1,0 +1,432 @@
+//! The tests of a host's data and files through an archive and a restore,
+//! under the profile `example` with an [`ArchiveHook`] that carries the
+//! files of an evidence directory outside the workspace.
+
+use std::collections::BTreeMap;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
+use super::*;
+use crate::host::Host;
+use crate::record::{HOST_RECORD_VERSION, HostData, HostKey};
+use crate::workspaces::{CreateOptions, Repo};
+
+/// What the test's hook reads and how it behaves.
+#[derive(Default)]
+struct Evidence {
+    /// The directory whose entries `save` copies.
+    source: PathBuf,
+    /// Whether `save` fails.
+    save_fails: AtomicBool,
+    /// Whether `check` fails.
+    check_fails: AtomicBool,
+    /// Each directory that `check` was given.
+    checked: Mutex<Vec<PathBuf>>,
+}
+
+/// The hook of the tests, which copies the evidence directory as it is,
+/// links included.
+struct EvidenceHook(Arc<Evidence>);
+
+impl ArchiveHook for EvidenceHook {
+    fn save(&self, _: &Workspace, into: &Path) -> Result<(), HookError> {
+        if self.0.save_fails.load(Ordering::SeqCst) {
+            return Err(HookError::new("the evidence store is offline"));
+        }
+        copy_tree(&self.0.source, into);
+        Ok(())
+    }
+
+    fn check(&self, _: &Workspace, restored: &Path) -> Result<(), HookError> {
+        self.0.checked.lock().unwrap().push(restored.to_path_buf());
+        if self.0.check_fails.load(Ordering::SeqCst) {
+            return Err(HookError::new("the evidence names another commit"));
+        }
+        Ok(())
+    }
+}
+
+/// Copies each entry below `from` into `to`, keeping a link as a link.
+fn copy_tree(from: &Path, to: &Path) {
+    for entry in fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        let kind = entry.file_type().unwrap();
+        if kind.is_symlink() {
+            std::os::unix::fs::symlink(fs::read_link(entry.path()).unwrap(), &target).unwrap();
+        } else if kind.is_dir() {
+            fs::create_dir(&target).unwrap();
+            copy_tree(&entry.path(), &target);
+        } else {
+            write(&target, fs::read(entry.path()).unwrap());
+        }
+    }
+}
+
+/// Returns the profile named `example`.
+fn example() -> Host {
+    Host::named("example").unwrap()
+}
+
+/// Returns the data that the tests' host keeps.
+fn data() -> HostData {
+    let mut values = BTreeMap::new();
+    values.insert(HostKey::new("runner").unwrap(), "local".to_owned());
+    values.insert(HostKey::new("release").unwrap(), "0.7.0".to_owned());
+    HostData::new(example().name().clone(), values)
+}
+
+/// A setup under the profile `example`, with the hook's evidence.
+struct Hosted {
+    setup: Setup,
+    evidence: Arc<Evidence>,
+}
+
+/// Returns the archives of `setup`'s directories under `example`, with the
+/// hook of `evidence` when it is given.
+fn archives_of(base: &Path, evidence: Option<&Arc<Evidence>>) -> Archives {
+    let archives =
+        Archives::new(base.join("archives"), base.join("data/archives")).with_host(example());
+    match evidence {
+        Some(evidence) => archives.with_archive_hook(Box::new(EvidenceHook(Arc::clone(evidence)))),
+        None => archives,
+    }
+}
+
+fn hosted(kind: Kind) -> Hosted {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let mut workspaces = Workspaces::new(Store::new(base.join("state")), Git).with_host(example());
+    if kind == Kind::Clone {
+        workspaces = workspaces.with_mirrors(base.join("mirrors"));
+    }
+    workspaces.checkpoint = at_checkpoint;
+    let evidence = Arc::new(Evidence {
+        source: base.join("evidence"),
+        ..Evidence::default()
+    });
+    fs::create_dir_all(evidence.source.join("notes")).unwrap();
+    write(evidence.source.join("run.log"), "passed 12 of 12\n");
+    write(evidence.source.join("notes/task.md"), "fix the parser\n");
+    let setup = Setup {
+        fixture: fixture(),
+        root: base.join("work"),
+        archives: archives_of(&base, Some(&evidence)),
+        runs: Runs::new(&base.join("runs")).with_host(example()),
+        base,
+        _dir: dir,
+        workspaces,
+    };
+    Hosted { setup, evidence }
+}
+
+impl Hosted {
+    /// Creates the workspace with the host's data.
+    fn create(&self) -> Workspace {
+        let setup = &self.setup;
+        match setup
+            .workspaces
+            .create_with(
+                &setup.root,
+                &name(),
+                &[Repo::new(&setup.fixture.clone)],
+                Mode::Change,
+                CreateOptions::new(None, Some(data())),
+            )
+            .unwrap()
+        {
+            NewOutcome::Created(workspace) => workspace,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    fn host_dir(&self) -> PathBuf {
+        self.setup.root.join("triage/.example-host")
+    }
+
+    fn kept_dir(&self, archive: &Archive) -> PathBuf {
+        self.setup.archives.data_of(&archive.id).join("host")
+    }
+
+    /// Runs an archive that is expected to fail, and returns its error.
+    fn archive_error(&self) -> Error {
+        let plan = self.setup.plan(ArchiveOptions::default());
+        match self.setup.workspaces.archive(&self.setup.archives, plan) {
+            Err(error) => error,
+            Ok(outcome) => panic!("{outcome:?}"),
+        }
+    }
+}
+
+fn host_data_and_files_round_trip(kind: Kind) {
+    let hosted = hosted(kind);
+    hosted.create();
+
+    let archive = hosted.setup.archive();
+
+    assert_eq!(archive.host, Some(data()), "{kind:?}");
+    assert_eq!(archive.version, HOST_ARCHIVE_VERSION, "{kind:?}");
+    let paths: Vec<&str> = archive
+        .host_files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect();
+    assert_eq!(paths, ["notes/task.md", "run.log"], "{kind:?}");
+    assert_eq!(archive.host_files[1].size, 16, "{kind:?}");
+    assert_eq!(archive.host_files[1].digest.len(), 64, "{kind:?}");
+    assert!(!hosted.setup.root.join("triage").exists(), "{kind:?}");
+    assert_eq!(
+        hosted.setup.record().as_ref(),
+        Some(&archive),
+        "{kind:?}: the record on disk differs"
+    );
+
+    let restored = hosted.setup.restore();
+
+    assert_eq!(restored.workspace.host, Some(data()), "{kind:?}");
+    let stored = hosted.setup.workspaces.find(&name()).unwrap().unwrap();
+    assert_eq!(stored.host, Some(data()), "{kind:?}");
+    assert_eq!(stored.version, HOST_RECORD_VERSION, "{kind:?}");
+    assert_eq!(
+        fs::read_to_string(hosted.host_dir().join("run.log")).unwrap(),
+        "passed 12 of 12\n",
+        "{kind:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(hosted.host_dir().join("notes/task.md")).unwrap(),
+        "fix the parser\n",
+        "{kind:?}"
+    );
+    assert_eq!(mode_of(&hosted.host_dir()), 0o700, "{kind:?}");
+    assert_eq!(
+        *hosted.evidence.checked.lock().unwrap(),
+        [hosted.host_dir()],
+        "{kind:?}"
+    );
+    assert!(hosted.setup.record().is_none(), "{kind:?}");
+}
+
+#[test]
+fn a_host_stores_data_and_a_file_archives_restores_and_finds_both_unchanged() {
+    host_data_and_files_round_trip(Kind::Worktree);
+    host_data_and_files_round_trip(Kind::Clone);
+}
+
+#[test]
+fn a_restore_with_a_damaged_host_file_refuses_and_keeps_the_archive() {
+    let hosted = hosted(Kind::Worktree);
+    hosted.create();
+    let archive = hosted.setup.archive();
+    write(
+        hosted.kept_dir(&archive).join("run.log"),
+        "passed 0 of 12\n",
+    );
+
+    let outcome = hosted.setup.restore_outcome(false);
+
+    match outcome {
+        RestoreOutcome::Refused(RestoreRefusal::HostFilesDamaged { paths }) => {
+            assert_eq!(paths, ["run.log"]);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(hosted.setup.record().as_ref(), Some(&archive));
+    assert!(!hosted.setup.root.join("triage").exists());
+    assert!(hosted.setup.workspaces.find(&name()).unwrap().is_none());
+    assert!(hosted.evidence.checked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_restore_whose_hook_check_fails_is_undone_and_keeps_the_archive() {
+    let hosted = hosted(Kind::Clone);
+    hosted.create();
+    let archive = hosted.setup.archive();
+    hosted.evidence.check_fails.store(true, Ordering::SeqCst);
+
+    let outcome = hosted.setup.restore_outcome(false);
+
+    match outcome {
+        RestoreOutcome::Refused(RestoreRefusal::HostCheckFailed { message }) => {
+            assert_eq!(message, "the evidence names another commit");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(hosted.setup.record().as_ref(), Some(&archive));
+    assert!(!hosted.setup.root.join("triage").exists());
+    assert!(hosted.setup.workspaces.find(&name()).unwrap().is_none());
+    hosted.evidence.check_fails.store(false, Ordering::SeqCst);
+    hosted.setup.restore();
+    assert!(hosted.host_dir().join("run.log").is_file());
+}
+
+#[test]
+fn a_restore_without_a_hook_refuses_an_archive_with_host_files_before_writing() {
+    let hosted = hosted(Kind::Worktree);
+    hosted.create();
+    let archive = hosted.setup.archive();
+    let unhooked = archives_of(&hosted.setup.base, None);
+
+    let planned = hosted
+        .setup
+        .workspaces
+        .plan_restore(&unhooked, &name(), RestoreOptions::default())
+        .unwrap();
+
+    match planned {
+        RestorePlanned::Refused(RestoreRefusal::HostHookMissing { owner }) => {
+            assert_eq!(owner.as_ref(), Some(example().name()));
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(unhooked.read(&name()).unwrap().as_ref(), Some(&archive));
+    assert!(!hosted.setup.root.join("triage").exists());
+}
+
+#[test]
+fn an_archive_whose_save_fails_leaves_the_workspace_whole_and_the_rerun_finishes() {
+    let hosted = hosted(Kind::Clone);
+    hosted.create();
+    let before = status(&hosted.setup.checkout());
+    hosted.evidence.save_fails.store(true, Ordering::SeqCst);
+
+    let error = hosted.archive_error();
+
+    match &error {
+        Error::HostHookFailed {
+            name: failed,
+            message,
+        } => {
+            assert_eq!(*failed, name());
+            assert_eq!(message, "the evidence store is offline");
+        }
+        other => panic!("{other:?}"),
+    }
+    assert!(error.to_string().contains("before it moved any checkout"));
+    assert_eq!(status(&hosted.setup.checkout()), before);
+    let stopped = hosted.setup.record().unwrap();
+    assert_eq!(stopped.state, ArchiveState::Retiring);
+    assert!(stopped.host_files.is_empty());
+    let partial = hosted
+        .setup
+        .archives
+        .data_of(&stopped.id)
+        .join("host.partial");
+    assert!(
+        partial.is_dir(),
+        "the failed save left no partial directory"
+    );
+
+    hosted.evidence.save_fails.store(false, Ordering::SeqCst);
+    let archive = hosted.setup.archive();
+
+    assert_eq!(archive.host_files.len(), 2);
+    assert!(!partial.exists());
+    assert!(hosted.kept_dir(&archive).join("run.log").is_file());
+}
+
+#[test]
+fn an_archive_refuses_a_host_symlink_and_more_than_1000_host_files_before_quarantine() {
+    let hosted = hosted(Kind::Worktree);
+    hosted.create();
+    let link = hosted.evidence.source.join("latest");
+    std::os::unix::fs::symlink("run.log", &link).unwrap();
+
+    match hosted.archive_error() {
+        Error::HostFileUnkeepable { path, .. } => assert_eq!(path, "latest"),
+        other => panic!("{other:?}"),
+    }
+    assert!(hosted.setup.checkout().join(".git").exists());
+
+    fs::remove_file(&link).unwrap();
+    fs::create_dir(hosted.evidence.source.join("many")).unwrap();
+    for index in 0..MOST_HOST_FILES {
+        write(
+            hosted.evidence.source.join(format!("many/{index}.txt")),
+            "x",
+        );
+    }
+
+    match hosted.archive_error() {
+        Error::HostFilesTooMany { count, .. } => assert_eq!(count, MOST_HOST_FILES + 1),
+        other => panic!("{other:?}"),
+    }
+    assert!(hosted.setup.checkout().join(".git").exists());
+    let held = quarantine(&hosted.setup.checkout(), &example()).unwrap();
+    assert!(!held.exists());
+}
+
+#[test]
+fn a_later_archive_does_not_copy_the_host_directory_as_a_root_entry() {
+    let hosted = hosted(Kind::Worktree);
+    hosted.create();
+    hosted.setup.archive();
+    hosted.setup.restore();
+    assert!(hosted.host_dir().join("run.log").is_file());
+    write(hosted.setup.root.join("triage/notes.md"), "mine\n");
+
+    let archive = hosted.setup.archive();
+
+    let root: Vec<&str> = archive
+        .root
+        .iter()
+        .map(|entry| entry.path.as_str())
+        .collect();
+    assert_eq!(root, ["notes.md"]);
+    assert_eq!(archive.host_files.len(), 2);
+    assert!(!hosted.setup.root.join("triage").exists());
+}
+
+#[test]
+fn a_restore_killed_during_the_host_step_is_undone_by_the_next_restore() {
+    let hosted = hosted(Kind::Worktree);
+    hosted.create();
+    hosted.setup.archive();
+    set_hook(|at| {
+        assert_ne!(at, "host", "killed at host");
+        Ok(())
+    });
+    let plan = hosted.setup.restore_plan();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        drop(
+            hosted
+                .setup
+                .workspaces
+                .restore(&hosted.setup.archives, plan, &hosted.setup.runs),
+        );
+    }));
+    clear_hook();
+    assert!(result.is_err(), "the run was not killed");
+    let marked = hosted.setup.record().unwrap();
+    let mark = serde_json::to_value(marked.restoring.as_ref().unwrap()).unwrap();
+    assert_eq!(mark["host"], true, "{mark}");
+    assert!(hosted.host_dir().join("run.log").is_file());
+
+    hosted.setup.restore();
+
+    assert_eq!(
+        fs::read_to_string(hosted.host_dir().join("run.log")).unwrap(),
+        "passed 12 of 12\n"
+    );
+    assert!(hosted.setup.record().is_none());
+}
+
+#[test]
+fn a_0_6_0_record_and_archive_are_byte_identical_after_a_0_7_0_rewrite() {
+    let setup = setup(Kind::Clone);
+    setup.create();
+    let record = setup.base.join("state/triage.json");
+    let before = fs::read(&record).unwrap();
+    let mut workspace = setup.workspaces.find(&name()).unwrap().unwrap();
+    setup.workspaces.store.update(&mut workspace).unwrap();
+    assert_eq!(fs::read(&record).unwrap(), before);
+    assert!(!String::from_utf8_lossy(&before).contains("\"host\""));
+
+    let archive = setup.archive();
+    let path = setup.archives.dir_of(&name()).join(RECORD_FILE);
+    let before = fs::read(&path).unwrap();
+    setup.archives.write(&archive).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), before);
+    assert_eq!(archive.version, RETIRED_ARCHIVE_VERSION);
+    assert!(!String::from_utf8_lossy(&before).contains("host"));
+}

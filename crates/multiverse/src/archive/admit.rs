@@ -11,8 +11,8 @@ use crate::archive::ignored::{self, IgnoredEntry, IgnoredKind, IgnoredSource};
 use crate::archive::record::now;
 use crate::archive::root::{self, RootEntry, RootKind, Scanned};
 use crate::archive::{
-    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveId, ArchiveState, ArchivedCheckout,
-    Archives, DIGEST_LENGTH, Kept, KeptStash, RECORD_FILE, pin_ref,
+    ARCHIVE_MAX_FILE, Archive, ArchiveId, ArchiveState, ArchivedCheckout, Archives, DIGEST_LENGTH,
+    Kept, KeptStash, RECORD_FILE, RETIRED_ARCHIVE_VERSION, pin_ref,
 };
 use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
 use crate::disk::DisposablePath;
@@ -639,6 +639,7 @@ impl<B: Backend> Workspaces<B> {
             Subject::Found(workspace, resuming) => (*workspace, resuming.map(|kept| *kept)),
             Subject::Done(planned) => return Ok(planned),
         };
+        self.check_owner(&workspace)?;
         let start = match record_start(resuming.as_ref()) {
             Ok(start) => start,
             Err(refusal) => return Ok(ArchivePlanned::Refused(refusal)),
@@ -729,7 +730,11 @@ impl<B: Backend> Workspaces<B> {
             checkouts.push(self.archived(planned, head, commit, local_only, kept, &id)?);
         }
         let generated = self.generated_agents(&workspace)?;
-        let scanned = root::scan(&workspace, &generated, &self.host)?;
+        let scanned = root::scan(
+            &workspace,
+            &generated,
+            root::Owner::of(archives, &self.host),
+        )?;
         if let Some(refused) = refuse_root(&workspace, &scanned) {
             return Ok(refused);
         }
@@ -1176,8 +1181,8 @@ impl ArchivePlan {
             }
         }
         let earlier = self.resuming.as_ref();
-        Archive {
-            version: ARCHIVE_VERSION,
+        let mut archive = Archive {
+            version: RETIRED_ARCHIVE_VERSION,
             id: self.id.clone(),
             state: self.start.state(),
             time: earlier.map_or_else(now, |archive| archive.time),
@@ -1212,8 +1217,12 @@ impl ArchivePlan {
                         .collect()
                 })
                 .unwrap_or_default(),
+            host: workspace.host.clone(),
+            host_files: Vec::new(),
             restoring: None,
-        }
+        };
+        archive.raise_version();
+        archive
     }
 
     /// Returns the size that the record of this plan would have, in bytes,

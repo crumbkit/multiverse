@@ -424,7 +424,7 @@ fn repaired_text(repaired: Result<Repaired, Error>, old: &str) -> String {
             // A renamed archive is always one that `mxv archive -w`
             // finishes, at this version.
             assert_eq!(archive.state, ArchiveState::Retired);
-            assert_eq!(archive.version, ARCHIVE_VERSION);
+            assert_eq!(archive.version, RETIRED_ARCHIVE_VERSION);
             "rename to the dated name".to_owned()
         }
         Ok(Repaired::Deleted(_)) => "delete".to_owned(),

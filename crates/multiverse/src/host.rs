@@ -20,6 +20,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use phase::LabelPrefix;
+use serde::{Deserialize, Serialize};
 
 use crate::record::Workspace;
 
@@ -44,7 +45,8 @@ const MOST_DOMAIN_BYTES: usize = 253;
 /// of lowercase ASCII letters, digits and `-`, starting with a letter. The
 /// constructor checks it, so the name can stand in a git reference, a file
 /// name and a docker label key as it is.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct HostName(Cow<'static, str>);
 
 impl HostName {
@@ -78,6 +80,20 @@ impl HostName {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl TryFrom<String> for HostName {
+    type Error = BadHost;
+
+    fn try_from(text: String) -> Result<Self, BadHost> {
+        Self::new(&text)
+    }
+}
+
+impl From<HostName> for String {
+    fn from(name: HostName) -> Self {
+        name.0.into_owned()
     }
 }
 
@@ -349,6 +365,14 @@ impl Host {
     #[must_use]
     pub fn quarantine_suffix(&self) -> String {
         format!(".{}-archiving", self.name)
+    }
+
+    /// Returns the name of the directory in a restored workspace's
+    /// directory that holds the files that the host's
+    /// [`ArchiveHook`](crate::ArchiveHook) kept, such as `.example-host`.
+    #[must_use]
+    pub fn host_dir(&self) -> String {
+        format!(".{}-host", self.name)
     }
 
     /// Returns the text of the `AGENTS.md` of `workspace`, whose checkouts'

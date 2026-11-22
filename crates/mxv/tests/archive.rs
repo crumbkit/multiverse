@@ -861,6 +861,29 @@ fn a_record_from_a_newer_version_refuses_with_the_record_code() {
 }
 
 #[test]
+fn mxv_restore_refuses_an_archive_that_another_host_made_and_names_the_owner() {
+    let setup = Setup::new();
+    setup.archive();
+    let path = setup.root().join("state/mxv/archives/triage/archive.json");
+    let record = fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"version\": 3", "\"version\": 4")
+        .replacen(
+            "\"id\":",
+            "\"host\": {\"profile\": \"example\", \"values\": {\"runner\": \"local\"}},\n  \"id\":",
+            1,
+        );
+    write(&path, &record);
+    let (exit, document) = setup.run(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::other_host", "{document}");
+    let text = document.to_string();
+    assert!(text.contains("example"), "{document}");
+    assert_eq!(fs::read_to_string(&path).unwrap(), record);
+    assert!(!setup.workspace().exists());
+}
+
+#[test]
 fn an_unfinished_archive_is_a_degraded_row_that_names_the_command_that_finishes_it() {
     let setup = Setup::new();
     setup.archive();

@@ -163,6 +163,72 @@ pub enum Error {
         /// The name of the host of the archives.
         archives: crate::host::HostName,
     },
+    /// The workspace or the archive belongs to another host profile than
+    /// the one that the [`crate::Workspaces`] or [`crate::Archives`] run
+    /// under, as its [`crate::HostData::profile`] says, so only that host
+    /// changes it. Nothing was written.
+    OtherHost {
+        /// The workspace's name.
+        workspace: crate::name::WorkspaceName,
+        /// The name of the host profile that owns it.
+        owner: crate::host::HostName,
+    },
+    /// The host data given for a workspace holds more than
+    /// [`crate::MOST_HOST_VALUES`] values or more than
+    /// [`crate::MOST_HOST_DATA_BYTES`] bytes of JSON. Nothing was written.
+    HostDataTooLarge {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// The number of values.
+        values: usize,
+        /// The bytes of the data as JSON.
+        bytes: usize,
+    },
+    /// The [`crate::ArchiveHook::save`] of the archive's host failed. The
+    /// archive stopped before it moved any checkout, so the workspace is
+    /// whole and the next archive calls the hook again.
+    HostHookFailed {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// The hook's message.
+        message: String,
+    },
+    /// The host's hook wrote something that an archive cannot keep: a
+    /// symbolic link, a socket, a device or a name that is not UTF-8. The
+    /// archive stopped before it moved any checkout.
+    HostFileUnkeepable {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// The entry, relative to the directory that the hook wrote into.
+        path: String,
+    },
+    /// The host's hook wrote more than [`crate::MOST_HOST_FILES`] files.
+    /// The archive stopped before it moved any checkout.
+    HostFilesTooMany {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// The number of files, counted up to one past the limit.
+        count: usize,
+    },
+    /// The host's hook wrote a file larger than
+    /// [`crate::ARCHIVE_MAX_FILE`]. The archive stopped before it moved any
+    /// checkout.
+    HostFileTooLarge {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// The file, relative to the directory that the hook wrote into.
+        path: String,
+        /// Its size in bytes.
+        bytes: u64,
+    },
+    /// The host's hook wrote more than [`crate::MOST_HOST_FILE_BYTES`] bytes
+    /// in all. The archive stopped before it moved any checkout.
+    HostFilesTooLarge {
+        /// The workspace's name.
+        name: crate::name::WorkspaceName,
+        /// The bytes counted, up to the file that passed the limit.
+        bytes: u64,
+    },
     /// The workspace's record holds no stable id, and the archive record of
     /// its name is an unfinished archive of an older multiverse without
     /// one, or cannot be read, so mxv gives the workspace no id and cannot
@@ -585,6 +651,73 @@ impl Error {
     }
 }
 
+impl Error {
+    /// Writes the text of a failure that concerns a host's data or files.
+    fn fmt_host(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let what_to_do = "so the archive stopped before it moved any checkout; the host keeps fewer files, such as one archive file that it makes itself, and archives again";
+        match self {
+            Self::OtherHost { workspace, owner } => write!(
+                formatter,
+                "the workspace {workspace} belongs to the host {owner}, so only {owner} changes it and nothing was written"
+            ),
+            Self::HostDataTooLarge {
+                name,
+                values,
+                bytes,
+            } => write!(
+                formatter,
+                "the host data of the workspace {name} holds {values} values in {bytes} bytes, and a record keeps at most {} values in {} bytes, so nothing was written; keep fewer values and put bulk data in the host's files",
+                crate::record::MOST_HOST_VALUES,
+                crate::record::MOST_HOST_DATA_BYTES,
+            ),
+            Self::HostHookFailed { name, message } => write!(
+                formatter,
+                "the host's archive hook failed to save the files of the workspace {name}, so the archive stopped before it moved any checkout: {message}"
+            ),
+            Self::HostFileUnkeepable { name, path } => write!(
+                formatter,
+                "the host's archive hook wrote {path} for the workspace {name}, which is not a regular file or directory, {what_to_do}"
+            ),
+            Self::HostFilesTooMany { name, count } => write!(
+                formatter,
+                "the host's archive hook wrote at least {count} files for the workspace {name}, more than the {} an archive keeps, {what_to_do}",
+                crate::archive::MOST_HOST_FILES
+            ),
+            Self::HostFileTooLarge { name, path, bytes } => write!(
+                formatter,
+                "the host's archive hook wrote {path} of {bytes} bytes for the workspace {name}, more than the {} bytes an archive keeps of one file, {what_to_do}",
+                crate::archive::ARCHIVE_MAX_FILE
+            ),
+            Self::HostFilesTooLarge { name, bytes } => write!(
+                formatter,
+                "the host's archive hook wrote at least {bytes} bytes for the workspace {name}, more than the {} bytes an archive keeps of a host's files, {what_to_do}",
+                crate::archive::MOST_HOST_FILE_BYTES
+            ),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// Writes the message of [`Error::ArchiveUnfinished`], apart from
+/// [`Error`]'s `fmt`, which would otherwise pass clippy's line limit.
+fn archive_unfinished(
+    formatter: &mut fmt::Formatter<'_>,
+    name: &crate::name::WorkspaceName,
+    readable: bool,
+) -> fmt::Result {
+    if readable {
+        write!(
+            formatter,
+            "the workspace {name} has no stable id beside an archive of it that an older mxv did not finish, so mxv cannot name its containers and started nothing"
+        )
+    } else {
+        write!(
+            formatter,
+            "the workspace {name} has no stable id, and mxv cannot read the archive record of its name, so mxv cannot name its containers and started nothing"
+        )
+    }
+}
+
 /// Writes the message of [`Error::HostMismatch`], apart from
 /// [`Error`]'s `fmt`, which would otherwise pass clippy's line limit.
 fn host_mismatch(
@@ -688,20 +821,16 @@ impl fmt::Display for Error {
                 workspaces,
                 archives,
             } => host_mismatch(formatter, workspaces, archives),
-            Self::ArchiveUnfinished {
-                name,
-                readable: true,
-            } => write!(
-                formatter,
-                "the workspace {name} has no stable id beside an archive of it that an older mxv did not finish, so mxv cannot name its containers and started nothing"
-            ),
-            Self::ArchiveUnfinished {
-                name,
-                readable: false,
-            } => write!(
-                formatter,
-                "the workspace {name} has no stable id, and mxv cannot read the archive record of its name, so mxv cannot name its containers and started nothing"
-            ),
+            Self::OtherHost { .. }
+            | Self::HostDataTooLarge { .. }
+            | Self::HostHookFailed { .. }
+            | Self::HostFileUnkeepable { .. }
+            | Self::HostFilesTooMany { .. }
+            | Self::HostFileTooLarge { .. }
+            | Self::HostFilesTooLarge { .. } => self.fmt_host(formatter),
+            Self::ArchiveUnfinished { name, readable } => {
+                archive_unfinished(formatter, name, *readable)
+            }
             Self::RecordMissing { name } => write!(
                 formatter,
                 "the workspace {name} has no record, so mxv wrote none"
@@ -962,6 +1091,13 @@ impl std::error::Error for Error {
             | Self::MismatchedCheckout { .. }
             | Self::WrongLock { .. }
             | Self::HostMismatch { .. }
+            | Self::OtherHost { .. }
+            | Self::HostDataTooLarge { .. }
+            | Self::HostHookFailed { .. }
+            | Self::HostFileUnkeepable { .. }
+            | Self::HostFilesTooMany { .. }
+            | Self::HostFileTooLarge { .. }
+            | Self::HostFilesTooLarge { .. }
             | Self::ArchiveUnfinished { .. }
             | Self::NewerRecord { .. }
             | Self::ProcessTable { .. }

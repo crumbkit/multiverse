@@ -10,7 +10,7 @@ use crate::health::{self, Repaired};
 
 /// The checkpoints of a restore after which a kill leaves something made,
 /// and `mirrors`, before which it leaves nothing.
-const KILL_STEPS: [&str; 8] = [
+const KILL_STEPS: [&str; 9] = [
     "mirrors",
     "directory",
     "checkout:app",
@@ -19,6 +19,7 @@ const KILL_STEPS: [&str; 8] = [
     "kept",
     "root",
     "marker",
+    "host",
 ];
 
 /// An archive of a workspace with an ignored file, uncommitted work, a root
@@ -576,13 +577,14 @@ fn a_killed_restore_keeps_a_branch_that_has_moved_since_it_was_created() {
 
 /// The checkpoints of an archive after which a kill leaves every checkout
 /// in place, so a repair abandons the archive.
-const UNTOUCHED_STEPS: [&str; 7] = [
+const UNTOUCHED_STEPS: [&str; 8] = [
     "state",
     "record",
     "wip",
     "pins",
     "ignored",
     "root",
+    "host",
     "before-move:app",
 ];
 

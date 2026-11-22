@@ -106,11 +106,11 @@ fn a_record_of_a_newer_version_is_refused() {
     let store = Store::new(dir.path().to_path_buf());
     write(
         dir.path().join("app.json"),
-        r#"{"version": 5, "future": true}"#,
+        r#"{"version": 6, "future": true}"#,
     );
     let error = store.read(&"app".parse().unwrap()).unwrap_err();
     assert!(
-        matches!(error, Error::NewerRecord { version: 5, .. }),
+        matches!(error, Error::NewerRecord { version: 6, .. }),
         "{error:?}"
     );
 }
@@ -398,7 +398,7 @@ fn a_store_does_not_write_back_a_record_that_was_deleted() {
 }
 
 #[test]
-fn a_record_of_version_five_is_refused_as_newer() {
+fn a_record_of_version_six_is_refused_as_newer() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::new(dir.path().to_path_buf());
     let mut workspace = with_two_checkouts("app");
@@ -406,11 +406,11 @@ fn a_record_of_version_five_is_refused_as_newer() {
     let path = dir.path().join("app.json");
     let text = fs::read_to_string(&path)
         .unwrap()
-        .replace("\"version\": 4", "\"version\": 5");
+        .replace("\"version\": 4", "\"version\": 6");
     write(&path, text);
     assert!(matches!(
         store.read(&"app".parse().unwrap()),
-        Err(Error::NewerRecord { version: 5, .. })
+        Err(Error::NewerRecord { version: 6, .. })
     ));
 }
 

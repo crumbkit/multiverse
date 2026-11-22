@@ -2031,6 +2031,8 @@ A restore refuses, and builds nothing, with these codes:
 | `mxv::restore::ignored_damaged` | The archive's copy of an ignored file, such as `app/.env`, is missing or differs from its recorded digest. `mxv restore NAME --force` restores the workspace without those files and lists them as lost. |
 | `mxv::restore::ignored_taken` | The rebuilt workspace already holds something at the path of an ignored file. Find what wrote those paths, then restore again. |
 | `mxv::restore::mirror_missing` | A clone's mirror is gone or has lost its pins, and the result lists what only the mirror held. `mxv restore NAME --from-origin` fetches origin and restores only what origin holds, and `mxv remove --archived NAME` deletes the archive. |
+| `mxv::restore::host_hook_missing` | The archive holds files that another program's archive hook kept, and mxv cannot check them. Restore it with the program that the result names as `owner`. |
+| `mxv::workspace::other_host` | Another program created the workspace or archive under its own host profile, which the result names as `owner`. mxv changes nothing, and that program restores, archives or removes it. |
 | `mxv::restore::stopped_holds_other_files` | A restore of the name stopped after it made the workspace's directory, and the directory holds entries that the restore's mark does not account for. mxv deleted nothing and kept the mark. `mxv repair NAME` and `mxv remove --archived NAME` fail with the same code. Move or delete the listed entries and run the command again. |
 
 ## Archiving merged workspaces

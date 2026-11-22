@@ -6,8 +6,8 @@ use phase::WorkspaceId;
 
 use super::{Broken, Health, Problem, Repair};
 use crate::archive::{
-    ARCHIVE_VERSION, Archive, ArchiveId, ArchiveRecords, ArchiveState, ArchivedCheckout, Kept,
-    OLDER_ARCHIVE_VERSION,
+    Archive, ArchiveId, ArchiveRecords, ArchiveState, ArchivedCheckout, Kept,
+    OLDER_ARCHIVE_VERSION, RETIRED_ARCHIVE_VERSION,
 };
 use crate::error::Error;
 use crate::git::Git;
@@ -86,7 +86,7 @@ pub(super) fn workspace(root: &Path, text: &str, digit: char, folders: &[&str]) 
 /// `state`. The archive's own id is made of `digit` too.
 pub(super) fn archive(text: &str, digit: char, state: ArchiveState) -> Archive {
     Archive {
-        version: ARCHIVE_VERSION,
+        version: RETIRED_ARCHIVE_VERSION,
         id: archive_id(digit),
         state,
         time: 0,
@@ -103,6 +103,8 @@ pub(super) fn archive(text: &str, digit: char, state: ArchiveState) -> Archive {
         manifest: None,
         manifest_mode: None,
         ignored: Vec::new(),
+        host: None,
+        host_files: Vec::new(),
         restoring: None,
     }
 }
