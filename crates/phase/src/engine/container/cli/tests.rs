@@ -196,6 +196,7 @@ fn write(path: &Path, text: &str) {
 
 fn workspace() -> Identity {
     Identity {
+        labels: crate::engine::container::LabelPrefix::mxv(),
         id: WORKSPACE_ID.parse().unwrap(),
         run_record: PathBuf::from(RUN_RECORD),
     }
@@ -654,6 +655,7 @@ fn a_real_daemon_finds_and_removes_a_volume_and_a_container_by_this_workspaces_i
     let id = crate::random::hex_id().unwrap();
     let run_record = format!("/state/runs/{id}.json");
     let workspace = Identity {
+        labels: crate::engine::container::LabelPrefix::mxv(),
         id: id.parse().unwrap(),
         run_record: PathBuf::from(&run_record),
     };
@@ -738,6 +740,7 @@ fn a_real_daemon_neither_finds_nor_removes_a_volume_or_a_container_of_another_st
     }
     let id = crate::random::hex_id().unwrap();
     let ours = Identity {
+        labels: crate::engine::container::LabelPrefix::mxv(),
         id: id.parse().unwrap(),
         run_record: PathBuf::from(format!("/state/runs/{id}.json")),
     };

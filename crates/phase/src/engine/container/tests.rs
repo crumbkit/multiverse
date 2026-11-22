@@ -12,7 +12,7 @@ use crate::engine::container::command::{
 };
 use crate::engine::container::compose::{UpFailure, up_failure, without_image_user};
 use crate::engine::container::names::{
-    ContainerId, Identity, Scope, ServiceName, VolumeKey, VolumeName,
+    ContainerId, Identity, Label, LabelPrefix, Scope, ServiceName, VolumeKey, VolumeName,
 };
 use crate::engine::container::objects::{
     ContainerState, STOP_TIMEOUT_FORMAT, mint_container, mint_volume, stop_timeout_of,
@@ -80,6 +80,7 @@ fn volume_labels(workspace: &str, app: &str, volume: &str) -> String {
 fn scope(app: &str) -> Scope {
     Scope::app(
         Identity {
+            labels: LabelPrefix::mxv(),
             id: WorkspaceId::try_from(WORKSPACE.to_owned()).unwrap(),
             run_record: RUN_RECORD.into(),
         },
@@ -90,7 +91,7 @@ fn scope(app: &str) -> Scope {
 #[test]
 fn a_scope_owns_only_objects_whose_labels_name_its_workspace_app_and_object() {
     let scope = scope("reading-list");
-    let owns = |labels: &str| scope.owns(labels, "mxv.container", "db");
+    let owns = |labels: &str| scope.owns(labels, Label::Container, "db");
     assert!(owns(&container_labels(WORKSPACE, "reading-list", "db")));
     assert!(!owns("null"));
     assert!(!owns("{}"));
@@ -113,9 +114,12 @@ fn a_scope_owns_only_objects_whose_labels_name_its_workspace_app_and_object() {
 #[test]
 fn a_scope_owns_no_container_or_volume_whose_run_record_label_names_another_state_directory() {
     let scope = scope("reading-list");
-    for (label, object) in [("mxv.container", "db"), ("mxv.volume", "data")] {
+    for (label, key, object) in [
+        (Label::Container, "mxv.container", "db"),
+        (Label::Volume, "mxv.volume", "data"),
+    ] {
         let labels = |run_record: &str| {
-            printed_labels_of(run_record, WORKSPACE, "reading-list", label, object)
+            printed_labels_of(run_record, WORKSPACE, "reading-list", key, object)
         };
         assert!(scope.owns(&labels(RUN_RECORD), label, object));
         for foreign in [
@@ -127,7 +131,7 @@ fn a_scope_owns_no_container_or_volume_whose_run_record_label_names_another_stat
         ] {
             assert!(
                 !scope.owns(&labels(foreign), label, object),
-                "{label}: {foreign:?}"
+                "{key}: {foreign:?}"
             );
         }
     }
@@ -136,7 +140,7 @@ fn a_scope_owns_no_container_or_volume_whose_run_record_label_names_another_stat
 #[test]
 fn a_scope_owns_no_object_whose_label_values_differ_by_a_tab_or_a_space() {
     let scope = scope("reading-list");
-    let owns = |labels: &str| scope.owns(labels, "mxv.container", "db");
+    let owns = |labels: &str| scope.owns(labels, Label::Container, "db");
     // A value that holds tabs cannot stand in for the other labels.
     assert!(!owns(&printed_labels(
         &format!("{WORKSPACE}\treading-list\tdb"),
@@ -456,6 +460,7 @@ const WORKSPACE_ID: &str = "fedcba9876543210fedcba9876543210";
 fn app_scope(app: &str) -> Scope {
     Scope::app(
         Identity {
+            labels: LabelPrefix::mxv(),
             id: WORKSPACE_ID.parse().unwrap(),
             run_record: PathBuf::from(format!("/state/runs/{WORKSPACE_ID}.json")),
         },
@@ -486,6 +491,7 @@ fn an_app_scope_names_its_project_after_the_workspace_and_the_app_and_its_volume
     assert_ne!(app_scope("web").project(), project);
     let other = Scope::app(
         Identity {
+            labels: LabelPrefix::mxv(),
             id: "0123456789abcdef0123456789abcdef".parse().unwrap(),
             run_record: PathBuf::from("/state/runs/other.json"),
         },
@@ -504,7 +510,7 @@ fn an_app_scope_labels_a_container_with_the_workspace_id_run_record_and_app_and_
     let scope = app_scope("api");
     let run_record = format!("/state/runs/{WORKSPACE_ID}.json");
     assert_eq!(
-        scope.labels("mxv.container", "server"),
+        scope.labels(Label::Container, "server"),
         json!({
             "mxv.workspace-id": WORKSPACE_ID,
             "mxv.run-record": run_record,
@@ -513,7 +519,7 @@ fn an_app_scope_labels_a_container_with_the_workspace_id_run_record_and_app_and_
         })
     );
     assert_eq!(
-        scope.labels("mxv.volume", "data"),
+        scope.labels(Label::Volume, "data"),
         json!({
             "mxv.workspace-id": WORKSPACE_ID,
             "mxv.run-record": run_record,
@@ -537,32 +543,32 @@ fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_o
     };
     assert!(scope.owns(
         &container(WORKSPACE_ID, "api", "server"),
-        "mxv.container",
+        Label::Container,
         "server"
     ));
     assert!(!scope.owns(
         &container(WORKSPACE_ID, "web", "server"),
-        "mxv.container",
+        Label::Container,
         "server"
     ));
     assert!(!scope.owns(
         &container(WORKSPACE_ID, "api", "worker"),
-        "mxv.container",
+        Label::Container,
         "server"
     ));
     assert!(!scope.owns(
         &container("0123456789abcdef0123456789abcdef", "api", "server"),
-        "mxv.container",
+        Label::Container,
         "server"
     ));
     assert!(!scope.owns(
         &container(&format!("{WORKSPACE_ID} "), "api", "server"),
-        "mxv.container",
+        Label::Container,
         "server"
     ));
     assert!(!scope.owns(
         &container_labels(WORKSPACE, "reading-list", "server"),
-        "mxv.container",
+        Label::Container,
         "server"
     ));
     let volume = json!({
@@ -571,9 +577,9 @@ fn an_app_scope_owns_a_container_of_its_workspace_app_and_process_and_a_volume_o
         "mxv.volume": "data",
     })
     .to_string();
-    assert!(scope.owns(&volume, "mxv.volume", "data"));
-    assert!(app_scope("web").owns(&volume, "mxv.volume", "data"));
-    assert!(!scope.owns(&volume, "mxv.volume", "cache"));
+    assert!(scope.owns(&volume, Label::Volume, "data"));
+    assert!(app_scope("web").owns(&volume, Label::Volume, "data"));
+    assert!(!scope.owns(&volume, Label::Volume, "cache"));
 }
 
 #[test]
@@ -1036,4 +1042,73 @@ fn a_quoted_user_with_no_end_hides_the_rest_of_the_output() {
         without_image_user("unable to find user other", Some("evil")),
         "unable to find user <the image's USER>"
     );
+}
+
+#[test]
+fn a_label_prefix_is_a_lowercase_name_of_at_most_32_bytes_followed_by_a_dot() {
+    assert_eq!(LabelPrefix::mxv().as_str(), "mxv.");
+    assert_eq!(LabelPrefix::new("mxv").unwrap(), LabelPrefix::mxv());
+    assert_eq!(
+        LabelPrefix::new("example-2").unwrap().as_str(),
+        "example-2."
+    );
+    assert_eq!(LabelPrefix::default(), LabelPrefix::mxv());
+    let longest = "a".repeat(LabelPrefix::MOST_NAME_BYTES);
+    assert!(LabelPrefix::new(&longest).is_ok());
+    for bad in [
+        "",
+        "Example",
+        "2example",
+        "-example",
+        "ex.ample",
+        "ex ample",
+        "ex/ample",
+        &"a".repeat(LabelPrefix::MOST_NAME_BYTES + 1),
+    ] {
+        assert!(LabelPrefix::new(bad).is_err(), "{bad:?}");
+    }
+    assert_eq!(
+        LabelPrefix::new("2x").unwrap_err().to_string(),
+        "the label prefix \"2x\" is refused: a label prefix is 1 to 32 bytes of lowercase ASCII letters, digits and `-`, starting with a letter"
+    );
+}
+
+#[test]
+fn a_scope_under_another_label_prefix_labels_its_objects_with_that_prefix_and_owns_none_of_mxvs() {
+    let identity = |labels: LabelPrefix| Identity {
+        labels,
+        id: WORKSPACE_ID.parse().unwrap(),
+        run_record: PathBuf::from(format!("/state/runs/{WORKSPACE_ID}.json")),
+    };
+    let app = "api".parse().unwrap();
+    let example = Scope::app(identity(LabelPrefix::new("example").unwrap()), &app);
+    let mxv = Scope::app(identity(LabelPrefix::mxv()), &app);
+    let run_record = format!("/state/runs/{WORKSPACE_ID}.json");
+
+    let labels = example.labels(Label::Container, "server");
+    assert_eq!(
+        labels,
+        json!({
+            "example.workspace-id": WORKSPACE_ID,
+            "example.run-record": run_record,
+            "example.app": "api",
+            "example.container": "server",
+        })
+    );
+    assert_eq!(
+        example.helper_labels(Some(&key("data"))),
+        BTreeMap::from([
+            ("example.app".to_owned(), "api".to_owned()),
+            ("example.role".to_owned(), "volume-owner".to_owned()),
+            ("example.run-record".to_owned(), run_record.clone()),
+            ("example.volume".to_owned(), "data".to_owned()),
+            ("example.workspace-id".to_owned(), WORKSPACE_ID.to_owned()),
+        ])
+    );
+    let printed = labels.to_string();
+    assert!(example.owns(&printed, Label::Container, "server"));
+    assert!(!mxv.owns(&printed, Label::Container, "server"));
+    let theirs = mxv.labels(Label::Volume, "data").to_string();
+    assert!(mxv.owns(&theirs, Label::Volume, "data"));
+    assert!(!example.owns(&theirs, Label::Volume, "data"));
 }

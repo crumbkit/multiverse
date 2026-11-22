@@ -184,6 +184,8 @@ pub(crate) struct ExecSettings<'a> {
     /// The only variables of the `docker` program's environment, or `None`
     /// for the host program's whole environment.
     pub(crate) docker_environment: Option<&'a BTreeMap<String, String>>,
+    /// The prefix of the keys of the labels of phase's docker objects.
+    pub(crate) labels: &'a crate::engine::container::LabelPrefix,
 }
 
 /// Runs `request` in its process's context, as the module docs say, and
@@ -261,6 +263,7 @@ pub(crate) fn exec(
                 variables: &variables,
                 terminal: matches!(request.io, ExecIo::Inherit { terminal: true }),
                 docker_environment: exec.docker_environment,
+                labels: exec.labels,
             })?;
             let status = run(
                 prepared.command,

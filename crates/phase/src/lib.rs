@@ -39,6 +39,7 @@ mod status;
 
 pub use crate::cancel::Cancel;
 pub use crate::engine::container;
+pub use crate::engine::container::{BadLabelPrefix, LabelPrefix};
 pub use crate::engine::exec::{ExecIo, ExecRequest};
 pub use crate::engine::host;
 pub use crate::engine::keeper;

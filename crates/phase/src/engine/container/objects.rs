@@ -17,11 +17,11 @@ use std::time::Duration;
 use crate::cancel::Cancel;
 use crate::clock::now;
 use crate::engine::container::ContainerError as Error;
-use crate::engine::container::app::{SECRET_FILES, SECRETS_LABEL};
+use crate::engine::container::app::SECRET_FILES;
 use crate::engine::container::command::{DOCKER_DEADLINE, quick, run, run_until};
 use crate::engine::container::compose::ComposeEnv;
 use crate::engine::container::names::{
-    CONTAINER_LABEL, ContainerId, Scope, ServiceName, VOLUME_LABEL, VolumeKey, VolumeName,
+    ContainerId, Label, Scope, ServiceName, VolumeKey, VolumeName,
 };
 use crate::engine::container::secrets::{IMAGE_CONFIG_FORMAT, ImageConfig};
 
@@ -185,7 +185,7 @@ pub(super) fn mint_container(
 ) -> Result<Inspected, Error> {
     let mut lines = printed.lines();
     let labels = lines.next().unwrap_or_default();
-    if !scope.owns(labels, CONTAINER_LABEL, service.as_str()) {
+    if !scope.owns(labels, Label::Container, service.as_str()) {
         return Err(Error::Foreign {
             kind: "container",
             name: target.to_owned(),
@@ -224,19 +224,20 @@ pub(super) fn mint_container(
         },
         state,
         restarts,
-        files: has_secret_files(labels),
+        files: has_secret_files(scope, labels),
         user,
         started,
     })
 }
 
 /// Reports whether `labels`, a container's labels printed as JSON, carry
-/// the label of a container that receives secret files.
-fn has_secret_files(labels: &str) -> bool {
+/// `scope`'s label of a container that receives secret files.
+fn has_secret_files(scope: &Scope, labels: &str) -> bool {
+    let secrets = scope.identity().labels.key(Label::Secrets);
     serde_json::from_str::<Option<std::collections::BTreeMap<String, String>>>(labels)
         .ok()
         .flatten()
-        .is_some_and(|labels| labels.get(SECRETS_LABEL).map(String::as_str) == Some(SECRET_FILES))
+        .is_some_and(|labels| labels.get(&secrets).map(String::as_str) == Some(SECRET_FILES))
 }
 
 /// Inspects the container that `target`, its id or its name, names, and
@@ -516,7 +517,7 @@ pub(super) fn mint_volume(
     let owned = name
         .as_str()
         .strip_prefix(&scope.volume_prefix())
-        .is_some_and(|volume| scope.owns(printed.trim_end_matches('\n'), VOLUME_LABEL, volume));
+        .is_some_and(|volume| scope.owns(printed.trim_end_matches('\n'), Label::Volume, volume));
     if owned {
         Ok(OwnedVolume { name: name.clone() })
     } else {
@@ -573,7 +574,7 @@ pub(crate) fn ensure_volume(scope: &Scope, key: &VolumeKey) -> Result<OwnedVolum
         return Ok(volume);
     }
     let mut args = vec!["volume".to_owned(), "create".to_owned()];
-    if let serde_json::Value::Object(labels) = scope.labels(VOLUME_LABEL, key.as_str()) {
+    if let serde_json::Value::Object(labels) = scope.labels(Label::Volume, key.as_str()) {
         for (label, value) in labels {
             args.push("--label".to_owned());
             args.push(format!("{label}={}", value.as_str().unwrap_or_default()));

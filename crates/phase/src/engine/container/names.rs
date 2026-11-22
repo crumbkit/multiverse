@@ -6,6 +6,7 @@
 //! takes one never receives a name that docker would read as an option or
 //! that would split at the wrong `.`.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fmt;
@@ -17,29 +18,133 @@ use serde_json::{Map, Value};
 use crate::name::MOST_NAME_BYTES;
 use crate::name::{AppName, WorkspaceId, is_unit_name};
 
-/// The label that names a container's name in the manifest.
-pub(crate) const CONTAINER_LABEL: &str = "mxv.container";
+/// The prefix of the label keys that phase gives the docker objects it
+/// creates, such as `mxv.` in `mxv.workspace-id`. A program that links
+/// phase under its own name gives phase its own prefix with
+/// [`Phase::with_labels`](crate::Phase::with_labels), so its objects carry
+/// its name, and phase finds, sweeps and removes only the objects whose
+/// labels start with its prefix. Without one, phase uses [`LabelPrefix::mxv`].
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LabelPrefix(Cow<'static, str>);
 
-/// The label that names a volume's name in the manifest.
-pub(crate) const VOLUME_LABEL: &str = "mxv.volume";
+impl LabelPrefix {
+    /// The most bytes of the name of a prefix, before its `.`. The longest
+    /// label key is the name, the `.` and `workspace-id`, 45 bytes, far
+    /// below docker's 255-byte limit on a label key.
+    pub const MOST_NAME_BYTES: usize = 32;
 
-/// The label that names the stable id of an object's workspace, which
-/// phase's `sweep` matches an object by.
-pub(crate) const WORKSPACE_ID_LABEL: &str = "mxv.workspace-id";
+    /// Returns the prefix `<name>.`, such as `mxv.` for `mxv`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BadLabelPrefix`] when `name` is not 1 to
+    /// [`LabelPrefix::MOST_NAME_BYTES`] bytes of lowercase ASCII letters,
+    /// digits and `-`, starting with a letter.
+    pub fn new(name: &str) -> Result<Self, BadLabelPrefix> {
+        let valid = (1..=Self::MOST_NAME_BYTES).contains(&name.len())
+            && name
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_ascii_lowercase())
+            && name.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            });
+        if valid {
+            Ok(Self(Cow::Owned(format!("{name}."))))
+        } else {
+            Err(BadLabelPrefix(name.to_owned()))
+        }
+    }
 
-/// The label that names the absolute path of the run record of an
-/// object's workspace.
-pub(crate) const RUN_RECORD_LABEL: &str = "mxv.run-record";
+    /// Returns mxv's prefix, `mxv.`, which phase uses unless it is given
+    /// another.
+    #[must_use]
+    pub const fn mxv() -> Self {
+        Self(Cow::Borrowed("mxv."))
+    }
 
-/// The label that names an object's app. Until mxv names apps, a
-/// workspace's app is named after the workspace.
-pub(crate) const APP_LABEL: &str = "mxv.app";
+    /// Returns the prefix as text, such as `mxv.`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 
-/// The label that names the role of a short-lived container that phase
-/// runs for itself, apart from an app's processes.
-pub(crate) const ROLE_LABEL: &str = "mxv.role";
+    /// Returns the key of the label `label` under this prefix, such as
+    /// `mxv.workspace-id`.
+    pub(crate) fn key(&self, label: Label) -> String {
+        format!("{}{}", self.0, label.suffix())
+    }
+}
 
-/// The value of [`ROLE_LABEL`] on a helper of the volume-owner step, which
+/// The text that [`LabelPrefix::new`] refused as the name of a prefix.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BadLabelPrefix(String);
+
+impl fmt::Display for BadLabelPrefix {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "the label prefix {:?} is refused: a label prefix is 1 to {} bytes of lowercase ASCII letters, digits and `-`, starting with a letter",
+            self.0,
+            LabelPrefix::MOST_NAME_BYTES
+        )
+    }
+}
+
+impl std::error::Error for BadLabelPrefix {}
+
+impl Default for LabelPrefix {
+    fn default() -> Self {
+        Self::mxv()
+    }
+}
+
+impl fmt::Display for LabelPrefix {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+/// A label that phase gives the docker objects it creates. Its key is a
+/// [`LabelPrefix`] followed by the label's suffix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Label {
+    /// The label that names a container's name in the manifest.
+    Container,
+    /// The label that names a volume's name in the manifest.
+    Volume,
+    /// The label that names the stable id of an object's workspace, which
+    /// phase's `sweep` matches an object by.
+    WorkspaceId,
+    /// The label that names the absolute path of the run record of an
+    /// object's workspace.
+    RunRecord,
+    /// The label that names an object's app.
+    App,
+    /// The label that names the role of a short-lived container that
+    /// phase runs for itself, apart from an app's processes.
+    Role,
+    /// The label of a container whose process receives secret files.
+    Secrets,
+}
+
+impl Label {
+    /// Returns the part of the label's key after the prefix, such as
+    /// `workspace-id`.
+    const fn suffix(self) -> &'static str {
+        match self {
+            Self::Container => "container",
+            Self::Volume => "volume",
+            Self::WorkspaceId => "workspace-id",
+            Self::RunRecord => "run-record",
+            Self::App => "app",
+            Self::Role => "role",
+            Self::Secrets => "secrets",
+        }
+    }
+}
+
+/// The value of [`Label::Role`] on a helper of the volume-owner step, which
 /// sets the owner of a workspace volume or reads the numeric ids of an
 /// image's user.
 pub(crate) const VOLUME_OWNER_ROLE: &str = "volume-owner";
@@ -231,12 +336,14 @@ pub(crate) struct Identity {
     pub(crate) id: WorkspaceId,
     /// The absolute path of the workspace's run record.
     pub(crate) run_record: PathBuf,
+    /// The prefix of the keys of the labels that name the workspace.
+    pub(crate) labels: LabelPrefix,
 }
 
 impl Identity {
     /// Reports whether `labels`, an object's labels, name this workspace:
-    /// the object's `mxv.workspace-id` label equals the workspace's stable
-    /// id and its `mxv.run-record` label equals the path of the
+    /// the object's `<prefix>workspace-id` label equals the workspace's
+    /// stable id and its `<prefix>run-record` label equals the path of the
     /// workspace's run record. Each value must equal the expected one
     /// exactly, with nothing trimmed. The run record is the lossy UTF-8
     /// string that [`Scope::labels`] writes, so a state directory reached
@@ -244,8 +351,11 @@ impl Identity {
     /// foreign, and leaves it alone.
     pub(crate) fn names(&self, labels: &BTreeMap<String, String>) -> bool {
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
-        is(WORKSPACE_ID_LABEL, self.id.as_str())
-            && is(RUN_RECORD_LABEL, &self.run_record.to_string_lossy())
+        is(&self.labels.key(Label::WorkspaceId), self.id.as_str())
+            && is(
+                &self.labels.key(Label::RunRecord),
+                &self.run_record.to_string_lossy(),
+            )
     }
 }
 
@@ -257,9 +367,9 @@ impl Identity {
 /// A scope names its project `phase-<hash>-<app>`, where `<hash>` is 16 hex
 /// digits of a hash of the workspace's stable id. Its containers are
 /// `<project>.<process>`, and its volumes, which every app of the
-/// workspace shares, are `phase-<hash>.<volume>`. Its containers carry the
-/// labels `mxv.workspace-id`, `mxv.run-record`, `mxv.app` and
-/// `mxv.container`, and its volumes carry `mxv.workspace-id`,
+/// workspace shares, are `phase-<hash>.<volume>`. Under the prefix `mxv.`,
+/// its containers carry the labels `mxv.workspace-id`, `mxv.run-record`,
+/// `mxv.app` and `mxv.container`, and its volumes carry `mxv.workspace-id`,
 /// `mxv.run-record` and `mxv.volume`.
 #[derive(Clone, Debug)]
 pub(crate) struct Scope {
@@ -333,46 +443,50 @@ impl Scope {
         VolumeName(format!("{}{volume}", self.volume_prefix()))
     }
 
-    /// Returns the labels of the scope's object `object` under `label`:
-    /// the workspace's stable id, run record and object labels, and the
-    /// app label to a container.
-    pub(super) fn labels(&self, label: &str, object: &str) -> Value {
+    /// Returns the labels of the scope's object `object` under `label`,
+    /// [`Label::Container`] or [`Label::Volume`]: the workspace's stable
+    /// id, run record and object labels, and the app label to a container.
+    pub(super) fn labels(&self, label: Label, object: &str) -> Value {
         let mut labels = Map::new();
-        let mut put = |key: &str, value: &str| {
-            labels.insert(key.to_owned(), Value::String(value.to_owned()));
+        let mut put = |key: Label, value: &str| {
+            labels.insert(
+                self.identity.labels.key(key),
+                Value::String(value.to_owned()),
+            );
         };
         put(label, object);
-        put(WORKSPACE_ID_LABEL, self.identity.id.as_str());
+        put(Label::WorkspaceId, self.identity.id.as_str());
         put(
-            RUN_RECORD_LABEL,
+            Label::RunRecord,
             &self.identity.run_record.to_string_lossy(),
         );
-        if label == CONTAINER_LABEL {
-            put(APP_LABEL, self.app.as_str());
+        if label == Label::Container {
+            put(Label::App, self.app.as_str());
         }
         Value::Object(labels)
     }
 
     /// Returns the labels of a volume-owner helper, as `(label, value)`
     /// pairs in label order: the workspace's stable id, its run record and
-    /// the app, [`ROLE_LABEL`] set to [`VOLUME_OWNER_ROLE`], and the volume
-    /// that the helper mounts when it mounts one. A helper carries no
-    /// `mxv.container` label, so nothing that finds an app's containers by
-    /// their process finds it.
+    /// the app, [`Label::Role`] set to [`VOLUME_OWNER_ROLE`], and the
+    /// volume that the helper mounts when it mounts one. A helper carries
+    /// no `<prefix>container` label, so nothing that finds an app's
+    /// containers by their process finds it.
     pub(super) fn helper_labels(&self, volume: Option<&VolumeKey>) -> BTreeMap<String, String> {
+        let key = |label: Label| self.identity.labels.key(label);
         let mut labels = BTreeMap::new();
-        labels.insert(APP_LABEL.to_owned(), self.app.as_str().to_owned());
+        labels.insert(key(Label::App), self.app.as_str().to_owned());
         labels.insert(
-            WORKSPACE_ID_LABEL.to_owned(),
+            key(Label::WorkspaceId),
             self.identity.id.as_str().to_owned(),
         );
         labels.insert(
-            RUN_RECORD_LABEL.to_owned(),
+            key(Label::RunRecord),
             self.identity.run_record.to_string_lossy().into_owned(),
         );
-        labels.insert(ROLE_LABEL.to_owned(), VOLUME_OWNER_ROLE.to_owned());
+        labels.insert(key(Label::Role), VOLUME_OWNER_ROLE.to_owned());
         if let Some(volume) = volume {
-            labels.insert(VOLUME_LABEL.to_owned(), volume.as_str().to_owned());
+            labels.insert(key(Label::Volume), volume.as_str().to_owned());
         }
         labels
     }
@@ -385,21 +499,22 @@ impl Scope {
 
     /// Reports whether `labels`, an object's labels as the JSON that
     /// [`super::objects`] prints, name this scope and, under `label`, such
-    /// as `mxv.container`, the object `object`. The object names the
+    /// as [`Label::Container`], the object `object`. The object names the
     /// workspace's stable id and the run record of this scope's state
     /// directory, and a container also names its app. Each value must equal
     /// the expected one exactly, with nothing trimmed. The run record is
     /// the lossy UTF-8 string that [`Scope::labels`] writes, so a state
     /// directory reached by another path than the one that made an object
     /// finds that object foreign, and keeps it.
-    pub(super) fn owns(&self, labels: &str, label: &str, object: &str) -> bool {
+    pub(super) fn owns(&self, labels: &str, label: Label, object: &str) -> bool {
         let Ok(Some(labels)) = serde_json::from_str::<Option<BTreeMap<String, String>>>(labels)
         else {
             return false;
         };
         let is = |key: &str, value: &str| labels.get(key).is_some_and(|found| found == value);
         self.identity.names(&labels)
-            && (label != CONTAINER_LABEL || is(APP_LABEL, self.app.as_str()))
-            && is(label, object)
+            && (label != Label::Container
+                || is(&self.identity.labels.key(Label::App), self.app.as_str()))
+            && is(&self.identity.labels.key(label), object)
     }
 }

@@ -139,6 +139,7 @@ impl World {
     /// directory.
     fn identity(&self) -> Identity {
         Identity {
+            labels: crate::engine::container::LabelPrefix::mxv(),
             id: self.id.clone(),
             run_record: RunStore::new(self.state.path()).path(&self.id),
         }
@@ -469,6 +470,7 @@ fn a_second_state_directory_with_the_same_id_leaves_the_first_ones_volume_owner_
     assert_eq!(helper.len(), 1, "{helper:?}");
     let (second, _) = world.second_state();
     let elsewhere = Identity {
+        labels: crate::engine::container::LabelPrefix::mxv(),
         id: world.id.clone(),
         run_record: RunStore::new(second.path()).path(&world.id),
     };

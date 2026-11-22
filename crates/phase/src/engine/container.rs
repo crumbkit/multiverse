@@ -9,14 +9,16 @@
 //! `phase-<hash>.<volume>`, which every app of the workspace shares.
 //! Neither the project nor a manifest name holds a `.`, so the part after
 //! the `.` is always the container or volume. Every container and named
-//! volume carries the labels `mxv.workspace-id=<id>`, the workspace's
-//! stable id, `mxv.run-record=<path>`, the absolute path of its run record,
-//! and `mxv.container=<name>` or `mxv.volume=<name>`, and a container also
+//! volume carries labels under phase's [`LabelPrefix`], `mxv.` unless the
+//! host gives another: `mxv.workspace-id=<id>`, the workspace's stable id,
+//! `mxv.run-record=<path>`, the absolute path of its run record, and
+//! `mxv.container=<name>` or `mxv.volume=<name>`, and a container also
 //! carries `mxv.app=<name>`. Compose adds labels of its own.
 //!
 //! `DockerCli` gives phase's `sweep` the objects of a workspace, and
-//! matches an object by `mxv.workspace-id` and `mxv.run-record`. It never
-//! matches or removes an object without both labels.
+//! matches an object by `<prefix>workspace-id` and `<prefix>run-record`.
+//! It never matches or removes an object without both labels, so a phase
+//! with one prefix never touches the objects of a phase with another.
 //!
 //! Every container runs on docker's default bridge network, with
 //! `network_mode: bridge`, so Compose creates no network for the project.
@@ -72,7 +74,9 @@ mod tests;
 pub(crate) use crate::engine::container::cli::DockerCli;
 pub use crate::engine::container::error::ContainerError;
 pub(crate) use crate::engine::container::names::Identity;
-pub use crate::engine::container::names::{BadDockerName, ServiceName, VolumeKey};
+pub use crate::engine::container::names::{
+    BadDockerName, BadLabelPrefix, LabelPrefix, ServiceName, VolumeKey,
+};
 pub(crate) use crate::engine::container::objects::answers_within;
 pub use crate::engine::container::objects::{ContainerState, Inspected, OwnedContainer, reinspect};
 pub(crate) use crate::engine::container::runner::{ComposeRunner, recorded_logs};

@@ -7,7 +7,7 @@ use std::process::ExitStatus;
 use std::time::{Duration, Instant};
 
 use crate::cancel::Cancel;
-use crate::engine::container::{ComposeRunner, DockerCli};
+use crate::engine::container::{ComposeRunner, DockerCli, LabelPrefix};
 use crate::engine::exec::{ExecRequest, ExecSettings};
 use crate::engine::keeper::KeeperCommand;
 use crate::engine::run::{Engine, Settings};
@@ -72,6 +72,9 @@ pub struct Phase {
     /// The paths that sandboxed apps may never read or write, besides those
     /// that phase always protects.
     protected: Vec<PathBuf>,
+    /// The prefix of the keys of the labels of the docker objects that
+    /// phase creates, finds and removes.
+    labels: LabelPrefix,
 }
 
 /// The deadlines of one `up`. A deadline that cuts off a start makes that
@@ -111,7 +114,27 @@ impl Phase {
             inherited: BTreeMap::new(),
             docker_environment: None,
             protected: Vec::new(),
+            labels: LabelPrefix::mxv(),
         }
+    }
+
+    /// Returns this `Phase` with `labels` as the prefix of the keys of the
+    /// labels of the docker objects it creates, such as `example.` in
+    /// `example.workspace-id`. phase finds, sweeps and removes only objects
+    /// whose labels carry this prefix, so the objects of a program that
+    /// gives another prefix are never touched. Without it, phase uses
+    /// [`LabelPrefix::mxv`].
+    #[must_use]
+    pub fn with_labels(mut self, labels: LabelPrefix) -> Self {
+        self.labels = labels;
+        self
+    }
+
+    /// Returns the prefix of the keys of the labels of the docker objects
+    /// that phase creates.
+    #[must_use]
+    pub const fn labels(&self) -> &LabelPrefix {
+        &self.labels
     }
 
     /// Returns this `Phase` with `protected` as paths that a sandboxed app
@@ -422,8 +445,12 @@ impl Phase {
 
     /// Returns the runner of container apps on this machine.
     fn containers(&self) -> ComposeRunner {
-        let runner = ComposeRunner::new(self.state_dir.clone(), self.start_grace)
-            .with_docker_environment(self.docker_environment.clone());
+        let runner = ComposeRunner::new(
+            self.state_dir.clone(),
+            self.start_grace,
+            self.labels.clone(),
+        )
+        .with_docker_environment(self.docker_environment.clone());
         #[cfg(test)]
         let runner = match &self.volume_helper_image {
             Some(image) => runner.with_helper_image(image.clone()),
@@ -472,6 +499,7 @@ impl Phase {
             state_dir: &self.state_dir,
             processes: &System,
             docker: &DockerCli::new(),
+            labels: &self.labels,
         };
         crate::status::status(&RunStore::new(&self.state_dir), workspace, plan, sources)
     }
@@ -505,6 +533,7 @@ impl Phase {
         crate::logs::logs(
             &RunStore::new(&self.state_dir),
             &self.state_dir,
+            &self.labels,
             workspace,
             request,
             sink,
@@ -555,6 +584,7 @@ impl Phase {
             docker: &DockerCli::new(),
             processes: &System,
             host: &System,
+            labels: &self.labels,
         };
         sweep::sweep(&store, workspace, dry_run, reach, waits)
     }
@@ -661,6 +691,7 @@ impl Phase {
             &ExecSettings {
                 settings: engine.settings,
                 docker_environment: self.docker_environment.as_ref(),
+                labels: &self.labels,
             },
             plan,
             request,

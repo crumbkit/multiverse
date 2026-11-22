@@ -1,7 +1,8 @@
 //! The Docker of phase's `sweep`, which runs the `docker` program.
 //!
-//! It matches an object by phase's workspace label, `mxv.workspace-id`,
-//! and its run-record label, `mxv.run-record`, which must name the run
+//! It matches an object by phase's workspace label, such as
+//! `mxv.workspace-id` under the prefix `mxv.`, and its run-record label,
+//! `<prefix>run-record`, which must name the run
 //! record of this state directory. An object without either label never
 //! matches, even by a recorded id, so `sweep` never removes it. Labels are read as JSON and compared exactly.
 //!
@@ -15,12 +16,12 @@ use std::ffi::{OsStr, OsString};
 use std::time::Duration;
 
 use crate::DockerCause;
-use crate::engine::container::app::{SECRET_FILES, SECRETS_LABEL};
+use crate::engine::container::app::SECRET_FILES;
 use crate::engine::container::command::{
     DOCKER, DOCKER_DEADLINE, Finished, check_with, message, quick_with, run_program,
 };
 use crate::engine::container::compose::ComposeEnv;
-use crate::engine::container::names::Identity;
+use crate::engine::container::names::{Identity, Label};
 use crate::engine::container::objects::{rm_args, stop_seconds};
 use crate::engine::container::volume_owner;
 use crate::engine::container::{ContainerError, ContainerState};
@@ -177,9 +178,10 @@ const STATE_FORMAT: &str = "{{.State.Status}} {{.State.ExitCode}}";
 /// after [`STATE_FORMAT`], how many times Docker restarted a container and
 /// the value of its secrets label, and on the next line when Docker last
 /// started it, which [`status_state`] reads.
-fn restarts_format() -> String {
+fn restarts_format(identity: &Identity) -> String {
+    let secrets = identity.labels.key(Label::Secrets);
     format!(
-        "{{{{.RestartCount}}}} {{{{index .Config.Labels {SECRETS_LABEL:?}}}}}\n{{{{.State.StartedAt}}}}"
+        "{{{{.RestartCount}}}} {{{{index .Config.Labels {secrets:?}}}}}\n{{{{.State.StartedAt}}}}"
     )
 }
 
@@ -297,7 +299,7 @@ impl Docker for DockerCli {
         let format = format!(
             "{}\n{STATE_FORMAT}\n{}",
             format(DockerKind::Container),
-            restarts_format()
+            restarts_format(object.identity)
         );
         let object = DockerObject {
             kind: DockerKind::Container,

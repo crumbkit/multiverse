@@ -33,6 +33,7 @@ use crate::select::Selection;
 use crate::source::Source;
 use crate::status::ProcessState;
 
+mod labels;
 mod volume_owner;
 
 /// The image of the tests.
@@ -138,9 +139,15 @@ struct World {
 
 impl World {
     fn new() -> Self {
+        Self::with_labels(crate::engine::container::LabelPrefix::mxv())
+    }
+
+    /// Returns a workspace whose phase labels its objects under `labels`.
+    fn with_labels(labels: crate::engine::container::LabelPrefix) -> Self {
         let state = tempfile::tempdir().unwrap();
-        let phase =
-            Phase::new(state.path().to_path_buf()).with_start_grace(Duration::from_millis(500));
+        let phase = Phase::new(state.path().to_path_buf())
+            .with_start_grace(Duration::from_millis(500))
+            .with_labels(labels);
         Self {
             id: crate::random::hex_id().unwrap().parse().unwrap(),
             phase,
@@ -200,9 +207,9 @@ impl World {
     }
 
     /// Removes every container and volume that carries this workspace's
-    /// id label.
+    /// id label under its phase's prefix.
     fn clean(&self) {
-        let label = format!("label=mxv.workspace-id={}", self.id);
+        let label = format!("label={}workspace-id={}", self.phase.labels(), self.id);
         for kind in ["container", "volume"] {
             let listed = docker(&[kind, "ls", "--all", "--quiet", "--filter", &label])
                 .or_else(|| docker(&[kind, "ls", "--quiet", "--filter", &label]))
@@ -968,7 +975,11 @@ impl World {
 
     /// Returns the container runner of this workspace.
     fn runner(&self) -> super::ComposeRunner {
-        super::ComposeRunner::new(self.state.path().to_path_buf(), Duration::ZERO)
+        super::ComposeRunner::new(
+            self.state.path().to_path_buf(),
+            Duration::ZERO,
+            crate::engine::container::LabelPrefix::mxv(),
+        )
     }
 
     /// Returns the inspection of the container of the first process of

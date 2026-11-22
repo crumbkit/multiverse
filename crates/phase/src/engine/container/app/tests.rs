@@ -32,6 +32,7 @@ where
 fn scope(app: &str) -> Scope {
     Scope::app(
         Identity {
+            labels: crate::engine::container::LabelPrefix::mxv(),
             id: name(WORKSPACE_ID),
             run_record: PathBuf::from(format!("/state/runs/{WORKSPACE_ID}.json")),
         },
@@ -478,6 +479,7 @@ fn a_processs_plan_hash_changes_only_with_its_own_part_of_the_app() {
 fn a_label_value_with_a_dollar_sign_reaches_the_compose_file_escaped() {
     let scope = Scope::app(
         Identity {
+            labels: crate::engine::container::LabelPrefix::mxv(),
             id: name(WORKSPACE_ID),
             run_record: PathBuf::from("/state/$HOME/runs.json"),
         },

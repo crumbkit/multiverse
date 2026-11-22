@@ -60,6 +60,7 @@ fn read(
     docker: &dyn Docker,
 ) -> crate::status::Status {
     let sources = Sources {
+        labels: &crate::engine::container::LabelPrefix::mxv(),
         state_dir: state,
         processes,
         docker,
