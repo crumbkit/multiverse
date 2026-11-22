@@ -366,13 +366,16 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Busy`] when another command holds the lock for the
+    /// Returns [`Error::HostMismatch`], before it takes the lock, when the
+    /// archives belong to another host than the workspaces. Returns
+    /// [`Error::Busy`] when another command holds the lock for the
     /// whole lock wait, and the errors of [`Lifecycle::delete_archive_held`].
     pub fn delete_archive(
         &self,
         confirmed: &Archive,
         asked: &VolumesAsked,
     ) -> Result<ArchiveDeleted, Error> {
+        self.workspaces.same_host(self.archives)?;
         let lock = self.runs.lock(&confirmed.name)?;
         self.delete_archive_held(&lock, confirmed, asked)
     }
@@ -412,8 +415,10 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::WrongLock`] when `lock` is not the lock of
-    /// `confirmed`'s name. Returns
+    /// Returns [`Error::HostMismatch`], before it reads or deletes
+    /// anything, when the archives belong to another host than the
+    /// workspaces. Returns [`Error::WrongLock`] when `lock` is not the lock
+    /// of `confirmed`'s name. Returns
     /// [`Error::StoppedRestoreHoldsOtherFiles`], before it deletes
     /// anything, when the archive holds the mark of a stopped restore whose
     /// directory holds an entry that the mark does not account for, as
@@ -426,6 +431,7 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
         confirmed: &Archive,
         asked: &VolumesAsked,
     ) -> Result<ArchiveDeleted, Error> {
+        self.workspaces.same_host(self.archives)?;
         lock.check(&confirmed.name)?;
         let Some(archive) = self.archives.read(&confirmed.name)? else {
             return Ok(ArchiveDeleted::Unchanged);

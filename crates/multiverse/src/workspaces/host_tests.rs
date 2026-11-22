@@ -12,6 +12,7 @@ use crate::archive::{
 };
 use crate::git::Git;
 use crate::host::Host;
+use crate::lifecycle::{Lifecycle, VolumesAsked};
 use crate::lookup::ManifestSource;
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
@@ -303,7 +304,7 @@ fn a_restore_under_another_profile_than_the_archive_s_writes_nothing() {
 }
 
 #[test]
-fn workspaces_refuse_archives_of_another_host_before_they_write_anything() {
+fn workspaces_and_lifecycle_refuse_archives_of_another_host_before_they_write_anything() {
     let dir = TempDir::new().unwrap();
     let base = dir.path().canonicalize().unwrap();
     let fixture = fixture();
@@ -328,18 +329,42 @@ fn workspaces_refuse_archives_of_another_host_before_they_write_anything() {
         restored.map(|_| ()),
         repaired.map(|_| ()),
     ] {
-        let error = outcome.unwrap_err();
-        assert!(
-            matches!(
-                &error,
-                crate::Error::HostMismatch { workspaces, archives }
-                    if workspaces.as_str() == "example" && archives.as_str() == "mxv"
-            ),
-            "{error:?}"
-        );
+        assert_host_mismatch(outcome);
     }
     assert_eq!(names_below(&base), before);
     assert_eq!(example.workspaces.store.read(&name()).unwrap(), record);
+
+    // An archive of example's, deleted through mxv's archives, stays whole:
+    // its record, its pins, its volumes and every file below the base.
+    let archive = example.archive();
+    let mirror = archive.checkouts[0].pin_repository().to_path_buf();
+    let pins = refs(&mirror);
+    let before = names_below(&base);
+    let removed = example
+        .workspaces
+        .remove_archive(&mxv, archive.clone(), Mode::Change);
+    let deleted = Lifecycle::new(&example.workspaces, &mxv, &example.runs)
+        .delete_archive(&archive, &VolumesAsked::default());
+
+    assert_host_mismatch(removed.map(|_| ()));
+    assert_host_mismatch(deleted.map(|_| ()));
+    assert_eq!(names_below(&base), before);
+    assert_eq!(refs(&mirror), pins);
+    assert_eq!(example.archives.read(&name()).unwrap(), Some(archive));
+}
+
+/// Asserts that `outcome` is the refusal of mxv's archives by example's
+/// workspaces.
+fn assert_host_mismatch(outcome: Result<(), crate::Error>) {
+    let error = outcome.unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            crate::Error::HostMismatch { workspaces, archives }
+                if workspaces.as_str() == "example" && archives.as_str() == "mxv"
+        ),
+        "{error:?}"
+    );
 }
 
 #[test]
