@@ -14,6 +14,9 @@
 mod grants;
 #[path = "support/git.rs"]
 mod support;
+#[expect(dead_code, reason = "services.rs never leaves a setup behind")]
+#[path = "../../phase/src/test_docker.rs"]
+mod test_docker;
 #[path = "support/ports.rs"]
 mod test_ports;
 
@@ -25,6 +28,7 @@ use snapbox::cmd::Command;
 use tempfile::TempDir;
 
 use crate::support::{GIT_ENV, PATH, repository};
+use crate::test_docker::{OwnerLock, remove_labelled, sweep_left_behind};
 use crate::test_ports::PortBlock;
 
 /// Writes `text` to the file at `path`, as a person working in a checkout
@@ -82,6 +86,9 @@ struct Setup {
     name: String,
     /// The block of host ports that the state directory allocates from.
     ports: PortBlock,
+    /// The lock that says the setup's test still runs, so a later setup's
+    /// sweep keeps its objects until its process ends.
+    _owner: OwnerLock,
 }
 
 impl Setup {
@@ -89,13 +96,17 @@ impl Setup {
     fn new(name: &str, manifest: &str) -> Self {
         // The sandbox denies the per-user temporary directory, so the
         // test's files lie in the build's target directory.
-        let dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+        let target_tmp = Path::new(env!("CARGO_TARGET_TMPDIR"));
+        let dir = tempfile::tempdir_in(target_tmp).unwrap();
+        let owner = OwnerLock::take(dir.path());
+        sweep_left_behind(&[target_tmp]);
         repository(&dir.path().canonicalize().unwrap());
         let ports = PortBlock::claim();
         let setup = Self {
             dir,
             name: name.to_owned(),
             ports,
+            _owner: owner,
         };
         let config = setup.root().join("config/mxv/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -192,14 +203,8 @@ impl Setup {
 
 impl Drop for Setup {
     fn drop(&mut self) {
-        for container in self.containers() {
-            let _ = docker(&["rm", "--force", "--volumes", &container]);
-        }
-        for volume in self.objects(&["volume", "ls", "--quiet"]) {
-            let _ = docker(&["volume", "rm", &volume]);
-        }
-        for network in self.objects(&["network", "ls", "--format", "{{.Name}}"]) {
-            let _ = docker(&["network", "rm", &network]);
+        if let Some(id) = self.workspace_id() {
+            remove_labelled(&format!("mxv.workspace-id={id}"));
         }
     }
 }

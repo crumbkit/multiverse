@@ -36,6 +36,13 @@ mod sandbox;
 mod select;
 mod source;
 mod status;
+#[cfg(test)]
+mod test_docker;
+// The tests of `test_docker` lie apart from it, because mxv's tests include
+// `test_docker.rs` by its path and must not compile them again.
+#[cfg(test)]
+#[path = "test_docker/tests.rs"]
+mod test_docker_tests;
 
 pub use crate::cancel::Cancel;
 pub use crate::engine::container;

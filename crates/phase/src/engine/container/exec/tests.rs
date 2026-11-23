@@ -24,6 +24,7 @@ use crate::record::store::RunStore;
 use crate::report::AppOutcome;
 use crate::select::Selection;
 use crate::source::Source;
+use crate::test_docker::{OwnerLock, remove_labelled, sweep_left_behind};
 
 /// The image of the tests.
 const IMAGE: &str = "busybox:1.37.0";
@@ -98,16 +99,22 @@ impl AppliedEnvironment for Mode {
 
 /// A workspace of the tests with one container app, `api`, whose process
 /// `server` receives `MODE` and sleeps.
+/// The state directory is the world's temp root, whose owner file it locks
+/// while it lives, so a later world's sweep removes what this one left
+/// when its process was killed.
 struct World {
     state: TempDir,
     id: WorkspaceId,
     phase: Phase,
     plan: Plan,
+    _owner: OwnerLock,
 }
 
 impl World {
     fn new() -> Self {
         let state = tempfile::tempdir().unwrap();
+        let owner = OwnerLock::take(state.path());
+        sweep_left_behind(&[]);
         let id: WorkspaceId = crate::random::hex_id().unwrap().parse().unwrap();
         let phase =
             Phase::new(state.path().to_path_buf()).with_start_grace(Duration::from_millis(500));
@@ -133,6 +140,7 @@ impl World {
             id,
             phase,
             plan,
+            _owner: owner,
         }
     }
 
@@ -204,21 +212,11 @@ impl World {
             .as_str()
             .to_owned()
     }
-
-    /// Removes every container that carries this workspace's id label.
-    fn clean(&self) {
-        let label = format!("label=mxv.workspace-id={}", self.id);
-        let listed = docker(&["container", "ls", "--all", "--quiet", "--filter", &label])
-            .unwrap_or_default();
-        for object in listed.split_whitespace() {
-            let _ = docker(&["rm", "--force", "--", object]);
-        }
-    }
 }
 
 impl Drop for World {
     fn drop(&mut self) {
-        self.clean();
+        remove_labelled(&format!("mxv.workspace-id={}", self.id));
     }
 }
 

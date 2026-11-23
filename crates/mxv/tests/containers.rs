@@ -12,6 +12,8 @@
 mod grants;
 #[path = "support/git.rs"]
 mod support;
+#[path = "../../phase/src/test_docker.rs"]
+mod test_docker;
 #[path = "support/ports.rs"]
 mod test_ports;
 
@@ -26,6 +28,7 @@ use snapbox::cmd::Command;
 use tempfile::TempDir;
 
 use crate::support::{GIT_ENV, PATH, repository};
+use crate::test_docker::{OwnerLock, remove_labelled, sweep_left_behind};
 use crate::test_ports::PortBlock;
 
 /// The image of the tests, pinned by its tag.
@@ -97,7 +100,9 @@ fn docker_config() -> PathBuf {
 /// A temporary directory with a repository, a workspace root and a state
 /// directory, and one workspace whose containers and volumes it removes
 /// when it drops. It finds them only by its own store id, so it never
-/// removes another setup's.
+/// removes another setup's. The temporary directory is the setup's temp
+/// root, whose owner file it locks while it lives, and each new setup
+/// first sweeps the objects of setups whose process was killed.
 struct Setup {
     /// The temporary directory.
     dir: TempDir,
@@ -105,6 +110,13 @@ struct Setup {
     name: String,
     /// The block of host ports that the state directory allocates from.
     ports: PortBlock,
+    /// The lock that says the setup's test still runs.
+    owner: OwnerLock,
+}
+
+/// The build's own temporary directory, where a setup may also lie.
+fn target_tmp() -> &'static Path {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
 }
 
 impl Setup {
@@ -112,12 +124,24 @@ impl Setup {
     /// a state directory that allocates host ports from a block that no
     /// other running test, in this checkout or another, uses.
     fn new(name: &str, manifest: &str) -> Self {
-        let dir = tempfile::tempdir().unwrap();
+        Self::with_dir(tempfile::tempdir().unwrap(), name, manifest)
+    }
+
+    /// Creates the workspace as [`Setup::new`] does, in a temporary
+    /// directory below the build's own temporary directory.
+    fn in_target_tmp(name: &str, manifest: &str) -> Self {
+        Self::with_dir(tempfile::tempdir_in(target_tmp()).unwrap(), name, manifest)
+    }
+
+    fn with_dir(dir: TempDir, name: &str, manifest: &str) -> Self {
+        let owner = OwnerLock::take(dir.path());
+        sweep_left_behind(&[target_tmp()]);
         repository(&dir.path().canonicalize().unwrap());
         let setup = Self {
             dir,
             name: name.to_owned(),
             ports: PortBlock::claim(),
+            owner,
         };
         let config = setup.root().join("config/mxv/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -267,25 +291,22 @@ impl Setup {
         printed.lines().map(str::to_owned).collect()
     }
 
-    /// Removes the containers, volumes and networks that carry the
-    /// workspace's stable id, and with each container its anonymous
-    /// volumes.
-    fn clean_docker(&self) {
-        for container in self.containers() {
-            let _ = docker(&["rm", "--force", "--volumes", &container]);
-        }
-        for volume in self.volumes() {
-            let _ = docker(&["volume", "rm", &volume]);
-        }
-        for network in self.networks() {
-            let _ = docker(&["network", "rm", &network]);
-        }
+    /// Leaves the setup's objects and temporary directory behind with its
+    /// owner file unlocked, as a test process that was killed leaves them,
+    /// and returns the temporary directory.
+    fn leave_behind(self) -> PathBuf {
+        self.owner.release();
+        let root = self.root();
+        std::mem::forget(self);
+        root
     }
 }
 
 impl Drop for Setup {
     fn drop(&mut self) {
-        self.clean_docker();
+        if let Some(id) = self.workspace_id() {
+            remove_labelled(&format!("mxv.workspace-id={id}"));
+        }
     }
 }
 
@@ -1649,4 +1670,188 @@ fn add_leaves_alone_a_volume_of_the_workspace_manifest_whose_name_it_keeps() {
     ]);
     assert_eq!(exit, 0, "{document}");
     assert_eq!(setup.volumes(), [setup.volume_name("srv")]);
+}
+
+/// Returns the names of the docker objects of `kind` (`container`,
+/// `volume` or `network`) that carry the label `mxv.workspace-id=<id>`.
+fn labelled_with_id(kind: &str, id: &str) -> Vec<String> {
+    let filter = format!("label=mxv.workspace-id={id}");
+    let mut args = vec![kind, "ls", "--quiet", "--filter", &filter];
+    if kind == "container" {
+        args.push("--all");
+    }
+    let (_, printed) = docker(&args);
+    printed.lines().map(str::to_owned).collect()
+}
+
+/// Asserts that docker lists no container, volume or network of the
+/// workspace `id`.
+fn assert_nothing_left(id: &str) {
+    for kind in ["container", "volume", "network"] {
+        let left = labelled_with_id(kind, id);
+        assert!(left.is_empty(), "{kind}s of {id} are left: {left:?}");
+    }
+}
+
+/// The test that a killed test run leaves no container runs this test as
+/// a child process. It brings a container up, prints its workspace's
+/// stable id and its temporary directory, and waits until its standard
+/// input ends, which under nextest it does at once.
+#[test]
+#[ignore = "a_test_process_killed_after_up_leaves_no_container_once_the_next_setup_starts runs it as a child and kills it"]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the child waits on its standard input until its parent kills it"
+)]
+fn a_child_that_brings_a_container_up_and_waits() {
+    let setup = Setup::new("mxvtest-killed", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-killed"]);
+    assert_eq!(exit, 0, "{document}");
+    println!("workspace-id={}", setup.workspace_id().unwrap());
+    println!("root={}", setup.root().display());
+    let mut rest = Vec::new();
+    let _ = std::io::stdin().read_to_end(&mut rest);
+}
+
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the test runs its own binary as a child and kills it, as nextest kills a test"
+)]
+fn a_test_process_killed_after_up_leaves_no_container_once_the_next_setup_starts() {
+    use std::io::BufRead as _;
+    use std::process::{Command as Process, Stdio};
+
+    if !docker_runs("a_test_process_killed_after_up") {
+        return;
+    }
+    let mut child = Process::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "a_child_that_brings_a_container_up_and_waits",
+            "--ignored",
+            "--nocapture",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .unwrap();
+    let mut lines = std::io::BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut id = None;
+    let mut root = None;
+    while id.is_none() || root.is_none() {
+        let line = lines
+            .next()
+            .expect("the child ended before it brought its container up")
+            .unwrap();
+        if let Some(value) = line.strip_prefix("workspace-id=") {
+            id = Some(value.to_owned());
+        } else if let Some(value) = line.strip_prefix("root=") {
+            root = Some(PathBuf::from(value));
+        }
+    }
+    let (id, root) = (id.unwrap(), root.unwrap());
+    assert!(!labelled_with_id("container", &id).is_empty());
+    child.kill().unwrap();
+    child.wait().unwrap();
+
+    let _next = Setup::new("mxvtest-next", "");
+
+    let _ = fs::remove_dir_all(&root);
+    assert_nothing_left(&id);
+}
+
+#[test]
+fn a_setup_whose_temp_dir_was_deleted_leaves_no_container_once_the_next_setup_starts() {
+    if !docker_runs("a_setup_whose_temp_dir_was_deleted") {
+        return;
+    }
+    let setup = Setup::in_target_tmp("mxvtest-deleted", &web());
+    let (exit, document) = setup.json(&["up", "-w", "mxvtest-deleted"]);
+    assert_eq!(exit, 0, "{document}");
+    let id = setup.workspace_id().unwrap();
+    let root = setup.leave_behind();
+    fs::remove_dir_all(&root).unwrap();
+
+    let _next = Setup::new("mxvtest-next", "");
+
+    assert_nothing_left(&id);
+}
+
+#[test]
+fn the_sweep_keeps_the_containers_of_a_setup_that_is_still_running() {
+    if !docker_runs("the_sweep_keeps_the_containers_of_a_setup") {
+        return;
+    }
+    let first = Setup::new("mxvtest-alive", &web());
+    let (exit, document) = first.json(&["up", "-w", "mxvtest-alive"]);
+    assert_eq!(exit, 0, "{document}");
+
+    let _second = Setup::new("mxvtest-next", "");
+
+    assert_eq!(first.containers(), [first.container_name("web")]);
+    assert_eq!(first.volumes(), [first.volume_name("srv")]);
+}
+
+/// Starts a container of the image of the tests that sleeps, labelled as
+/// phase labels a container whose run record is `run_record`, and returns
+/// the guard that removes it.
+fn labelled_container(run_record: &Path) -> Foreign {
+    let id = format!("{:032x}", std::process::id());
+    let foreign = Foreign {
+        kind: "container",
+        name: format!("mxvtest-sweep-{}", std::process::id()),
+    };
+    let (started, _) = docker(&[
+        "run",
+        "--detach",
+        "--name",
+        &foreign.name,
+        "--label",
+        &format!("mxv.workspace-id={id}"),
+        "--label",
+        &format!("mxv.run-record={}", run_record.display()),
+        IMAGE,
+        "sleep",
+        "300",
+    ]);
+    assert!(started);
+    foreign
+}
+
+#[test]
+fn the_sweep_keeps_a_container_whose_run_record_is_outside_a_temp_dir() {
+    if !docker_runs("the_sweep_keeps_a_container_whose_run_record_is_outside") {
+        return;
+    }
+    let foreign = labelled_container(Path::new(
+        "/no-such-state/mxv/phase/runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json",
+    ));
+
+    let _next = Setup::new("mxvtest-next", "");
+
+    let (exists, _) = docker(&["container", "inspect", &foreign.name]);
+    assert!(exists, "the sweep removed a container outside a temp dir");
+}
+
+#[test]
+fn the_sweep_keeps_a_young_container_of_a_temp_dir_without_an_owner_file() {
+    if !docker_runs("the_sweep_keeps_a_young_container") {
+        return;
+    }
+    let unowned = tempfile::tempdir().unwrap();
+    let foreign = labelled_container(
+        &unowned
+            .path()
+            .join("runs/0b9f3c8e6a1d4f7b9c2e5d8a7b6c4e21.json"),
+    );
+
+    let _next = Setup::new("mxvtest-next", "");
+
+    let (exists, _) = docker(&["container", "inspect", &foreign.name]);
+    assert!(
+        exists,
+        "the sweep removed a young container of an old harness"
+    );
 }
