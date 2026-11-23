@@ -616,3 +616,90 @@ fn a_grant_that_another_grant_holds_the_lock_of_is_grants_busy_with_the_lock_fil
         "{busy:?}"
     );
 }
+
+#[test]
+fn the_stable_id_of_a_record_that_cannot_be_written_is_the_stores_error_and_the_record_keeps_no_id()
+{
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let mut world = World::new();
+    let runs = world.runs();
+    let store = without_stable_id(&mut world);
+    let lock = runs.lock(&world.workspace.name).unwrap();
+    let records = world.dir.path().join("workspaces");
+    let before = fs::read(store.path(&world.workspace.name)).unwrap();
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let refused = runs.stable_id(&lock, &store, &world.workspace.name);
+
+    fs::set_permissions(&records, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(refused, Err(Error::Unwritable { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(store.path(&world.workspace.name)).unwrap(), before);
+    assert_eq!(store.read(&world.workspace.name).unwrap().unwrap().id, None);
+}
+
+#[test]
+fn the_stable_id_beside_an_older_retiring_archive_without_an_id_is_archive_unfinished_and_writes_nothing()
+ {
+    let mut world = World::new();
+    let runs = world.runs();
+    let store = without_stable_id(&mut world);
+    let archive = world.dir.path().join("archives/triage");
+    fs::create_dir_all(&archive).unwrap();
+    let record = serde_json::json!({
+        "version": 2,
+        "id": "a".repeat(32),
+        "state": "retiring",
+        "time": 0,
+        "name": "triage",
+        "kind": "clone",
+        "path": "/nowhere/triage",
+        "checkouts": [],
+    });
+    write(archive.join("archive.json"), record.to_string());
+    let lock = runs.lock(&world.workspace.name).unwrap();
+    let before = fs::read(store.path(&world.workspace.name)).unwrap();
+
+    let refused = runs.stable_id(&lock, &store, &world.workspace.name);
+
+    assert!(
+        matches!(
+            refused,
+            Err(Error::ArchiveUnfinished { ref name, readable: true }) if name == &world.workspace.name
+        ),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(store.path(&world.workspace.name)).unwrap(), before);
+}
+
+#[test]
+fn the_stable_id_of_a_record_deleted_while_the_caller_waited_for_the_lock_is_record_missing() {
+    let mut world = World::new();
+    let runs = world.runs();
+    let store = without_stable_id(&mut world);
+    let held = runs.lock(&world.workspace.name).unwrap();
+    let waiter = {
+        let runs = runs.clone();
+        let store = Store::new(world.dir.path().join("workspaces"));
+        let name = world.workspace.name.clone();
+        std::thread::spawn(move || {
+            let lock = runs.lock(&name).unwrap();
+            runs.stable_id(&lock, &store, &name)
+        })
+    };
+    // An `mxv archive` or `mxv remove` that holds the lock deletes the
+    // record before it releases the lock.
+    fs::remove_file(store.path(&world.workspace.name)).unwrap();
+    drop(held);
+
+    let gone = waiter.join().unwrap();
+
+    assert!(
+        matches!(gone, Err(Error::RecordMissing { ref name }) if name == &world.workspace.name),
+        "{gone:?}"
+    );
+    assert!(!store.path(&world.workspace.name).exists());
+}

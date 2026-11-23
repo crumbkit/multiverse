@@ -22,6 +22,24 @@ fn a_record_that_is_gone_at_a_write_reads_as_a_workspace_that_is_not_found() {
 }
 
 #[test]
+fn a_workspace_replaced_during_a_lock_wait_is_not_found_and_names_the_new_stable_id() {
+    let failure = MxvFailure::Replaced {
+        name: "triage".to_owned(),
+        id: Some("0123456789abcdef0123456789abcdef".to_owned()),
+    };
+
+    assert_eq!(failure.code(), WORKSPACE_NOT_FOUND);
+    assert_eq!(
+        failure.to_string(),
+        "the workspace triage was archived or removed while mxv waited for its lock, and another workspace, with the stable id 0123456789abcdef0123456789abcdef, took the name, so mxv changed nothing; run the command again to act on the new workspace"
+    );
+    let Recovery::Hint(hint) = failure.recovery() else {
+        panic!("{failure:?} offers no hint");
+    };
+    assert!(hint.contains("run the command again"), "{hint}");
+}
+
+#[test]
 fn a_restore_whose_records_changed_after_the_question_offers_its_dry_run() {
     let failure = MxvFailure::RestoreChanged {
         name: "triage".to_owned(),

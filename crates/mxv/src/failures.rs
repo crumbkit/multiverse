@@ -251,6 +251,17 @@ pub(crate) enum MxvFailure {
         /// The name.
         name: String,
     },
+    /// Another workspace took the name while the command waited for the
+    /// workspace's lock, such as through `mxv archive` and then
+    /// `mxv restore` or `mxv new`, so the workspace that the command found
+    /// is gone.
+    Replaced {
+        /// The name.
+        name: String,
+        /// The stable id of the workspace that holds the name now, or
+        /// `None` when its record holds none.
+        id: Option<String>,
+    },
     /// `mxv new` did not finish the workspace, so its record names
     /// checkouts that may be missing or partial.
     Creating {
@@ -697,7 +708,7 @@ const fn unmerged(allow: Allow) -> Allow {
 impl Failure for MxvFailure {
     fn code(&self) -> Code<'_> {
         match self {
-            Self::NotFound { .. } => WORKSPACE_NOT_FOUND,
+            Self::NotFound { .. } | Self::Replaced { .. } => WORKSPACE_NOT_FOUND,
             Self::Creating { .. } => WORKSPACE_CREATING,
             Self::Exists { .. } => WORKSPACE_EXISTS,
             Self::BadName { .. } => WORKSPACE_BAD_NAME,
@@ -783,6 +794,9 @@ impl Failure for MxvFailure {
     fn recovery(&self) -> Recovery {
         match self {
             Self::NotFound { .. } => Recovery::Run(Call::new(&["list"])),
+            Self::Replaced { .. } => Recovery::hint(
+                "run the command again, which acts on the workspace that holds the name now",
+            ),
             Self::Creating { name } => Recovery::hint(format!(
                 "run `mxv remove {name}`, which removes what the stopped `mxv new` made, then `mxv new` again"
             )),
@@ -951,6 +965,11 @@ impl Failure for MxvFailure {
             | Self::RepairChanged { name }
             | Self::RestoreChanged { name } => {
                 vec![Field::new("name", name)]
+            }
+            Self::Replaced { name, id } => {
+                let mut fields = vec![Field::new("name", name)];
+                fields.extend(id.as_ref().map(|id| Field::new("id", id)));
+                fields
             }
             Self::Dirty { name, changes, .. } => vec![
                 Field::new("name", name),
@@ -1448,10 +1467,24 @@ fn add_message(failure: &MxvFailure) -> String {
     }
 }
 
+/// Writes the message of [`MxvFailure::Replaced`] for the workspace `name`,
+/// whose name another workspace, with the stable id `id`, took.
+fn replaced(formatter: &mut fmt::Formatter<'_>, name: &str, id: Option<&str>) -> fmt::Result {
+    let replacement = id.map_or_else(
+        || "another workspace without a stable id".to_owned(),
+        |id| format!("another workspace, with the stable id {id},"),
+    );
+    write!(
+        formatter,
+        "the workspace {name} was archived or removed while mxv waited for its lock, and {replacement} took the name, so mxv changed nothing; run the command again to act on the new workspace"
+    )
+}
+
 impl fmt::Display for MxvFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound { name } => write!(formatter, "no workspace is named {name}"),
+            Self::Replaced { name, id } => replaced(formatter, name, id.as_deref()),
             Self::Creating { name } => write!(
                 formatter,
                 "mxv new did not finish the workspace {name}, so its checkouts may be missing or partial"
@@ -1609,6 +1642,7 @@ impl std::error::Error for MxvFailure {
             Self::Library(error) => error.source(),
             Self::ConfigUnreadable { source, .. } => Some(source),
             Self::NotFound { .. }
+            | Self::Replaced { .. }
             | Self::Creating { .. }
             | Self::Exists { .. }
             | Self::Dirty { .. }

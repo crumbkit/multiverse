@@ -197,26 +197,26 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
 }
 
 /// Returns the stable id that the record of the workspace `name` holds on
-/// disk. When the record holds none, `store` mints one and saves the record
-/// with it first, unless an archive record of the name holds the mint, and
-/// then it returns [`Error::ArchiveUnfinished`] before anything starts.
+/// disk, as [`id_of_record`] does.
 pub(super) fn saved_workspace_id(
     store: &Store,
     name: &WorkspaceName,
 ) -> Result<WorkspaceId, Error> {
-    let no_id = |reason: &str| Error::DockerFailed {
-        operation: "workspace id".to_owned(),
-        container: None,
-        message: format!("mxv cannot name the workspace's containers, because {reason}"),
-        docker_line: None,
-    };
-    let mut record = store
+    let record = store
         .read(name)?
-        .ok_or_else(|| no_id("the workspace has no record"))?;
+        .ok_or_else(|| no_workspace_id("the workspace has no record"))?;
+    id_of_record(store, record)
+}
+
+/// Returns the stable id that `record`, read from `store`, holds. When it
+/// holds none, `store` mints one and saves the record with it first,
+/// unless an archive record of the name holds the mint, and then it
+/// returns [`Error::ArchiveUnfinished`] before anything starts.
+fn id_of_record(store: &Store, mut record: Workspace) -> Result<WorkspaceId, Error> {
     if record.id.is_none() {
-        if let Some(held) = store.mint_held(name) {
+        if let Some(held) = store.mint_held(&record.name) {
             return Err(Error::ArchiveUnfinished {
-                name: name.clone(),
+                name: record.name.clone(),
                 readable: held == MintHeld::OlderRetiring,
             });
         }
@@ -224,7 +224,18 @@ pub(super) fn saved_workspace_id(
     }
     record
         .id
-        .ok_or_else(|| no_id("the workspace's record holds no stable id"))
+        .ok_or_else(|| no_workspace_id("the workspace's record holds no stable id"))
+}
+
+/// Returns the failure of a workspace whose containers mxv cannot name,
+/// because of `reason`.
+fn no_workspace_id(reason: &str) -> Error {
+    Error::DockerFailed {
+        operation: "workspace id".to_owned(),
+        container: None,
+        message: format!("mxv cannot name the workspace's containers, because {reason}"),
+        docker_line: None,
+    }
 }
 
 /// Returns the exit code and the signal that a shell's `code` means: a code
@@ -484,8 +495,11 @@ impl Runs {
     /// # Errors
     ///
     /// Returns [`Error::WrongLock`] when `lock` holds another workspace,
+    /// [`Error::RecordMissing`] when the record is gone, such as when an
+    /// `mxv archive` or `mxv remove` held the lock first and deleted it,
     /// [`Error::ArchiveUnfinished`] when an archive record of the name
-    /// holds the mint, and the errors of [`Store::update`].
+    /// holds the mint, and the errors of [`Store::read`] and
+    /// [`Store::update`].
     pub fn stable_id(
         &self,
         lock: &WorkspaceLock,
@@ -493,7 +507,10 @@ impl Runs {
         name: &WorkspaceName,
     ) -> Result<WorkspaceId, Error> {
         lock.check(name)?;
-        saved_workspace_id(store, name)
+        let record = store
+            .read(name)?
+            .ok_or_else(|| Error::RecordMissing { name: name.clone() })?;
+        id_of_record(store, record)
     }
 
     /// Returns whether the grant of `workspace`'s repository covers the
