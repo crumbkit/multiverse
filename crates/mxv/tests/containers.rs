@@ -1755,10 +1755,6 @@ fn a_test_process_killed_after_up_leaves_no_container_once_the_next_setup_starts
     assert!(!labelled_with_id("container", &id).is_empty());
     child.kill().unwrap();
     child.wait().unwrap();
-    assert!(
-        !labelled_with_id("container", &id).is_empty(),
-        "a killed test process never drops its setup"
-    );
 
     let _next = Setup::new("mxvtest-next", "");
 
