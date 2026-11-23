@@ -27,6 +27,14 @@ workspace may need to act on.
 - `mxv down` of a named process that has exited, while a running process
   depends on it, succeeds and reports it stopped. Before, it failed with
   `mxv::process::still_needed`.
+- `Workspaces::check_manifest_source` refuses a manifest that lies in a
+  tracked directory shaped like a bare repository, one holding `HEAD`,
+  `objects/` and `refs/`, or below one, inside a git work tree. Before
+  this fix git took that directory for a bare repository, the check found
+  no work tree and trusted the manifest, and `mxv new --manifest` would
+  have deleted its `disposable` globs without asking. The check also
+  refuses a manifest inside a clone's own `.git` directory, which it
+  trusted before.
 
 ## [0.7.0] - 2026-11-22
 

@@ -22,7 +22,8 @@ written, which is the only case in which its `disposable` globs count as
 the person's own. `find_template` picks the template of workspace
 manifests that lists a repository's origin, and
 `Workspaces::check_manifest_source` refuses a `--manifest` file inside a
-git work tree or under the workspace root. `Runs` starts, stops and reports the processes it declares,
+git work tree or under the workspace root, including one in a tracked
+directory shaped like a bare repository inside a work tree. `Runs` starts, stops and reports the processes it declares,
 with a host port for each named port that the workspace's record keeps. The
 process supervision uses Unix process groups and signals, so it runs on
 Linux and macOS. The library reads no environment

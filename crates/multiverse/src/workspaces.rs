@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::archive::KeptRef;
-use crate::backend::{Backend, INITIALIZING, RefHolder};
+use crate::backend::{Backend, INITIALIZING, RefHolder, Repository};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
 use crate::git::{FETCH_DEADLINE, LOCAL_DEADLINE};
@@ -1295,7 +1295,11 @@ impl<B: Backend> Workspaces<B> {
     /// `disposable` globs are deleted without asking, so mxv refuses a file
     /// that a repository or an agent could have written: one that lies,
     /// once symbolic links are resolved, under `root`, the root of the
-    /// workspaces, or inside a git work tree.
+    /// workspaces, or inside a git work tree. When git finds no work tree
+    /// at the file's directory, the check asks again of each ancestor up
+    /// to the filesystem root, so a tracked directory shaped like a bare
+    /// repository, which git takes for a repository without a work tree,
+    /// does not hide the work tree that holds it.
     ///
     /// # Errors
     ///
@@ -1318,18 +1322,19 @@ impl<B: Backend> Workspaces<B> {
         let Some(dir) = resolved.parent() else {
             return Ok(());
         };
-        match self.backend.repository(dir) {
-            Ok(repository) => Err(untrusted(format!(
-                "it lies inside the git work tree {}",
-                repository.root.display()
-            ))),
-            Err(Error::NoOrigin { repository }) => Err(untrusted(format!(
-                "it lies inside the git work tree {}",
-                repository.display()
-            ))),
-            Err(Error::RepositoryNotFound { .. }) => Ok(()),
-            Err(error) => Err(error),
+        for ancestor in dir.ancestors() {
+            match self.backend.repository(ancestor) {
+                Ok(Repository { root, .. }) | Err(Error::NoOrigin { repository: root }) => {
+                    return Err(untrusted(format!(
+                        "it lies inside the git work tree {}",
+                        root.display()
+                    )));
+                }
+                Err(Error::RepositoryNotFound { .. }) => {}
+                Err(error) => return Err(error),
+            }
         }
+        Ok(())
     }
 
     /// Creates the workspace as [`Workspaces::create`] does, and writes
