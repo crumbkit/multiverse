@@ -5,8 +5,28 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Added
+
+- `Runs::stable_id` returns a workspace's stable id, and mints and saves
+  one when the record holds none, only while the caller holds the
+  workspace's lock.
+- `Error::GrantsBusy` reports a grant that waited for all of the lock wait
+  for another grant of the same repository. mxv reports it as
+  `mxv::grants::busy`. Before, it was `Error::Busy` and
+  `mxv::workspace::busy`.
+
+### Changed
+
+- `Runs::granting` takes the workspace's stable id in place of a `Store`,
+  and writes nothing. A caller gets the id from `Runs::stable_id` first.
+- `mxv up` without names after `mxv reclaim` asks a person to grant only
+  the permissions of the processes that it starts again.
+
 ### Fixed
 
+- `mxv down` of a named process that has exited, while a running process
+  depends on it, succeeds and reports it stopped. Before, it failed with
+  `mxv::process::still_needed`.
 - `Workspaces::check_manifest_source` refuses a manifest that lies in a
   tracked directory shaped like a bare repository, one holding `HEAD`,
   `objects/` and `refs/`, or below one, inside a git work tree. Before

@@ -3241,6 +3241,34 @@ fn down_stops_a_unit_whose_only_dependant_has_exited() {
 }
 
 #[test]
+fn down_of_a_unit_that_exited_while_a_unit_that_needs_it_runs_succeeds_and_reports_it_stopped() {
+    let setup = Setup::new();
+    setup.workspace(
+        "triage",
+        "[processes.store]\nargv = [\"sh\", \"-c\", \"echo ready; sleep 1; exit 0\"]\nready = { log = \"^ready$\" }\n\n[processes.api]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\ndepends_on = [\"store\"]\n",
+    );
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    for () in waiting() {
+        if state_of(&setup, "store") != "running" {
+            break;
+        }
+    }
+    assert_ne!(state_of(&setup, "store"), "running");
+    let api = pid_of(&setup, "triage", "api");
+
+    let (exit, document) = setup.json(&["down", "-w", "triage", "store"]);
+
+    assert_eq!(exit, 0, "{document}");
+    assert!(!document.to_string().contains("still_needed"), "{document}");
+    assert_eq!(row(&document, "store")["state"], "stopped", "{document}");
+    // phase keeps how store ended while api runs, so status still shows it.
+    assert_eq!(state_of(&setup, "store"), "exited");
+    assert_eq!(state_of(&setup, "api"), "running");
+    assert_eq!(pid_of(&setup, "triage", "api"), api);
+}
+
+#[test]
 fn down_keeps_a_needed_unit_when_the_manifest_no_longer_parses() {
     let setup = Setup::new();
     setup.workspace("triage", &store_and_api("echo ready; exec sleep 60"));

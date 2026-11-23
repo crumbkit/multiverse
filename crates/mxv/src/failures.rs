@@ -159,6 +159,10 @@ pub const PORT_EXHAUSTED: Code = Code::from_spelling("mxv::port::exhausted");
 /// The code of a workspace whose lock another mxv command holds, such as an
 /// `mxv up` that still waits for a unit to be ready.
 pub const WORKSPACE_BUSY: Code = Code::from_spelling("mxv::workspace::busy");
+/// The code of a repository's grant file whose lock another mxv command
+/// holds, such as one that grants the permissions of the same repository's
+/// units.
+pub const GRANTS_BUSY: Code = Code::from_spelling("mxv::grants::busy");
 /// The code of a workspace that `mxv new` did not finish, for a command
 /// that needs a finished one.
 pub const WORKSPACE_CREATING: Code = Code::from_spelling("mxv::workspace::creating");
@@ -587,6 +591,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     PROCESS_UNSUPPORTED_OS,
     PORT_EXHAUSTED,
     WORKSPACE_BUSY,
+    GRANTS_BUSY,
     WORKSPACE_CREATING,
     WORKSPACE_STATE_CHANGED,
     WORKSPACE_TRANSITION_REFUSED,
@@ -739,6 +744,7 @@ impl Failure for MxvFailure {
                 Error::UnsupportedOs { .. } => PROCESS_UNSUPPORTED_OS,
                 Error::NoFreePort { .. } => PORT_EXHAUSTED,
                 Error::Busy { .. } => WORKSPACE_BUSY,
+                Error::GrantsBusy { .. } => GRANTS_BUSY,
                 Error::StateChanged { .. } => WORKSPACE_STATE_CHANGED,
                 Error::TransitionRefused { .. } => WORKSPACE_TRANSITION_REFUSED,
                 Error::MismatchedCheckout { .. } => WORKSPACE_MISMATCHED_CHECKOUT,
@@ -1164,6 +1170,9 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::Busy { .. } => Recovery::hint(
             "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a unit to be ready, and run the command again",
         ),
+        Error::GrantsBusy { .. } => Recovery::hint(
+            "another mxv command is granting permissions to this repository; run the command again when it finishes",
+        ),
         Error::DatedNamesTaken { name, last } => Recovery::hint(format!(
             "rename or remove a workspace or archive that holds a dated name of {name}, such as {last}, then run `mxv repair {name}` again"
         )),
@@ -1256,7 +1265,8 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         Error::StateUnreadable { path, .. }
         | Error::CorruptRecord { path, .. }
         | Error::Unwritable { path, .. }
-        | Error::Busy { path } => vec![Field::new("path", shown(path))],
+        | Error::Busy { path }
+        | Error::GrantsBusy { path } => vec![Field::new("path", shown(path))],
         Error::StateChanged { name } | Error::ArchiveUnfinished { name, .. } => {
             vec![Field::new("name", name.as_str())]
         }

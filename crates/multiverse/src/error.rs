@@ -274,6 +274,13 @@ pub enum Error {
         /// The lock file.
         path: PathBuf,
     },
+    /// Another mxv command holds the lock of a repository's grant file,
+    /// such as one that grants the permissions of the same repository's
+    /// units, for all of the lock wait, so the grant wrote nothing.
+    GrantsBusy {
+        /// The grant file's lock file.
+        path: PathBuf,
+    },
     /// Every dated name that a repair tries for an older archive, from
     /// `NAME-<date>` to `NAME-<date>-<most>`, is taken by a workspace, an
     /// archive or a directory, so the repair changed nothing.
@@ -855,6 +862,11 @@ impl fmt::Display for Error {
                 "another mxv command holds the lock {} and has not released it",
                 path.display()
             ),
+            Self::GrantsBusy { path } => write!(
+                formatter,
+                "another mxv command holds the grant lock {} and has not released it",
+                path.display()
+            ),
             Self::DatedNamesTaken { .. } | Self::StoppedRestoreHoldsOtherFiles { .. } => {
                 self.fmt_repair(formatter)
             }
@@ -943,7 +955,7 @@ impl Error {
         let code = error.code();
         match error {
             P::Busy { .. } => Self::Busy { path: run_record },
-            P::GrantsBusy { path, .. } => Self::Busy { path },
+            P::GrantsBusy { path, .. } => Self::GrantsBusy { path },
             P::RecordUnreadable { path, reason, .. } => Self::StateUnreadable {
                 path,
                 source: io::Error::other(reason),
@@ -1103,6 +1115,7 @@ impl std::error::Error for Error {
             | Self::ProcessTable { .. }
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
+            | Self::GrantsBusy { .. }
             | Self::DatedNamesTaken { .. }
             | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::MirrorBusy { .. }

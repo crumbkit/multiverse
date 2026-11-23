@@ -9,9 +9,10 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
-use phase::{Cancel, VariableName};
+use phase::{Cancel, VariableName, WorkspaceId};
 
 use super::{Admission, Asked, BuildEnd, BuildStop, Place};
+use crate::Error;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
 use crate::record::{Checkout, Workspace};
@@ -171,14 +172,14 @@ impl World {
         let store = Store::new(self.dir.path().join("workspaces"));
         // A person at a terminal grants the units' permissions, as `mxv up`
         // asks before it takes the lock.
+        let lock = runs.lock(&self.workspace.name).unwrap();
+        let id = runs.stable_id(&lock, &store, &self.workspace.name).unwrap();
         if !self.ungranted
-            && let Granting::Asks(ask) = runs
-                .granting(&store, &self.workspace, &manifest, &[])
-                .unwrap()
+            && let Granting::Asks(ask) =
+                runs.granting(&id, &self.workspace, &manifest, &[]).unwrap()
         {
             runs.grant(&ask).unwrap();
         }
-        let lock = runs.lock(&self.workspace.name).unwrap();
         let end = runs
             .build(
                 &lock,
@@ -483,4 +484,135 @@ fn the_deadline_ends_a_build_whose_output_nobody_reads() {
     assert_eq!(ended, BuildEnded::TimedOut("api".to_owned()));
     assert!(took < Duration::from_secs(20), "{took:?}");
     assert_eq!(admission.log.borrow().ended, [None]);
+}
+
+/// A manifest whose one unit declares no permissions, so it runs outside
+/// the sandbox and asks for a grant.
+const UNSANDBOXED: &str = "[processes.api]\nargv = [\"true\"]\n";
+
+/// Rewrites the record of `world`'s workspace as an earlier mxv wrote it,
+/// without a stable id, and returns the store that holds it.
+fn without_stable_id(world: &mut World) -> Store {
+    let store = Store::new(world.dir.path().join("workspaces"));
+    let path = store.path(&world.workspace.name);
+    let mut record: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    record.as_object_mut().unwrap().remove("id");
+    record["version"] = 2.into();
+    write(&path, record.to_string());
+    world.workspace.id = None;
+    assert_eq!(store.read(&world.workspace.name).unwrap().unwrap().id, None);
+    store
+}
+
+#[test]
+fn granting_leaves_the_record_of_a_workspace_without_a_stable_id_unchanged() {
+    let mut world = World::new();
+    let runs = world.runs();
+    let manifest = Manifest::parse(UNSANDBOXED, Path::new("mxv.toml")).unwrap();
+    let store = without_stable_id(&mut world);
+    let record = store.path(&world.workspace.name);
+    let before = fs::read(&record).unwrap();
+
+    let granting = runs
+        .granting(
+            &WorkspaceId::mint().unwrap(),
+            &world.workspace,
+            &manifest,
+            &[],
+        )
+        .unwrap();
+
+    assert!(matches!(granting, Granting::Asks(_)));
+    assert_eq!(fs::read(&record).unwrap(), before);
+    assert_eq!(store.read(&world.workspace.name).unwrap().unwrap().id, None);
+}
+
+#[test]
+fn the_stable_id_is_saved_under_the_workspaces_lock_and_read_back_after() {
+    let mut world = World::new();
+    let runs = world.runs();
+    let store = without_stable_id(&mut world);
+    let lock = runs.lock(&world.workspace.name).unwrap();
+
+    let id = runs
+        .stable_id(&lock, &store, &world.workspace.name)
+        .unwrap();
+
+    let saved = store.read(&world.workspace.name).unwrap().unwrap().id;
+    assert_eq!(saved.as_ref(), Some(&id));
+    assert_eq!(
+        runs.stable_id(&lock, &store, &world.workspace.name)
+            .unwrap(),
+        id
+    );
+}
+
+#[test]
+fn the_stable_id_refuses_the_lock_of_another_workspace_and_writes_nothing() {
+    let mut world = World::new();
+    let runs = world.runs();
+    let store = without_stable_id(&mut world);
+    let other: WorkspaceName = "other".parse().unwrap();
+    let lock = runs.lock(&other).unwrap();
+    let record = store.path(&world.workspace.name);
+    let before = fs::read(&record).unwrap();
+
+    let refused = runs.stable_id(&lock, &store, &world.workspace.name);
+
+    assert!(
+        matches!(refused, Err(Error::WrongLock { .. })),
+        "{refused:?}"
+    );
+    assert_eq!(fs::read(&record).unwrap(), before);
+}
+
+/// Returns every lock file of a grant under `dir`.
+fn grant_locks(dir: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut left = vec![dir.to_path_buf()];
+    while let Some(next) = left.pop() {
+        for entry in fs::read_dir(&next).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                left.push(path);
+            } else if path
+                .extension()
+                .is_some_and(|extension| extension == "lock")
+                && path.parent().and_then(Path::file_name) == Some("grants".as_ref())
+            {
+                found.push(path);
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn a_grant_that_another_grant_holds_the_lock_of_is_grants_busy_with_the_lock_file() {
+    let world = World::new();
+    let runs = world.runs().with_lock_wait(Duration::from_millis(50));
+    let manifest = Manifest::parse(UNSANDBOXED, Path::new("mxv.toml")).unwrap();
+    let Granting::Asks(ask) = runs
+        .granting(
+            &WorkspaceId::mint().unwrap(),
+            &world.workspace,
+            &manifest,
+            &[],
+        )
+        .unwrap()
+    else {
+        panic!("the unsandboxed unit asks for nothing");
+    };
+    runs.grant(&ask).unwrap();
+    let locks = grant_locks(world.dir.path());
+    assert_eq!(locks.len(), 1, "{locks:?}");
+    let _held = crate::store::lock(&locks[0], Duration::ZERO).unwrap();
+
+    let busy = runs.grant(&ask);
+
+    assert!(
+        matches!(&busy, Err(Error::GrantsBusy { path }) if path == &locks[0]),
+        "{busy:?}"
+    );
 }

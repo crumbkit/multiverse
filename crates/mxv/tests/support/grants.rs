@@ -34,7 +34,22 @@ pub(crate) fn grant_all(state: &Path) {
         let Ok(Some(manifest)) = workspace.manifest() else {
             continue;
         };
-        if let Ok(Granting::Asks(ask)) = runs.granting(&store, &workspace, &manifest, &[]) {
+        // `mxv up` saves a missing stable id under the workspace's lock
+        // before it asks, and so does this grant. A workspace whose lock
+        // another command holds asks for nothing here.
+        let id = match &workspace.id {
+            Some(id) => id.clone(),
+            None => {
+                let Ok(lock) = runs.lock(&workspace.name) else {
+                    continue;
+                };
+                let Ok(id) = runs.stable_id(&lock, &store, &workspace.name) else {
+                    continue;
+                };
+                id
+            }
+        };
+        if let Ok(Granting::Asks(ask)) = runs.granting(&id, &workspace, &manifest, &[]) {
             runs.grant(&ask).unwrap();
         }
     }

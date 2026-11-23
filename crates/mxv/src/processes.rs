@@ -453,18 +453,49 @@ fn build<'lock>(
     }
 }
 
-/// Asks the person at the terminal to grant the permissions that the
-/// context's units ask for beyond the grant of the workspace's repository,
-/// and adds them to the grant on yes. It runs before the workspace's lock,
-/// so a person who walks away from the question keeps no other command of
-/// the workspace waiting. Without a terminal, or with `--no-input`, it asks
+/// Returns the units that `up` starts in `workspace` when the command line
+/// names `named`: `named` itself, or, when it is empty and `mxv reclaim`
+/// marked the workspace, the marked units that `manifest` still declares.
+/// An empty result means every unit of the manifest. When another
+/// `mxv up` starts the last marked units between the question and the
+/// lock, the selection under the lock becomes every unit, and the build
+/// refuses with `mxv::permissions::not_granted`; nothing starts, and
+/// running the command again asks again.
+fn selection(workspace: &Workspace, manifest: &Manifest, named: &[String]) -> Vec<String> {
+    match &workspace.reclaimed {
+        // `mxv reclaim` recorded what ran, so `up` starts the same
+        // processes again. A name that the manifest no longer declares is
+        // left out.
+        Some(reclaimed) if named.is_empty() => reclaimed
+            .processes
+            .iter()
+            .filter(|name| manifest.unit(name).is_some())
+            .cloned()
+            .collect(),
+        _ => named.to_vec(),
+    }
+}
+
+/// Asks the person at the terminal to grant the permissions that the units
+/// `units` returns for the workspace's manifest ask for beyond the grant of
+/// the workspace's repository, and adds them to the grant on yes. It runs
+/// before the command takes the workspace's lock for its builds and
+/// starts, so a person who walks away from the question keeps no other
+/// command of the workspace waiting. A workspace whose record holds no
+/// stable id gets one first, saved under the lock, which it releases
+/// before it asks. Without a terminal, or with `--no-input`, it asks
 /// nothing, and the check under the lock refuses.
 ///
 /// # Errors
 ///
 /// Returns [`RunFailure::PermissionsNotGranted`] when the answer is not
-/// yes, and the failures of reading or writing the grant.
-fn ask_first(output: &Run, context: &Context) -> Result<(), crumbkit::Error> {
+/// yes, the failures of taking the lock and saving the id, and the
+/// failures of reading or writing the grant.
+fn ask_first(
+    output: &Run,
+    context: &Context,
+    units: impl FnOnce(&Manifest) -> Vec<String>,
+) -> Result<(), crumbkit::Error> {
     if output.no_input() || !crate::person_can_answer() {
         return Ok(());
     }
@@ -472,14 +503,21 @@ fn ask_first(output: &Run, context: &Context) -> Result<(), crumbkit::Error> {
     let Ok(manifest) = required_manifest(&context.workspace) else {
         return Ok(());
     };
+    let id = match &context.workspace.id {
+        Some(id) => id.clone(),
+        None => {
+            let name = &context.workspace.name;
+            let lock = context.runs.lock(name).map_err(MxvFailure::from)?;
+            context
+                .runs
+                .stable_id(&lock, &context.store, name)
+                .map_err(MxvFailure::from)?
+        }
+    };
+    let names = units(&manifest);
     let granting = context
         .runs
-        .granting(
-            &context.store,
-            &context.workspace,
-            &manifest,
-            &context.processes,
-        )
+        .granting(&id, &context.workspace, &manifest, &names)
         .map_err(MxvFailure::from)?;
     let Granting::Asks(ask) = granting else {
         return Ok(());
@@ -538,25 +576,16 @@ pub(crate) fn up(
     served: &mut Served,
 ) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
-    ask_first(output, &context)?;
+    // The question names the units that `up` starts, which the reclaim
+    // mark narrows when the command line names none.
+    ask_first(output, &context, |manifest| {
+        selection(&context.workspace, manifest, &context.processes)
+    })?;
     crate::preflight::announce(environment, &context.workspace);
     let lock = context.lock_live()?;
     context.mark(&lock)?;
-    if context.processes.is_empty()
-        && let Some(reclaimed) = &context.workspace.reclaimed
-        && let Ok(Some(manifest)) = context.workspace.manifest()
-    {
-        // `mxv reclaim` recorded what ran, so `up` starts the same
-        // processes again. A name that the manifest no longer declares is
-        // left out.
-        context.processes = reclaimed
-            .processes
-            .iter()
-            .filter(|name| manifest.unit(name).is_some())
-            .cloned()
-            .collect();
-    }
     let manifest = required_manifest(&context.workspace)?;
+    context.processes = selection(&context.workspace, &manifest, &context.processes);
     let passed = match build(environment, &mut context, &lock, &manifest)? {
         Ok(passed) => passed,
         Err(interrupted) => return Ok(Err(interrupted)),
@@ -827,7 +856,7 @@ pub(crate) fn restart(
         }
         .into());
     }
-    ask_first(output, &context)?;
+    ask_first(output, &context, |_| context.processes.clone())?;
     let lock = context.lock_live()?;
     context.mark(&lock)?;
     let passed = match build(environment, &mut context, &lock, &manifest)? {

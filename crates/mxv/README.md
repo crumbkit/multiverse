@@ -662,7 +662,10 @@ host processes and their dependencies with that grant. A process that is
 new, that adds a `write`, `listen` or `connect` entry, or that loses its
 `permissions` table asks for more. At a terminal, mxv lists what each one
 asks for and asks `Grant them? [y/N]`, and a yes widens the grant for
-every workspace of the repository. Without a terminal, or with
+every workspace of the repository. After `mxv reclaim`, `mxv up` without
+names asks only about the processes that it starts again. A grant that
+waits more than 5 seconds for another mxv command's grant of the same
+repository fails with `mxv::grants::busy` and starts nothing. Without a terminal, or with
 `--no-input`, the command fails with `mxv::permissions::not_granted` and
 changes nothing, and `mxv exec` refuses the same way. No flag or variable
 approves a grant. A change that keeps or narrows permissions asks nothing,
