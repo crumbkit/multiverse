@@ -404,3 +404,139 @@ fn a_workspace_under_a_second_profile_reads_its_own_manifest_file_and_ignores_mx
     let refused = read.manifest().unwrap_err();
     assert!(refused.to_string().contains("`mxv-`"), "{refused}");
 }
+
+/// Returns the host data of the profile `example` with `values`.
+fn example_data(values: &[(&str, String)]) -> crate::record::HostData {
+    let values = values
+        .iter()
+        .map(|(key, value)| (crate::record::HostKey::new(key).unwrap(), value.clone()))
+        .collect();
+    crate::record::HostData::new(example().name().clone(), values)
+}
+
+#[test]
+fn set_host_data_refuses_a_workspace_that_another_profile_owns() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let fixture = fixture();
+    let example = hosted(&base, &base.join("mirrors"), &example());
+    example.create(&fixture);
+    let data = example_data(&[("runner", "local".to_owned())]);
+    let written = example.workspaces.set_host_data(&name(), data).unwrap();
+    assert_eq!(written.version, crate::record::HOST_RECORD_VERSION);
+    let record = base.join("state/triage.json");
+    let before = fs::read(&record).unwrap();
+    // mxv's profile reads the same state directory.
+    let mxv = hosted(&base, &base.join("mirrors"), &Host::mxv());
+
+    let owner = |error: crate::error::Error| match error {
+        crate::error::Error::OtherHost { workspace, owner } => {
+            assert_eq!(workspace, name());
+            owner.to_string()
+        }
+        other => panic!("{other:?}"),
+    };
+    let mxv_data = crate::record::HostData::new(Host::mxv().name().clone(), Default::default());
+    let refused = mxv.workspaces.set_host_data(&name(), mxv_data).unwrap_err();
+    assert_eq!(owner(refused), "example");
+    let refused = mxv
+        .workspaces
+        .plan_removal(&name(), crate::workspaces::Allow::default())
+        .unwrap_err();
+    assert_eq!(owner(refused), "example");
+    let refused = mxv
+        .workspaces
+        .plan_archive(
+            &mxv.archives,
+            &name(),
+            ArchiveOptions::default(),
+            Mode::Change,
+        )
+        .unwrap_err();
+    assert_eq!(owner(refused), "example");
+    assert_eq!(
+        fs::read(&record).unwrap(),
+        before,
+        "a refusal wrote the record"
+    );
+    assert!(example.checkout().is_dir());
+}
+
+#[test]
+fn host_data_over_its_limits_is_refused_before_anything_is_written() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let fixture = fixture();
+    let example = hosted(&base, &base.join("mirrors"), &example());
+    let too_many: Vec<(String, String)> = (0..=crate::record::MOST_HOST_VALUES)
+        .map(|index| (format!("key-{index}"), "x".to_owned()))
+        .collect();
+    let too_many: Vec<(&str, String)> = too_many
+        .iter()
+        .map(|(key, value)| (key.as_str(), value.clone()))
+        .collect();
+    let too_long = [("notes", "x".repeat(crate::record::MOST_HOST_DATA_BYTES + 1))];
+    for values in [too_many.as_slice(), too_long.as_slice()] {
+        let options = crate::workspaces::CreateOptions::new(None, Some(example_data(values)));
+        let refused = example.workspaces.create_with(
+            &example.root,
+            &name(),
+            &[crate::workspaces::Repo::new(&fixture.clone)],
+            Mode::Change,
+            options,
+        );
+        assert!(
+            matches!(refused, Err(crate::error::Error::HostDataTooLarge { .. })),
+            "{refused:?}"
+        );
+        assert!(!base.join("state/triage.json").exists());
+        assert!(!example.root.join("triage").exists());
+    }
+    example.create(&fixture);
+    let record = base.join("state/triage.json");
+    let before = fs::read(&record).unwrap();
+    for values in [too_many.as_slice(), too_long.as_slice()] {
+        let refused = example
+            .workspaces
+            .set_host_data(&name(), example_data(values));
+        assert!(
+            matches!(refused, Err(crate::error::Error::HostDataTooLarge { .. })),
+            "{refused:?}"
+        );
+        assert_eq!(fs::read(&record).unwrap(), before);
+    }
+}
+
+#[test]
+fn a_workspace_created_with_host_data_reads_it_back_after_its_archive_is_renamed() {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let fixture = fixture();
+    let example = hosted(&base, &base.join("mirrors"), &example());
+    let data = example_data(&[("release", "0.7.0".to_owned())]);
+    let options = crate::workspaces::CreateOptions::new(None, Some(data.clone()));
+    let created = example
+        .workspaces
+        .create_with(
+            &example.root,
+            &name(),
+            &[crate::workspaces::Repo::new(&fixture.clone)],
+            Mode::Change,
+            options,
+        )
+        .unwrap();
+    assert!(matches!(created, NewOutcome::Created(_)), "{created:?}");
+    let read = example.workspaces.find(&name()).unwrap().unwrap();
+    assert_eq!(read.host.as_ref(), Some(&data));
+    assert_eq!(read.version, crate::record::HOST_RECORD_VERSION);
+
+    let archive = example.archive();
+    assert_eq!(archive.host.as_ref(), Some(&data));
+    let renamed: WorkspaceName = "triage-2".parse().unwrap();
+    example.archives.rename(&archive, &renamed).unwrap();
+
+    let read = example.archives.read(&renamed).unwrap().unwrap();
+    assert_eq!(read.host.as_ref(), Some(&data));
+    assert_eq!(read.version, crate::archive::HOST_ARCHIVE_VERSION);
+    assert_eq!(read.workspace().host.as_ref(), Some(&data));
+}

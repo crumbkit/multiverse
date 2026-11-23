@@ -11,8 +11,16 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::ArchiveId;
 use crate::error::Error;
-use crate::host::{Host, ManifestNames};
+use crate::host::{Host, HostName, ManifestNames};
 use crate::name::WorkspaceName;
+
+mod host_data;
+#[cfg(test)]
+mod tests;
+
+pub use host_data::{
+    HostData, HostKey, MOST_HOST_DATA_BYTES, MOST_HOST_KEY_BYTES, MOST_HOST_VALUES,
+};
 
 /// The highest version of the record form that this version of multiverse
 /// reads. A record with a higher version is refused (DUR-3). Version 1 is
@@ -25,8 +33,15 @@ use crate::name::WorkspaceName;
 /// dropping the id when it rewrites it. Version 4 is a workspace with more
 /// than one checkout, whose workspace manifest's paths are relative to the
 /// workspace's directory, so an older mxv refuses it rather than reading
-/// those paths relative to each checkout.
-pub const RECORD_VERSION: u32 = MULTI_CHECKOUT_RECORD_VERSION;
+/// those paths relative to each checkout. Version 5 holds a host's data,
+/// [`Workspace::host`], so an older mxv refuses the record rather than
+/// dropping that data when it rewrites it. A record without host data keeps
+/// the version that its other fields need.
+pub const RECORD_VERSION: u32 = HOST_RECORD_VERSION;
+
+/// The version of the record form of a workspace whose record holds a
+/// host's data.
+pub const HOST_RECORD_VERSION: u32 = 5;
 
 /// The version of the record form of a workspace with more than one
 /// checkout.
@@ -289,6 +304,12 @@ pub struct Workspace {
     /// mxv that rewrites the record drops the key.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub board_mounts: Vec<BoardMount>,
+    /// The data of the host profile that owns the workspace, or `None` for
+    /// a workspace that no host claims, as every workspace of mxv is. A
+    /// record without it leaves the key out and keeps its version; a
+    /// record with it has [`HOST_RECORD_VERSION`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostData>,
     /// The names of the host whose manifest files the workspace reads,
     /// which the record never stores. A record reads with mxv's names, and
     /// [`Store::with_host`](crate::Store::with_host) gives it another
@@ -349,6 +370,9 @@ struct StoredWorkspace {
     /// [`Workspace::board_mounts`].
     #[serde(default)]
     board_mounts: Vec<BoardMount>,
+    /// [`Workspace::host`].
+    #[serde(default)]
+    host: Option<HostData>,
 }
 
 /// The checkout of a workspace record that is not made the way the
@@ -428,6 +452,7 @@ impl TryFrom<StoredWorkspace> for Workspace {
             pinned: stored.pinned,
             reclaimed: stored.reclaimed,
             board_mounts: stored.board_mounts,
+            host: stored.host,
             names: ManifestNames::MXV,
         })
     }
@@ -490,8 +515,16 @@ impl Workspace {
             pinned: false,
             reclaimed: None,
             board_mounts: Vec::new(),
+            host: None,
             names: ManifestNames::MXV,
         }
+    }
+
+    /// Returns the name of the host profile that owns the workspace, or
+    /// `None` when no host claims it.
+    #[must_use]
+    pub fn owner(&self) -> Option<&HostName> {
+        self.host.as_ref().map(|data| &data.profile)
     }
 
     /// Returns the record with `host`'s names, so its manifest methods,
@@ -546,9 +579,13 @@ impl Workspace {
     /// Raises the record's version to the lowest one that its form needs:
     /// [`ID_RECORD_VERSION`] when it holds a stable id, and
     /// [`MULTI_CHECKOUT_RECORD_VERSION`] when it has more than one
-    /// checkout. A record without an id stays below [`ID_RECORD_VERSION`]
-    /// unless it has several checkouts.
+    /// checkout, and [`HOST_RECORD_VERSION`] when it holds a host's data. A
+    /// record without an id stays below [`ID_RECORD_VERSION`] unless it has
+    /// several checkouts or host data.
     pub(crate) fn raise_version(&mut self) {
+        if self.host.is_some() {
+            self.version = self.version.max(HOST_RECORD_VERSION);
+        }
         if self.id.is_some() {
             self.version = self.version.max(ID_RECORD_VERSION);
         }

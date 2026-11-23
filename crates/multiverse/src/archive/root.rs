@@ -90,7 +90,19 @@ impl Scanned {
 /// Reports whether `name`, an entry of the workspace's directory, belongs
 /// to mxv or to a checkout of `workspace`. `generated` is the text that mxv
 /// writes as `AGENTS.md`, so a file that differs from it is the person's.
-fn is_own(workspace: &Workspace, name: &str, path: &Path, generated: &str, host: &Host) -> bool {
+fn is_own(
+    workspace: &Workspace,
+    name: &str,
+    path: &Path,
+    generated: &str,
+    host: Owner<'_>,
+) -> bool {
+    let Owner { host, hooked } = host;
+    // The host's hook carries its own directory, so the root files leave
+    // it out. Without a hook it is the person's, like any other entry.
+    if hooked && name == host.host_dir() {
+        return true;
+    }
     if name == AGENTS_FILE {
         // Opening a FIFO blocks until something writes to it, so only a
         // regular file is read.
@@ -118,10 +130,36 @@ fn is_own(workspace: &Workspace, name: &str, path: &Path, generated: &str, host:
     }) || name.ends_with(&host.quarantine_suffix())
 }
 
+/// The host whose names the root files leave out, and whether the
+/// [`Archives`] have an [`ArchiveHook`](crate::ArchiveHook), which carries
+/// the host's own directory instead.
+#[derive(Clone, Copy)]
+pub(super) struct Owner<'a> {
+    /// The host.
+    pub(super) host: &'a Host,
+    /// Whether the archives have a hook.
+    pub(super) hooked: bool,
+}
+
+impl<'a> Owner<'a> {
+    /// Returns the owner of the root files of an archive into `archives`
+    /// under `host`.
+    pub(super) fn of(archives: &Archives, host: &'a Host) -> Self {
+        Self {
+            host,
+            hooked: archives.hook().is_some(),
+        }
+    }
+}
+
 /// Returns the extra entries of the directory of `workspace`, where mxv
 /// writes `generated` as `AGENTS.md`. A workspace whose checkout is the
 /// directory itself, as in an old record, has none.
-pub(super) fn scan(workspace: &Workspace, generated: &str, host: &Host) -> Result<Scanned, Error> {
+pub(super) fn scan(
+    workspace: &Workspace,
+    generated: &str,
+    host: Owner<'_>,
+) -> Result<Scanned, Error> {
     let mut scanned = Scanned::default();
     let holds_itself = workspace
         .checkouts
@@ -151,7 +189,7 @@ fn readable(path: &Path) -> bool {
 fn walk(
     workspace: &Workspace,
     generated: &str,
-    host: &Host,
+    host: Owner<'_>,
     dir: &Path,
     prefix: &str,
     scanned: &mut Scanned,
@@ -252,7 +290,7 @@ pub(super) fn copy_in(
     archive: &mut Archive,
     workspace: &Workspace,
     generated: &str,
-    host: &Host,
+    host: Owner<'_>,
 ) -> Result<(), Error> {
     let dir = archives.dir_of(&archive.name);
     let scanned = scan(workspace, generated, host)?;
@@ -305,7 +343,7 @@ pub(super) fn differences(
     archive: &Archive,
     workspace: &Workspace,
     generated: &str,
-    host: &Host,
+    host: Owner<'_>,
 ) -> Result<Vec<String>, Error> {
     let scanned = scan(workspace, generated, host)?;
     let mut found = Vec::new();
@@ -344,7 +382,7 @@ pub(super) fn differences(
     {
         found.push(format!(
             "path changed after its copy: {}",
-            host.manifest_file()
+            host.host.manifest_file()
         ));
     }
     Ok(found)
@@ -367,7 +405,7 @@ pub(super) fn delete_originals(
     archive: &Archive,
     workspace: &Workspace,
     generated: &str,
-    host: &Host,
+    host: Owner<'_>,
 ) -> Result<(), Error> {
     for special in scan(workspace, generated, host)?.special {
         if archive.lost.contains(&lost_name(&special)) {

@@ -182,6 +182,7 @@ codes that no start provokes:
   mxv::restore::root_file_changed: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
   mxv::restore::ignored_damaged: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
   mxv::restore::ignored_taken: Only a real workspace or archive in that state provokes it, and the fixture's records name checkouts under /home/agent, which a test cannot create; tests/archive.rs provokes the code, or, for a refusal that needs a change partway through a run, the tests of multiverse's archive module provoke the refusal.
+  mxv::restore::host_hook_missing: Only an archive that another program's archive hook wrote under mxv's host profile provokes it, which mxv never writes; the tests of multiverse's archive module provoke the refusal.
   mxv::mirror::locked: Only a mirror whose lock another mxv command holds for longer than mxv waits provokes it, which is longer than the check waits for a run; the library's workspace tests provoke it with a short wait.
   mxv::mirror::fetch_failed: Only an origin that cannot be fetched provokes it, and the check's fixture keeps its origin; tests/workspaces.rs provokes it with an origin that is gone.
   mxv::ssh::authentication_failed: Only an SSH origin whose host refuses every key provokes it, and the check's fixture has a local origin; tests/workspaces.rs provokes it with a fake ssh that refuses.
@@ -247,6 +248,7 @@ codes that no start provokes:
   mxv::workspace::mismatched_checkout: No command builds a record whose checkout does not match its kind; the library's store tests provoke it.
   mxv::workspace::wrong_lock: No command passes the lock of one workspace to an operation on another; the library's runs and lifecycle tests provoke it.
   mxv::workspace::host_mismatch: mxv gives its workspaces and archives one host profile; the library's host tests provoke it.
+  mxv::workspace::other_host: Only a record or archive that another program wrote under its own host profile provokes it, and the fixture's records have no owner; tests/archive.rs provokes it with an archive that names another host.
   mxv::workspace::archive_unfinished: Only a live checkout whose record has no stable id, beside an archive record of its name that an older mxv left retiring without one or that cannot be read, provokes it; tests/processes.rs provokes it.
 
 codes whose recoveries the check did not follow, because no declared code spells them: 0

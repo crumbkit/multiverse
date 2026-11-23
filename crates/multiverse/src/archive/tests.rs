@@ -22,6 +22,7 @@ use crate::workspaces::{Mode, NewOutcome, Repo, Workspaces};
 
 mod cases;
 mod edges;
+mod host;
 mod killed;
 mod retiring;
 
@@ -1395,13 +1396,14 @@ fn resumes_after(kind: Kind, step: &'static str) {
 /// Every checkpoint of an archive of one checkout `app`, in order. `state`
 /// follows the workspace's `retiring` write and `retired` the archive's
 /// `retired` write.
-pub(super) const ARCHIVE_STEPS: [&str; 13] = [
+pub(super) const ARCHIVE_STEPS: [&str; 14] = [
     "state",
     "record",
     "wip",
     "pins",
     "ignored",
     "root",
+    "host",
     "before-move:app",
     "moved:app",
     "cleared:app",
@@ -1529,7 +1531,7 @@ fn restore_stopped_leaves_the_archive_whole(kind: Kind, step: &'static str) {
     );
 }
 
-const RESTORE_STEPS: [&str; 8] = [
+const RESTORE_STEPS: [&str; 9] = [
     "mirrors",
     "directory",
     "checkout:app",
@@ -1538,6 +1540,7 @@ const RESTORE_STEPS: [&str; 8] = [
     "kept",
     "root",
     "marker",
+    "host",
 ];
 
 #[test]
@@ -1855,7 +1858,7 @@ fn a_record_from_a_newer_version_is_refused_with_its_version() {
     setup.create();
     let mut archive = setup.archive();
     archive.version = ARCHIVE_VERSION + 1;
-    setup.archives.write(&archive).unwrap();
+    setup.archives.write(&mut archive).unwrap();
     let refused =
         setup
             .workspaces
@@ -1878,7 +1881,7 @@ fn a_restore_keeps_a_free_port_and_replaces_a_taken_one() {
     let mut archive = setup.archive();
     archive.ports.insert("web".to_owned(), taken);
     archive.ports.insert("api".to_owned(), kept);
-    setup.archives.write(&archive).unwrap();
+    setup.archives.write(&mut archive).unwrap();
     let restored = setup.restore();
     assert_eq!(restored.workspace.ports["api"], kept);
     assert_ne!(restored.workspace.ports["web"], taken);
@@ -2822,7 +2825,10 @@ fn a_version_one_archive_still_restores() {
     let path = setup.archives.dir_of(&name()).join(RECORD_FILE);
     let text = fs::read_to_string(&path).unwrap();
     let old = text
-        .replace(&format!("\"version\": {ARCHIVE_VERSION}"), "\"version\": 1")
+        .replace(
+            &format!("\"version\": {NO_HOST_ARCHIVE_VERSION}"),
+            "\"version\": 1",
+        )
         .replace(&checkout.pin, &old_pin);
     write(&path, old);
     let read = setup.record().unwrap();

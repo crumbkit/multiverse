@@ -67,6 +67,9 @@ pub const RESTORE_MIRROR_MISSING: Code = Code::from_spelling("mxv::restore::mirr
 /// The code of an ignored file whose path the rebuilt workspace already
 /// holds.
 pub const RESTORE_IGNORED_TAKEN: Code = Code::from_spelling("mxv::restore::ignored_taken");
+/// The code of an archive that holds files that another program's archive
+/// hook kept, which mxv cannot check.
+pub const RESTORE_HOST_HOOK_MISSING: Code = Code::from_spelling("mxv::restore::host_hook_missing");
 
 /// How far the archive that holds a name got, which decides what a
 /// refusal of the name names as the way out.
@@ -433,6 +436,19 @@ pub(crate) enum ArchiveFailure {
         /// Each archived path, such as `app/.env`.
         paths: Vec<String>,
     },
+    /// The archive holds files that another program's archive hook kept.
+    #[failure(
+        code = RESTORE_HOST_HOOK_MISSING,
+        hint = "restore {name} with the program whose host profile is {owner}, which checks its files",
+        field(name = name, owner = owner)
+    )]
+    HostHookMissing {
+        /// The archive's name.
+        name: String,
+        /// The name of the host profile that owned the workspace, or
+        /// `unknown`.
+        owner: String,
+    },
 }
 
 /// Returns the error of `refusal` for the workspace `name`: the failure of
@@ -528,6 +544,10 @@ pub(super) fn restore_refusal(
         RestoreRefusal::RootFileChanged { path } => ArchiveFailure::RootFileChanged { name, path },
         RestoreRefusal::IgnoredDamaged { paths } => ArchiveFailure::IgnoredDamaged { name, paths },
         RestoreRefusal::IgnoredTaken { paths } => ArchiveFailure::IgnoredTaken { name, paths },
+        RestoreRefusal::HostHookMissing { owner } => ArchiveFailure::HostHookMissing {
+            name,
+            owner: owner.map_or_else(|| "unknown".to_owned(), |owner| owner.to_string()),
+        },
         _ => ArchiveFailure::RestoreNotFound { name },
     }
 }
@@ -700,6 +720,10 @@ impl fmt::Display for ArchiveFailure {
                 formatter,
                 "the rebuilt workspace already holds {}",
                 paths.join(", ")
+            ),
+            Self::HostHookMissing { name, owner } => write!(
+                formatter,
+                "the archive of {name} holds files that the host {owner} kept, and mxv has no hook to check them, so it restored nothing"
             ),
             Self::RestoreMirrorMissing { name, checkouts } => {
                 write!(

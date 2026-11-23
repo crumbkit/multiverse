@@ -13,12 +13,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::archive::ignored::{IGNORED_TAR, IgnoredEntry};
 use crate::archive::root::RootEntry;
-use crate::archive::{ARCHIVE_VERSION, HEAD_PIN, RECORD_FILE, WIP_INDEX};
+use crate::archive::{
+    ARCHIVE_VERSION, ArchiveHook, HEAD_PIN, HOST_ARCHIVE_VERSION, Hook, HostFile,
+    NO_HOST_ARCHIVE_VERSION, RECORD_FILE, WIP_INDEX,
+};
 use crate::backend::RefHolder;
 use crate::error::Error;
 use crate::host::{Host, HostName};
 use crate::name::WorkspaceName;
-use crate::record::{Checkout, Made, Workspace, WorkspaceKind};
+use crate::record::{Checkout, HostData, Made, Workspace, WorkspaceKind};
 use crate::store::{self, MOST_RECORD_BYTES};
 use crate::workspaces::{MadeSoFar, delete_directory};
 
@@ -326,7 +329,9 @@ impl ArchivedCheckout {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Archive {
-    /// The version of the record form, which is [`ARCHIVE_VERSION`].
+    /// The version of the record form: [`HOST_ARCHIVE_VERSION`] when it
+    /// holds a host's data or files, and [`NO_HOST_ARCHIVE_VERSION`] or an
+    /// older one otherwise.
     pub version: u32,
     /// The archive's own id, which names its pins.
     pub id: ArchiveId,
@@ -374,6 +379,14 @@ pub struct Archive {
     /// in the order it was written.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ignored: Vec<IgnoredEntry>,
+    /// The data of the host profile that owned the workspace, which a
+    /// restore writes back into its record, or `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostData>,
+    /// Each file that the host's [`ArchiveHook`] kept, which lies in
+    /// `host/` in the archive's data directory, in path order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub host_files: Vec<HostFile>,
     /// What a restore of this archive has made so far, written before each
     /// step creates something, so a restore that died leaves the list of
     /// what to delete. It is absent unless a restore is running or died,
@@ -455,7 +468,8 @@ impl Archive {
         if renamed.counts_as_retired() {
             renamed.state = ArchiveState::Retired;
         }
-        renamed.version = ARCHIVE_VERSION;
+        renamed.version = NO_HOST_ARCHIVE_VERSION;
+        renamed.raise_version();
         renamed.name = to.clone();
         if let Some(parent) = self.path.parent() {
             renamed.path = parent.join(to.as_str());
@@ -507,7 +521,26 @@ impl Archive {
         }
         workspace.ports.clone_from(&self.ports);
         workspace.pinned = self.pinned;
+        workspace.host.clone_from(&self.host);
+        workspace.raise_version();
         workspace
+    }
+
+    /// Returns the name of the host profile that owned the workspace, or
+    /// `None` when no host claimed it.
+    #[must_use]
+    pub fn owner(&self) -> Option<&HostName> {
+        self.host.as_ref().map(|data| &data.profile)
+    }
+
+    /// Raises the record's version to [`HOST_ARCHIVE_VERSION`] when it holds
+    /// a host's data or files. [`Archives::write`] calls it before each
+    /// write, and [`Archive::renamed`] calls it so that a dry-run repair
+    /// reports the version that a write would give.
+    fn raise_version(&mut self) {
+        if self.host.is_some() || !self.host_files.is_empty() {
+            self.version = self.version.max(HOST_ARCHIVE_VERSION);
+        }
     }
 
     /// Reports whether an older multiverse wrote the record, which had no
@@ -559,6 +592,8 @@ pub struct Archives {
     data: PathBuf,
     /// The host whose references, suffixes and commits the archives write.
     host: Host,
+    /// The hook that keeps the host's own files of a workspace, or `None`.
+    hook: Option<Hook>,
 }
 
 /// The archives that [`Archives::list`] found.
@@ -581,7 +616,37 @@ impl Archives {
             dir,
             data,
             host: Host::mxv(),
+            hook: None,
         }
+    }
+
+    /// Returns the archives with `hook`, which writes the host's own files
+    /// of a workspace into each archive and checks them after each
+    /// restore, as [`ArchiveHook`] says. Without a hook, a restore refuses
+    /// an archive that holds a host's files with
+    /// [`RestoreRefusal::HostHookMissing`](crate::RestoreRefusal::HostHookMissing).
+    #[must_use]
+    pub fn with_archive_hook(mut self, hook: Box<dyn ArchiveHook>) -> Self {
+        self.hook = Some(Hook(hook.into()));
+        self
+    }
+
+    /// Returns the error of the record `archive` at `path` when another
+    /// host owned its workspace, as [`Error::OtherHost`], or wrote its
+    /// references, or `None` when it is this host's.
+    fn foreign(&self, archive: &Archive, path: &Path) -> Option<Error> {
+        match archive.owner() {
+            Some(owner) if owner != self.host.name() => Some(Error::OtherHost {
+                workspace: archive.name.clone(),
+                owner: owner.clone(),
+            }),
+            _ => foreign_reference(archive, &self.host, path),
+        }
+    }
+
+    /// Returns the hook, or `None`.
+    pub(crate) const fn hook(&self) -> Option<&Hook> {
+        self.hook.as_ref()
     }
 
     /// Returns the archives with `host`'s names: its pins below
@@ -622,8 +687,9 @@ impl Archives {
     ///
     /// Returns [`Error::StateUnreadable`] when the record cannot be read,
     /// [`Error::NewerRecord`] when a newer multiverse wrote it,
-    /// [`Error::CorruptRecord`] when it is not a record, and
-    /// [`Error::MismatchedRecord`] when it holds another name.
+    /// [`Error::CorruptRecord`] when it is not a record,
+    /// [`Error::MismatchedRecord`] when it holds another name, and
+    /// [`Error::OtherHost`] when another host profile owned the workspace.
     pub fn read(&self, name: &WorkspaceName) -> Result<Option<Archive>, Error> {
         let path = self.dir_of(name).join(RECORD_FILE);
         let found = read_record(&path)?;
@@ -632,7 +698,7 @@ impl Archives {
                 path,
                 name: archive.name.to_string(),
             }),
-            Some(archive) => match foreign_reference(&archive, &self.host, &path) {
+            Some(archive) => match self.foreign(&archive, &path) {
                 Some(error) => Err(error),
                 None => Ok(Some(archive)),
             },
@@ -673,7 +739,7 @@ impl Archives {
         paths.sort();
         for path in paths {
             match read_record(&path) {
-                Ok(Some(archive)) => match foreign_reference(&archive, &self.host, &path) {
+                Ok(Some(archive)) => match self.foreign(&archive, &path) {
                     Some(error) => records.problems.push(error),
                     None => records.archives.push(archive),
                 },
@@ -685,8 +751,12 @@ impl Archives {
     }
 
     /// Writes the record of `archive`, and syncs it and its directory before
-    /// it returns. The archive's directory is private to the person.
-    pub(super) fn write(&self, archive: &Archive) -> Result<(), Error> {
+    /// it returns. The archive's directory is private to the person. This is
+    /// the one place that raises an archive's version to
+    /// [`HOST_ARCHIVE_VERSION`] when it holds a host's data or files, so the
+    /// record in memory and on disk name the same version.
+    pub(super) fn write(&self, archive: &mut Archive) -> Result<(), Error> {
+        archive.raise_version();
         let dir = self.dir_of(&archive.name);
         store::private_dir(&dir)?;
         let target = dir.join(RECORD_FILE);
@@ -765,8 +835,8 @@ impl Archives {
     /// fails, and [`Error::StateUnreadable`] when the old directory cannot
     /// be read.
     pub(crate) fn rename(&self, archive: &Archive, to: &WorkspaceName) -> Result<Archive, Error> {
-        let renamed = archive.renamed(to);
-        self.write(&renamed)?;
+        let mut renamed = archive.renamed(to);
+        self.write(&mut renamed)?;
         let old = self.dir_of(&archive.name);
         let new = self.dir_of(to);
         let unreadable = |source| Error::StateUnreadable {
@@ -926,6 +996,16 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
         return Err(corrupt(serde::de::Error::custom(format!(
             "the root entry {} leaves the workspace's directory",
             entry.path
+        ))));
+    }
+    if let Some(file) = archive
+        .host_files
+        .iter()
+        .find(|file| !stays_inside(&file.path))
+    {
+        return Err(corrupt(serde::de::Error::custom(format!(
+            "the host file {} leaves the archive's host directory",
+            file.path
         ))));
     }
     if let Some(entry) = archive

@@ -36,6 +36,7 @@ use crate::host::Host;
 use crate::mirror::directory;
 
 mod admit;
+mod host_files;
 mod ignored;
 mod record;
 mod restore;
@@ -48,6 +49,8 @@ pub use admit::{
     ArchiveOptions, ArchivePlan, ArchivePlanned, ArchiveRefusal, FileStatus, Uncommitted,
     Unkeepable, Unkept, UnkeptKind,
 };
+pub(crate) use host_files::Hook;
+pub use host_files::{ArchiveHook, HookError, HostFile, MOST_HOST_FILE_BYTES, MOST_HOST_FILES};
 pub use ignored::{IgnoredEntry, IgnoredKind, IgnoredSource};
 pub use record::{
     Archive, ArchiveId, ArchiveRecords, ArchiveState, ArchivedCheckout, Archives, Kept, KeptStash,
@@ -70,8 +73,18 @@ pub use root::{RootEntry, RootKind};
 /// multiverse writes has it, so an older multiverse refuses a record that
 /// it would read as an archive to finish. A record of version 2 or lower
 /// says retiring for both of the states that version 3 tells apart, as
-/// [`Archive::counts_as_retired`] says.
-pub const ARCHIVE_VERSION: u32 = 3;
+/// [`Archive::counts_as_retired`] says. Version 4 holds a host's data or
+/// files, [`Archive::host`] and [`Archive::host_files`], so an older
+/// multiverse refuses the record rather than restoring the workspace
+/// without them. A record without either keeps version 3.
+pub const ARCHIVE_VERSION: u32 = HOST_ARCHIVE_VERSION;
+
+/// The version of an archive record that holds a host's data or files.
+pub const HOST_ARCHIVE_VERSION: u32 = 4;
+
+/// The version of an archive record that holds no host data or files,
+/// which every archive of mxv is.
+pub const NO_HOST_ARCHIVE_VERSION: u32 = 3;
 
 /// The message of the commits that keep a checkout's uncommitted work.
 /// This is the value of mxv's profile, [`Host::mxv`](crate::Host::mxv);

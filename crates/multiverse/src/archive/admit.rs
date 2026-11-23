@@ -11,8 +11,8 @@ use crate::archive::ignored::{self, IgnoredEntry, IgnoredKind, IgnoredSource};
 use crate::archive::record::now;
 use crate::archive::root::{self, RootEntry, RootKind, Scanned};
 use crate::archive::{
-    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveId, ArchiveState, ArchivedCheckout,
-    Archives, DIGEST_LENGTH, Kept, KeptStash, RECORD_FILE, pin_ref,
+    ARCHIVE_MAX_FILE, Archive, ArchiveId, ArchiveState, ArchivedCheckout, Archives, DIGEST_LENGTH,
+    Kept, KeptStash, NO_HOST_ARCHIVE_VERSION, RECORD_FILE, pin_ref,
 };
 use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
 use crate::disk::DisposablePath;
@@ -639,6 +639,7 @@ impl<B: Backend> Workspaces<B> {
             Subject::Found(workspace, resuming) => (*workspace, resuming.map(|kept| *kept)),
             Subject::Done(planned) => return Ok(planned),
         };
+        self.check_owner(&workspace)?;
         let start = match record_start(resuming.as_ref()) {
             Ok(start) => start,
             Err(refusal) => return Ok(ArchivePlanned::Refused(refusal)),
@@ -729,7 +730,11 @@ impl<B: Backend> Workspaces<B> {
             checkouts.push(self.archived(planned, head, commit, local_only, kept, &id)?);
         }
         let generated = self.generated_agents(&workspace)?;
-        let scanned = root::scan(&workspace, &generated, &self.host)?;
+        let scanned = root::scan(
+            &workspace,
+            &generated,
+            root::Owner::of(archives, &self.host),
+        )?;
         if let Some(refused) = refuse_root(&workspace, &scanned) {
             return Ok(refused);
         }
@@ -1177,7 +1182,7 @@ impl ArchivePlan {
         }
         let earlier = self.resuming.as_ref();
         Archive {
-            version: ARCHIVE_VERSION,
+            version: NO_HOST_ARCHIVE_VERSION,
             id: self.id.clone(),
             state: self.start.state(),
             time: earlier.map_or_else(now, |archive| archive.time),
@@ -1211,6 +1216,12 @@ impl ArchivePlan {
                         .cloned()
                         .collect()
                 })
+                .unwrap_or_default(),
+            host: workspace.host.clone(),
+            // The files that an earlier run's hook wrote stay listed, so a
+            // resumed archive keeps them and does not run the hook again.
+            host_files: earlier
+                .map(|archive| archive.host_files.clone())
                 .unwrap_or_default(),
             restoring: None,
         }

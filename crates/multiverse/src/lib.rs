@@ -51,13 +51,14 @@ mod template;
 mod workspaces;
 
 pub use crate::archive::{
-    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveId, ArchiveOptions, ArchiveOutcome,
-    ArchivePlan, ArchivePlanned, ArchiveRecords, ArchiveRefusal, ArchiveState, ArchivedCheckout,
-    ArchivedRemoval, Archives, FileStatus, IgnoredEntry, IgnoredKind, IgnoredSource,
-    KEPT_NAMESPACE, Kept, KeptStash, KeptWip, LostPin, MirrorLoss, OLDER_ARCHIVE_VERSION,
-    PortChange, PutBack, RestoreMark, RestoreOptions, RestoreOutcome, RestorePlan, RestorePlanned,
-    RestoreRefusal, Restored, RootEntry, RootKind, Uncommitted, Unkeepable, Unkept, UnkeptKind,
-    WIP_MESSAGE,
+    ARCHIVE_MAX_FILE, ARCHIVE_VERSION, Archive, ArchiveHook, ArchiveId, ArchiveOptions,
+    ArchiveOutcome, ArchivePlan, ArchivePlanned, ArchiveRecords, ArchiveRefusal, ArchiveState,
+    ArchivedCheckout, ArchivedRemoval, Archives, FileStatus, HOST_ARCHIVE_VERSION, HookError,
+    HostFile, IgnoredEntry, IgnoredKind, IgnoredSource, KEPT_NAMESPACE, Kept, KeptStash, KeptWip,
+    LostPin, MOST_HOST_FILE_BYTES, MOST_HOST_FILES, MirrorLoss, NO_HOST_ARCHIVE_VERSION,
+    OLDER_ARCHIVE_VERSION, PortChange, PutBack, RestoreMark, RestoreOptions, RestoreOutcome,
+    RestorePlan, RestorePlanned, RestoreRefusal, Restored, RootEntry, RootKind, Uncommitted,
+    Unkeepable, Unkept, UnkeptKind, WIP_MESSAGE,
 };
 pub use crate::backend::{
     Backend, Changes, Concealed, Head, Hidden, INITIALIZING, LargeFile, Listed, LocalNames,
@@ -98,9 +99,10 @@ pub use crate::proxy::{
     line_for as hosts_line, missing as missing_hosts,
 };
 pub use crate::record::{
-    AGENTS_FILE, BackendKind, BoardMount, CLONE_RECORD_VERSION, Checkout, ID_RECORD_VERSION,
-    MULTI_CHECKOUT_RECORD_VERSION, Made, RECORD_VERSION, Reclaimed, WORKTREE_RECORD_VERSION,
-    Workspace, WorkspaceKind, WorkspaceState, agents_text,
+    AGENTS_FILE, BackendKind, BoardMount, CLONE_RECORD_VERSION, Checkout, HOST_RECORD_VERSION,
+    HostData, HostKey, ID_RECORD_VERSION, MOST_HOST_DATA_BYTES, MOST_HOST_KEY_BYTES,
+    MOST_HOST_VALUES, MULTI_CHECKOUT_RECORD_VERSION, Made, RECORD_VERSION, Reclaimed,
+    WORKTREE_RECORD_VERSION, Workspace, WorkspaceKind, WorkspaceState, agents_text,
 };
 pub use crate::redacted::Redacted;
 pub use crate::runs::{
@@ -121,8 +123,9 @@ pub use crate::template::{
     Found as FoundTemplate, TEMPLATE_TABLE, Template, find as find_template,
 };
 pub use crate::workspaces::{
-    AddOutcome, Allow, BranchFate, CheckoutRemoval, DISPOSABLE, Fate, MIRROR_WAIT, Mode,
-    NewOutcome, Removal, RemovalKind, RemovalOutcome, RemovalPlan, Repo, Workspaces, folder_name,
+    AddOutcome, Allow, BranchFate, CheckoutRemoval, CreateOptions, DISPOSABLE, Fate, MIRROR_WAIT,
+    Mode, NewOutcome, Removal, RemovalKind, RemovalOutcome, RemovalPlan, Repo, Workspaces,
+    folder_name,
 };
 pub use phase;
 #[cfg(test)]

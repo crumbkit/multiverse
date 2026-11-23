@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::archive::host_files;
 use crate::archive::ignored::{self, IgnoredRefusal};
 use crate::archive::{
     Archive, ArchiveState, ArchivedCheckout, Archives, Kept, KeptRef, RECORD_FILE, RestoreMark,
@@ -129,6 +130,28 @@ pub enum RestoreRefusal {
     IgnoredTaken {
         /// Each archived path, as `<folder>/<path>`.
         paths: Vec<String>,
+    },
+    /// The archive holds files that a host's [`ArchiveHook`](crate::ArchiveHook)
+    /// kept, and the [`Archives`] have no hook to check them, so a restore
+    /// would drop them. Nothing was written. The host that made the archive
+    /// restores it.
+    HostHookMissing {
+        /// The name of the host profile that owned the workspace, or
+        /// `None` when the record names none.
+        owner: Option<crate::host::HostName>,
+    },
+    /// A host file of the archive is missing or differs from its recorded
+    /// digest. The restore was undone and the archive is whole.
+    HostFilesDamaged {
+        /// Each file, relative to the host's directory.
+        paths: Vec<String>,
+    },
+    /// The host's [`ArchiveHook::check`](crate::ArchiveHook::check) refused
+    /// the files that the restore put back. The restore was undone and the
+    /// archive is whole.
+    HostCheckFailed {
+        /// The hook's message.
+        message: String,
     },
 }
 
@@ -324,6 +347,11 @@ impl<B: Backend> Workspaces<B> {
             return refused(RestoreRefusal::NameTaken {
                 path: archive.path,
                 record,
+            });
+        }
+        if !archive.host_files.is_empty() && archives.hook().is_none() {
+            return refused(RestoreRefusal::HostHookMissing {
+                owner: archive.owner().cloned(),
             });
         }
         refuse_other_files(&archive, &self.host)?;
@@ -596,7 +624,7 @@ impl<B: Backend> Workspaces<B> {
             return Ok(());
         };
         record.restoring = made.map(|made| RestoreMark(made.clone()));
-        archives.write(&record)
+        archives.write(&mut record)
     }
 
     /// Fetches the origin of the clone `checkout` into its mirror, as a
@@ -884,6 +912,20 @@ impl<B: Backend> Workspaces<B> {
         // The archive leaves the marker out, so the run writes it again,
         // after the root entries in case an older archive holds one.
         self.write_marker(workspace, made)?;
+        // An archive without host data or files has nothing for the hook to
+        // check, so its restore leaves the step and the mark's `host` out.
+        let holds_host = archive.host.is_some() || !archive.host_files.is_empty();
+        if archives.hook().is_some() && holds_host {
+            made.host = true;
+            self.mark(archives, &archive.name, Some(made))?;
+            let into = archive.path.join(self.host.host_dir());
+            if let Err(refusal) =
+                host_files::put_back(archives, archive, workspace, &into, self.checkpoint)?
+            {
+                return Ok(Err(refusal));
+            }
+        }
+        (self.checkpoint)("host")?;
         let ports = runs.restored_ports(workspace, &self.store, |workspace, store| {
             Ok(store.create(workspace)? == Created::Written)
         })?;
@@ -1280,6 +1322,9 @@ fn other_files(archive: &Archive, made: &MadeSoFar, host: &Host) -> Result<Vec<S
     }
     if made.marker {
         accounted.files.push(archive.path.join(MARKER_FILE));
+    }
+    if made.host {
+        accounted.whole.push(archive.path.join(host.host_dir()));
     }
     let mut found = Vec::new();
     find_other_files(&archive.path, "", &accounted, &mut found)?;

@@ -17,7 +17,7 @@ use crate::lookup::{ManifestSource, checkout_prefix, prefixed};
 use crate::manifest::{Manifest, ManifestError};
 use crate::mirror::Origin;
 use crate::name::WorkspaceName;
-use crate::record::{self, Checkout, Workspace, WorkspaceKind, WorkspaceState};
+use crate::record::{self, Checkout, HostData, Workspace, WorkspaceKind, WorkspaceState};
 use crate::store::{self, Created, Records, Store};
 use crate::template::Found as FoundTemplate;
 
@@ -889,6 +889,11 @@ pub(crate) struct MadeSoFar {
     pub(crate) agents: bool,
     /// Whether the run wrote the marker `.deadband-workspace`.
     pub(crate) marker: bool,
+    /// Whether a restore started to put back the host's files, in the
+    /// directory that [`Host::host_dir`] names. A mark without it leaves
+    /// the key out, so an older mxv reads it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) host: bool,
     /// Whether the run wrote the workspace manifest.
     pub(crate) manifest: bool,
     /// The number of checkouts, in the record's order, whose clone the run
@@ -903,6 +908,25 @@ pub(crate) struct MadeSoFar {
     /// leaves whatever record has the name alone.
     #[serde(skip)]
     pub(crate) record_not_ours: bool,
+}
+
+/// What [`Workspaces::create_with`] writes besides the checkouts.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct CreateOptions<'a> {
+    /// The text of the workspace manifest, as
+    /// [`Workspaces::create_with_manifest`] takes it, or `None`.
+    pub manifest: Option<&'a str>,
+    /// The data of the host that owns the workspace, or `None`.
+    pub host: Option<HostData>,
+}
+
+impl<'a> CreateOptions<'a> {
+    /// Returns the options with `manifest` and `host`.
+    #[must_use]
+    pub const fn new(manifest: Option<&'a str>, host: Option<HostData>) -> Self {
+        Self { manifest, host }
+    }
 }
 
 /// How [`Workspaces::make`] ended without an error.
@@ -964,6 +988,56 @@ impl<B: Backend> Workspaces<B> {
                 archives: archives.host().name().clone(),
             })
         }
+    }
+
+    /// Refuses `workspace` with [`Error::OtherHost`] when another host
+    /// profile than the workspaces' host owns it, as its
+    /// [`Workspace::host`] says. A workspace that no host claims passes.
+    pub(crate) fn check_owner(&self, workspace: &Workspace) -> Result<(), Error> {
+        match workspace.owner() {
+            Some(owner) if owner != self.host.name() => Err(Error::OtherHost {
+                workspace: workspace.name.clone(),
+                owner: owner.clone(),
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// Refuses `data` for the workspace `name` with [`Error::OtherHost`]
+    /// when it names another profile than the workspaces' host, and with
+    /// [`Error::HostDataTooLarge`] when it passes its limits.
+    fn check_host_data(&self, name: &WorkspaceName, data: &HostData) -> Result<(), Error> {
+        if data.profile != *self.host.name() {
+            return Err(Error::OtherHost {
+                workspace: name.clone(),
+                owner: data.profile.clone(),
+            });
+        }
+        data.check(name)
+    }
+
+    /// Replaces the host data of the workspace `name` with `data`, and
+    /// returns the record as written. The record is written at
+    /// [`HOST_RECORD_VERSION`](crate::HOST_RECORD_VERSION), which
+    /// multiverse 0.6.0 and older refuse to read, so they never rewrite it
+    /// without the data. The caller holds the workspace's lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RecordMissing`] when no workspace has the name,
+    /// [`Error::OtherHost`] when another host owns the workspace or `data`
+    /// names another profile than the workspaces' host, and
+    /// [`Error::HostDataTooLarge`] when `data` passes its limits, each
+    /// before anything is written, and the errors of [`Store::update`].
+    pub fn set_host_data(&self, name: &WorkspaceName, data: HostData) -> Result<Workspace, Error> {
+        let Some(mut workspace) = self.store.read(name)? else {
+            return Err(Error::RecordMissing { name: name.clone() });
+        };
+        self.check_owner(&workspace)?;
+        self.check_host_data(name, &data)?;
+        workspace.host = Some(data);
+        self.store.update(&mut workspace)?;
+        Ok(workspace)
     }
 
     /// Returns the workspaces with `dir` as the directory of the bare
@@ -1296,6 +1370,35 @@ impl<B: Backend> Workspaces<B> {
         mode: Mode,
         manifest: Option<&str>,
     ) -> Result<NewOutcome, Error> {
+        let options = CreateOptions {
+            manifest,
+            host: None,
+        };
+        self.create_with(root, name, repos, mode, options)
+    }
+
+    /// Creates the workspace `name` as [`Workspaces::create_repos`] does,
+    /// with the workspace manifest and the host data that `options` give.
+    /// The record holds the host data from its first write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::OtherHost`] when the host data names another
+    /// profile than the workspaces' host, and [`Error::HostDataTooLarge`]
+    /// when it passes its limits, both before anything is written, and the
+    /// errors of [`Workspaces::create`].
+    pub fn create_with(
+        &self,
+        root: &Path,
+        name: &WorkspaceName,
+        repos: &[Repo],
+        mode: Mode,
+        options: CreateOptions<'_>,
+    ) -> Result<NewOutcome, Error> {
+        let CreateOptions { manifest, host } = options;
+        if let Some(data) = &host {
+            self.check_host_data(name, data)?;
+        }
         if let Some(existing) = self.store.read(name)? {
             return Ok(NewOutcome::NameTaken(existing));
         }
@@ -1351,7 +1454,8 @@ impl<B: Backend> Workspaces<B> {
             }
         }
         if let Some(mirrors) = &self.mirrors {
-            return self.create_clone(root, name, &found, mirrors, mode, manifest);
+            let options = CreateOptions { manifest, host };
+            return self.create_clone(root, name, &found, mirrors, mode, options);
         }
         let mut checkouts = Vec::new();
         for (repository, folder) in &found {
@@ -1371,6 +1475,8 @@ impl<B: Backend> Workspaces<B> {
         let mut workspace = Workspace::new(name.clone(), path, checkouts)
             .of_worktrees()
             .with_host(&self.host);
+        workspace.host = host;
+        workspace.raise_version();
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
@@ -1430,8 +1536,9 @@ impl<B: Backend> Workspaces<B> {
         found: &[(crate::backend::Repository, String)],
         mirrors: &Path,
         mode: Mode,
-        manifest: Option<&str>,
+        options: CreateOptions<'_>,
     ) -> Result<NewOutcome, Error> {
+        let CreateOptions { manifest, host } = options;
         let path = root.join(name.as_str());
         let mut checkouts = Vec::new();
         let mut urls = Vec::new();
@@ -1441,6 +1548,8 @@ impl<B: Backend> Workspaces<B> {
             urls.push(url);
         }
         let mut workspace = Workspace::new(name.clone(), path, checkouts).with_host(&self.host);
+        workspace.host = host;
+        workspace.raise_version();
         if mode == Mode::DryRun {
             return Ok(NewOutcome::Planned(workspace));
         }
@@ -2156,6 +2265,9 @@ impl<B: Backend> Workspaces<B> {
         if made.marker {
             clean &= crate::marker::delete(&workspace.path).is_ok();
         }
+        if made.host {
+            clean &= delete_directory(&workspace.path.join(self.host.host_dir())).is_ok();
+        }
         if made.directory {
             clean &= match fs::remove_dir(&workspace.path) {
                 Ok(()) => true,
@@ -2195,6 +2307,7 @@ impl<B: Backend> Workspaces<B> {
         let Some(workspace) = self.store.read(name)? else {
             return Ok(RemovalPlan::NotFound);
         };
+        self.check_owner(&workspace)?;
         let directory = match Entry::at(&workspace.path)? {
             Entry::Link => {
                 return Ok(RemovalPlan::Unowned {
