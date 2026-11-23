@@ -907,6 +907,44 @@ fn a_manifest_source_inside_a_repository_or_under_the_root_is_refused() {
 }
 
 #[test]
+fn a_manifest_source_in_a_tracked_directory_shaped_like_a_bare_repository_is_refused() {
+    let setup = setup();
+    let fake = setup.fixture.clone.join("fake");
+    for dir in ["objects", "refs", "sub"] {
+        fs::create_dir_all(fake.join(dir)).unwrap();
+    }
+    write(fake.join("HEAD"), "ref: refs/heads/main\n");
+    write(fake.join("objects/keep"), "");
+    write(fake.join("refs/keep"), "");
+    write(fake.join("mxv.toml"), "ports = []\n");
+    write(fake.join("sub/mxv.toml"), "ports = []\n");
+    git(&setup.fixture.clone, &["add", "fake"]);
+    git(
+        &setup.fixture.clone,
+        &[
+            "commit",
+            "--quiet",
+            "-m",
+            "A directory shaped like a bare repository",
+        ],
+    );
+    for path in [fake.join("mxv.toml"), fake.join("sub/mxv.toml")] {
+        let error = setup
+            .workspaces
+            .check_manifest_source(&path, &setup.root)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                Error::ManifestUntrusted { reason, .. } if reason.contains("inside the git work tree")
+            ),
+            "{}: {error:?}",
+            path.display()
+        );
+    }
+}
+
+#[test]
 fn a_clones_disposable_directories_are_planned_and_deleted_with_it() {
     let setup = setup();
     write(setup.fixture.clone.join(".git/info/exclude"), "target/\n");

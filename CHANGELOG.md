@@ -5,6 +5,15 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Fixed
+
+- `Workspaces::check_manifest_source` refuses a manifest that lies in a
+  tracked directory shaped like a bare repository, one holding `HEAD`,
+  `objects/` and `refs/`, or below one, inside a git work tree. Before
+  this fix git took that directory for a bare repository, the check found
+  no work tree and trusted the manifest, and `mxv new --manifest` would
+  have deleted its `disposable` globs without asking.
+
 ## [0.7.0] - 2026-11-22
 
 ### Added
