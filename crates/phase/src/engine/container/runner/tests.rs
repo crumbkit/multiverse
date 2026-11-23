@@ -32,6 +32,7 @@ use crate::report::{AppOutcome, Report, StartProblem};
 use crate::select::Selection;
 use crate::source::Source;
 use crate::status::ProcessState;
+use crate::test_docker::{OwnerLock, remove_labelled, sweep_left_behind};
 
 mod labels;
 mod volume_owner;
@@ -131,10 +132,14 @@ impl AppliedEnvironment for ModeValue {
 }
 
 /// A workspace of the tests: its state directory, its id and its phase.
+/// The state directory is the world's temp root, whose owner file it locks
+/// while it lives, so a later world's sweep removes what this one left
+/// when its process was killed.
 struct World {
     state: TempDir,
     id: WorkspaceId,
     phase: Phase,
+    owner: OwnerLock,
 }
 
 impl World {
@@ -145,6 +150,8 @@ impl World {
     /// Returns a workspace whose phase labels its objects under `labels`.
     fn with_labels(labels: crate::engine::container::LabelPrefix) -> Self {
         let state = tempfile::tempdir().unwrap();
+        let owner = OwnerLock::take(state.path());
+        sweep_left_behind(&[]);
         let phase = Phase::new(state.path().to_path_buf())
             .with_start_grace(Duration::from_millis(500))
             .with_labels(labels);
@@ -152,6 +159,7 @@ impl World {
             id: crate::random::hex_id().unwrap().parse().unwrap(),
             phase,
             state,
+            owner,
         }
     }
 
@@ -206,28 +214,43 @@ impl World {
             .clone()
     }
 
-    /// Removes every container and volume that carries this workspace's
-    /// id label under its phase's prefix.
-    fn clean(&self) {
-        let label = format!("label={}workspace-id={}", self.phase.labels(), self.id);
-        for kind in ["container", "volume"] {
-            let listed = docker(&[kind, "ls", "--all", "--quiet", "--filter", &label])
-                .or_else(|| docker(&[kind, "ls", "--quiet", "--filter", &label]))
-                .unwrap_or_default();
-            for object in listed.split_whitespace() {
-                let _ = match kind {
-                    "container" => docker(&["rm", "--force", "--", object]),
-                    _ => docker(&["volume", "rm", "--", object]),
-                };
-            }
-        }
+    /// Leaves the world's objects and state directory behind with its
+    /// owner file unlocked, as a test process that was killed leaves them,
+    /// and returns the state directory.
+    fn leave_behind(self) -> PathBuf {
+        self.owner.release();
+        let state = self.state.path().to_path_buf();
+        std::mem::forget(self);
+        state
     }
 }
 
 impl Drop for World {
     fn drop(&mut self) {
-        self.clean();
+        remove_labelled(&format!("{}workspace-id={}", self.phase.labels(), self.id));
     }
+}
+
+#[test]
+fn a_world_that_never_drops_leaves_no_container_once_the_next_world_starts() {
+    if !docker_ready() {
+        return;
+    }
+    let world = World::new();
+    let plan = world.plan(vec![app("db", "exec sleep 60")]);
+    let report = world.up(&plan);
+    assert_eq!(outcome(&report, "db"), &AppOutcome::Started, "{report:?}");
+    let container = world.container("db", "server").unwrap();
+    let state = world.leave_behind();
+
+    let _next = World::new();
+
+    let left = docker(&["container", "inspect", "--", &container]);
+    let _ = std::fs::remove_dir_all(&state);
+    assert!(
+        left.is_none(),
+        "the container {container} of a world left behind still exists"
+    );
 }
 
 /// Returns a TCP port on 127.0.0.1 and the listener that holds it, which
