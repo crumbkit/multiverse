@@ -115,22 +115,39 @@ impl Context {
     /// Takes the workspace's lock, which `up`, `down` and `restart` hold
     /// while they start or stop its processes, then reads the workspace's
     /// record again, so the ports are the ones that a command which held
-    /// the lock before stored.
+    /// the lock before stored. A record that held no stable id before the
+    /// wait and holds one after counts as the same workspace, because any
+    /// write gives such a record its first id; so a workspace without an
+    /// id that another workspace of the name replaced during the wait is
+    /// not detected. A record that held an id and holds none after the
+    /// wait, which only an older mxv writes, also counts as the same.
     ///
     /// # Errors
     ///
     /// Returns [`MxvFailure::NotFound`] when the record is gone once the
     /// command holds the lock, such as when an `mxv archive` held the lock
-    /// first and deleted it. The command then writes nothing and starts or
-    /// stops nothing.
+    /// first and deleted it, and [`MxvFailure::Replaced`] when the record
+    /// under the lock holds another stable id than the one the command
+    /// read before, because an `mxv restore` or `mxv new` made another
+    /// workspace of the name meanwhile. The command then writes nothing
+    /// and starts or stops nothing.
     pub(crate) fn lock(&mut self) -> Result<WorkspaceLock, MxvFailure> {
         let lock = self.runs.lock(&self.workspace.name)?;
-        self.workspace =
-            self.store
-                .read(&self.workspace.name)?
-                .ok_or_else(|| MxvFailure::NotFound {
-                    name: self.workspace.name.to_string(),
-                })?;
+        let read = self
+            .store
+            .read(&self.workspace.name)?
+            .ok_or_else(|| MxvFailure::NotFound {
+                name: self.workspace.name.to_string(),
+            })?;
+        if let (Some(before), Some(now)) = (&self.workspace.id, &read.id)
+            && before != now
+        {
+            return Err(MxvFailure::Replaced {
+                name: self.workspace.name.to_string(),
+                id: now.to_string(),
+            });
+        }
+        self.workspace = read;
         Ok(lock)
     }
 
@@ -478,19 +495,13 @@ fn selection(workspace: &Workspace, manifest: &Manifest, named: &[String]) -> Ve
 
 /// Asks the person at the terminal to grant the permissions that the units
 /// `units` returns for the workspace's manifest ask for beyond the grant of
-/// the workspace's repository, and adds them to the grant on yes. It runs
-/// before the command takes the workspace's lock for its builds and
-/// starts, so a person who walks away from the question keeps no other
-/// command of the workspace waiting. A workspace whose record holds no
-/// stable id gets one first, saved under the lock, which it releases
-/// before it asks. Without a terminal, or with `--no-input`, it asks
-/// nothing, and the check under the lock refuses.
+/// the workspace's repository, as [`ask_person`] does. Without a terminal,
+/// or with `--no-input`, it asks nothing, and the check under the lock
+/// refuses.
 ///
 /// # Errors
 ///
-/// Returns [`RunFailure::PermissionsNotGranted`] when the answer is not
-/// yes, the failures of taking the lock and saving the id, and the
-/// failures of reading or writing the grant.
+/// Returns the errors of [`ask_person`].
 fn ask_first(
     output: &Run,
     context: &Context,
@@ -499,6 +510,35 @@ fn ask_first(
     if output.no_input() || !crate::person_can_answer() {
         return Ok(());
     }
+    ask_person(
+        &mut crate::stderr_writer(),
+        &mut crate::stdin_reader(),
+        context,
+        units,
+    )
+}
+
+/// Asks a person, by writing to `prompt` and reading `input`, to grant the
+/// permissions that the units `units` returns for the workspace's manifest
+/// ask for beyond the grant of the workspace's repository, and adds them
+/// to the grant on yes. It runs before the command takes the workspace's
+/// lock for its builds and starts, so a person who walks away from the
+/// question keeps no other command of the workspace waiting. A workspace
+/// whose record holds no stable id gets one first, saved under the lock,
+/// which it releases before it asks.
+///
+/// # Errors
+///
+/// Returns [`RunFailure::PermissionsNotGranted`] when the answer is not
+/// yes, [`MxvFailure::NotFound`] when the record is gone once it holds the
+/// lock, the other failures of taking the lock and saving the id, and the
+/// failures of reading or writing the grant.
+fn ask_person(
+    prompt: &mut dyn Write,
+    input: &mut dyn BufRead,
+    context: &Context,
+    units: impl FnOnce(&Manifest) -> Vec<String>,
+) -> Result<(), crumbkit::Error> {
     // A manifest that cannot be read fails under the lock, as before.
     let Ok(manifest) = required_manifest(&context.workspace) else {
         return Ok(());
@@ -523,11 +563,7 @@ fn ask_first(
         return Ok(());
     };
     let text = question(ask.repository(), ask.paths(), ask.growth());
-    if answer(
-        &text,
-        &mut crate::stderr_writer(),
-        &mut crate::stdin_reader(),
-    ) {
+    if answer(&text, prompt, input) {
         context.runs.grant(&ask).map_err(MxvFailure::from)?;
         Ok(())
     } else {
@@ -1068,8 +1104,8 @@ pub(crate) fn containers(
 /// It holds the workspace's lock, reads the record again and the names of
 /// what still runs, and passes both to `check`, which returns why the
 /// workspace is no longer idle, or `None`. When `check` gives a reason,
-/// another mxv command holds the lock, the record was deleted while it
-/// waited for the lock, or the record says that `mxv new` did not finish
+/// another mxv command holds the lock, the record was deleted or another
+/// workspace took the name while it waited for the lock, or the record says that `mxv new` did not finish
 /// the workspace, it stops nothing and returns the reason.
 pub(crate) fn reclaim_stop(
     environment: &Environment,
@@ -1092,6 +1128,11 @@ pub(crate) fn reclaim_stop(
         Err(MxvFailure::NotFound { .. }) => {
             return Ok(Err(
                 "the workspace's record was deleted while mxv waited for its lock".to_owned(),
+            ));
+        }
+        Err(MxvFailure::Replaced { .. }) => {
+            return Ok(Err(
+                "another workspace took the name while mxv waited for its lock".to_owned(),
             ));
         }
         Err(failure) => return Err(failure.into()),

@@ -106,9 +106,10 @@ pub enum Error {
         /// The name that the record holds.
         name: String,
     },
-    /// [`crate::Store::update`] found no record of the workspace, such as
-    /// when another command archived or removed the workspace after this
-    /// one read its record, so it wrote nothing.
+    /// [`crate::Store::update`] or [`crate::Runs::stable_id`] found no
+    /// record of the workspace, such as when another command archived or
+    /// removed the workspace after this one read its record or while it
+    /// waited for the workspace's lock, so it wrote nothing.
     RecordMissing {
         /// The workspace's name.
         name: crate::name::WorkspaceName,

@@ -24,6 +24,29 @@ workspace may need to act on.
 
 ### Fixed
 
+- A command that waited for a workspace's lock while an `mxv archive` and
+  an `mxv restore` or `mxv new` replaced the workspace with another of the
+  same name now fails with `mxv::workspace::not_found` and changes
+  nothing. The message names the new workspace's stable id and says to
+  run the command again. Before, `mxv up` started the new workspace and
+  `mxv down` stopped its processes. `mxv reclaim` keeps such a workspace
+  and gives the reason.
+- `mxv up` and `mxv restart` at a terminal, on a workspace whose record
+  has no stable id, report `mxv::workspace::not_found` when an
+  `mxv archive` or `mxv remove` deleted the record while they waited for
+  the lock. Before, they reported `mxv::docker::failed`.
+  `Runs::stable_id` returns `Error::RecordMissing` in that case.
+
+### Known issues
+
+- `mxv add` does not compare the workspace's stable id after it waits for
+  the lock, so an `mxv add` that waited while the workspace was archived
+  and replaced by another of the same name adds its checkout to the new
+  workspace.
+- A command does not detect the replacement of a workspace whose record
+  held no stable id when the command read it, because any write gives
+  such a record its first id. Only records that an mxv from before
+  stable ids wrote lack an id.
 - `mxv down` of a named process that has exited, while a running process
   depends on it, succeeds and reports it stopped. Before, it failed with
   `mxv::process::still_needed`.
