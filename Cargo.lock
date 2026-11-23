@@ -1377,9 +1377,9 @@ dependencies = [
 
 [[package]]
 name = "nono"
-version = "0.81.0"
+version = "0.82.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "adc73daae02cb461002d231da6f0aa057fb70df75d73cdbd9b888b4af1cba0ec"
+checksum = "7818870ab5dad9f1786c9035f7cba90dd1f193d62ae0f91c3fbf407d6106043a"
 dependencies = [
  "der 0.8.3",
  "getrandom 0.4.3",
@@ -1632,14 +1632,14 @@ dependencies = [
 
 [[package]]
 name = "reflink-copy"
-version = "0.1.32"
+version = "0.1.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ad64f61357bcf16105a0f353f9783733409c8bd889bc326ad857959605ea927"
+checksum = "20d23b61573e4e96a48e3196327eedc4d50e30ba1ea1eae3f08187b44542e642"
 dependencies = [
  "cfg-if",
  "libc",
  "rustix",
- "windows",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
