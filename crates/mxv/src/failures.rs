@@ -258,9 +258,8 @@ pub(crate) enum MxvFailure {
     Replaced {
         /// The name.
         name: String,
-        /// The stable id of the workspace that holds the name now, or
-        /// `None` when its record holds none.
-        id: Option<String>,
+        /// The stable id of the workspace that holds the name now.
+        id: String,
     },
     /// `mxv new` did not finish the workspace, so its record names
     /// checkouts that may be missing or partial.
@@ -966,11 +965,7 @@ impl Failure for MxvFailure {
             | Self::RestoreChanged { name } => {
                 vec![Field::new("name", name)]
             }
-            Self::Replaced { name, id } => {
-                let mut fields = vec![Field::new("name", name)];
-                fields.extend(id.as_ref().map(|id| Field::new("id", id)));
-                fields
-            }
+            Self::Replaced { name, id } => vec![Field::new("name", name), Field::new("id", id)],
             Self::Dirty { name, changes, .. } => vec![
                 Field::new("name", name),
                 Field::new("changes", FieldValue::list(changes.iter())),
@@ -1469,14 +1464,10 @@ fn add_message(failure: &MxvFailure) -> String {
 
 /// Writes the message of [`MxvFailure::Replaced`] for the workspace `name`,
 /// whose name another workspace, with the stable id `id`, took.
-fn replaced(formatter: &mut fmt::Formatter<'_>, name: &str, id: Option<&str>) -> fmt::Result {
-    let replacement = id.map_or_else(
-        || "another workspace without a stable id".to_owned(),
-        |id| format!("another workspace, with the stable id {id},"),
-    );
+fn replaced(formatter: &mut fmt::Formatter<'_>, name: &str, id: &str) -> fmt::Result {
     write!(
         formatter,
-        "the workspace {name} was archived or removed while mxv waited for its lock, and {replacement} took the name, so mxv changed nothing; run the command again to act on the new workspace"
+        "the workspace {name} was archived or removed while mxv waited for its lock, and another workspace, with the stable id {id}, took the name, so mxv changed nothing; run the command again to act on the new workspace"
     )
 }
 
@@ -1484,7 +1475,7 @@ impl fmt::Display for MxvFailure {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NotFound { name } => write!(formatter, "no workspace is named {name}"),
-            Self::Replaced { name, id } => replaced(formatter, name, id.as_deref()),
+            Self::Replaced { name, id } => replaced(formatter, name, id),
             Self::Creating { name } => write!(
                 formatter,
                 "mxv new did not finish the workspace {name}, so its checkouts may be missing or partial"

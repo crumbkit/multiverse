@@ -116,7 +116,11 @@ impl Context {
     /// while they start or stop its processes, then reads the workspace's
     /// record again, so the ports are the ones that a command which held
     /// the lock before stored. A record that held no stable id before the
-    /// wait and holds one after is the same workspace.
+    /// wait and holds one after counts as the same workspace, because any
+    /// write gives such a record its first id; so a workspace without an
+    /// id that another workspace of the name replaced during the wait is
+    /// not detected. A record that held an id and holds none after the
+    /// wait, which only an older mxv writes, also counts as the same.
     ///
     /// # Errors
     ///
@@ -135,10 +139,12 @@ impl Context {
             .ok_or_else(|| MxvFailure::NotFound {
                 name: self.workspace.name.to_string(),
             })?;
-        if self.workspace.id.is_some() && read.id != self.workspace.id {
+        if let (Some(before), Some(now)) = (&self.workspace.id, &read.id)
+            && before != now
+        {
             return Err(MxvFailure::Replaced {
                 name: self.workspace.name.to_string(),
-                id: read.id.as_ref().map(ToString::to_string),
+                id: now.to_string(),
             });
         }
         self.workspace = read;

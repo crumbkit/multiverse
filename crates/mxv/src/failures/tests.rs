@@ -25,7 +25,7 @@ fn a_record_that_is_gone_at_a_write_reads_as_a_workspace_that_is_not_found() {
 fn a_workspace_replaced_during_a_lock_wait_is_not_found_and_names_the_new_stable_id() {
     let failure = MxvFailure::Replaced {
         name: "triage".to_owned(),
-        id: Some("0123456789abcdef0123456789abcdef".to_owned()),
+        id: "0123456789abcdef0123456789abcdef".to_owned(),
     };
 
     assert_eq!(failure.code(), WORKSPACE_NOT_FOUND);

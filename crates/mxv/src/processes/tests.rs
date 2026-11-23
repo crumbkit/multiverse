@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
+use std::time::Duration;
 
 use crumbkit::Failure as _;
 use multiverse::phase::{Grant, Grants, Growth, Permissions};
@@ -234,6 +235,26 @@ fn a_question_whose_workspace_stayed_while_it_waited_for_the_lock_saves_the_id_a
     assert!(prompt.ends_with("Grant them? [y/N] "), "{prompt}");
     let saved = place.store().read(&Place::name()).unwrap().unwrap();
     assert!(saved.id.is_some());
+}
+
+#[test]
+fn a_question_whose_lock_wait_runs_out_is_busy_and_saves_no_id() {
+    let place = Place::new();
+    place.without_id();
+    let mut context = place.context();
+    context.runs = place.runs().with_lock_wait(Duration::from_millis(50));
+    let before = fs::read(place.record()).unwrap();
+    let _held = place.runs().lock(&Place::name()).unwrap();
+
+    let mut prompt = Vec::new();
+    let asked = ask_person(&mut prompt, &mut "y\n".as_bytes(), &context, |_| Vec::new());
+
+    let code = asked
+        .err()
+        .map(|error| error.failure().code().as_str().to_owned());
+    assert_eq!(code.as_deref(), Some("mxv::workspace::busy"));
+    assert!(prompt.is_empty());
+    assert_eq!(fs::read(place.record()).unwrap(), before);
 }
 
 /// Runs [`Context::lock`] for `context` on another thread while this

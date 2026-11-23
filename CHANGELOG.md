@@ -36,6 +36,17 @@ workspace may need to act on.
   `mxv archive` or `mxv remove` deleted the record while they waited for
   the lock. Before, they reported `mxv::docker::failed`.
   `Runs::stable_id` returns `Error::RecordMissing` in that case.
+
+### Known issues
+
+- `mxv add` does not compare the workspace's stable id after it waits for
+  the lock, so an `mxv add` that waited while the workspace was archived
+  and replaced by another of the same name adds its checkout to the new
+  workspace.
+- A command does not detect the replacement of a workspace whose record
+  held no stable id when the command read it, because any write gives
+  such a record its first id. Only records that an mxv from before
+  stable ids wrote lack an id.
 - `mxv down` of a named process that has exited, while a running process
   depends on it, succeeds and reports it stopped. Before, it failed with
   `mxv::process::still_needed`.
