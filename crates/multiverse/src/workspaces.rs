@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use serde::{Deserialize, Serialize};
 
 use crate::archive::KeptRef;
-use crate::backend::{Backend, INITIALIZING, RefHolder};
+use crate::backend::{Backend, INITIALIZING, RefHolder, Repository};
 use crate::disposable::{DisposableSet, DisposableSource, PathGlob};
 use crate::error::Error;
 use crate::git::{FETCH_DEADLINE, LOCAL_DEADLINE};
@@ -1324,16 +1324,10 @@ impl<B: Backend> Workspaces<B> {
         };
         for ancestor in dir.ancestors() {
             match self.backend.repository(ancestor) {
-                Ok(repository) => {
+                Ok(Repository { root, .. }) | Err(Error::NoOrigin { repository: root }) => {
                     return Err(untrusted(format!(
                         "it lies inside the git work tree {}",
-                        repository.root.display()
-                    )));
-                }
-                Err(Error::NoOrigin { repository }) => {
-                    return Err(untrusted(format!(
-                        "it lies inside the git work tree {}",
-                        repository.display()
+                        root.display()
                     )));
                 }
                 Err(Error::RepositoryNotFound { .. }) => {}

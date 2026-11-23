@@ -907,7 +907,7 @@ fn a_manifest_source_inside_a_repository_or_under_the_root_is_refused() {
 }
 
 #[test]
-fn a_manifest_source_in_a_tracked_directory_shaped_like_a_bare_repository_is_refused() {
+fn a_manifest_source_in_a_git_directory_or_a_directory_shaped_like_one_is_refused() {
     let setup = setup();
     let fake = setup.fixture.clone.join("fake");
     for dir in ["objects", "refs", "sub"] {
@@ -928,7 +928,12 @@ fn a_manifest_source_in_a_tracked_directory_shaped_like_a_bare_repository_is_ref
             "A directory shaped like a bare repository",
         ],
     );
-    for path in [fake.join("mxv.toml"), fake.join("sub/mxv.toml")] {
+    write(setup.fixture.clone.join(".git/mxv.toml"), "ports = []\n");
+    for path in [
+        fake.join("mxv.toml"),
+        fake.join("sub/mxv.toml"),
+        setup.fixture.clone.join(".git/mxv.toml"),
+    ] {
         let error = setup
             .workspaces
             .check_manifest_source(&path, &setup.root)
