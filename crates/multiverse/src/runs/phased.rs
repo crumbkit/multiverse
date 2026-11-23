@@ -475,22 +475,42 @@ impl Runs {
         })))
     }
 
+    /// Returns the stable id of the workspace `name`, which the caller
+    /// passes to [`Runs::granting`]. When the record in `store` holds no id,
+    /// it mints one and saves the record with it while `lock`, the
+    /// workspace's lock, is held, so no other command of the workspace
+    /// writes the record meanwhile.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::WrongLock`] when `lock` holds another workspace,
+    /// [`Error::ArchiveUnfinished`] when an archive record of the name
+    /// holds the mint, and the errors of [`Store::update`].
+    pub fn stable_id(
+        &self,
+        lock: &WorkspaceLock,
+        store: &Store,
+        name: &WorkspaceName,
+    ) -> Result<WorkspaceId, Error> {
+        lock.check(name)?;
+        saved_workspace_id(store, name)
+    }
+
     /// Returns whether the grant of `workspace`'s repository covers the
     /// permissions of the host units that `names` select in `manifest`,
     /// with their dependencies, or of every unit when `names` is empty. A
     /// unit asks for more when its permissions hold an entry that the grant
     /// lacks, when it would run outside the sandbox and its grant is
     /// sandboxed, or when the grant has no entry for it. Permissions that
-    /// stay the same or shrink ask for nothing. It writes nothing, except
-    /// the workspace's stable id into `store` when the record holds none.
+    /// stay the same or shrink ask for nothing. `id` is the workspace's
+    /// stable id, which [`Runs::stable_id`] returns. It writes nothing.
     ///
     /// # Errors
     ///
-    /// Returns the errors of [`Store::update`], and [`Error::Phase`] when
-    /// the grant file cannot be read.
+    /// Returns [`Error::Phase`] when the grant file cannot be read.
     pub fn granting(
         &self,
-        store: &Store,
+        id: &WorkspaceId,
         workspace: &Workspace,
         manifest: &Manifest,
         names: &[String],
@@ -499,11 +519,7 @@ impl Runs {
             Ok(order) => order,
             Err(unknown) => return Ok(Granting::UnknownProcess(unknown)),
         };
-        let id = match &workspace.id {
-            Some(id) => id.clone(),
-            None => saved_workspace_id(store, &workspace.name)?,
-        };
-        Ok(match self.ask_of(workspace, &id, manifest, &order)? {
+        Ok(match self.ask_of(workspace, id, manifest, &order)? {
             Ok(None) => Granting::Covered,
             Ok(Some(ask)) => Granting::Asks(ask),
             Err(unrunnable) => Granting::Unrunnable(unrunnable),
@@ -516,8 +532,8 @@ impl Runs {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Busy`] when another grant holds the grant file's
-    /// lock, [`Error::Unwritable`] when it cannot be written, and
+    /// Returns [`Error::GrantsBusy`] when another grant holds the grant
+    /// file's lock, [`Error::Unwritable`] when it cannot be written, and
     /// [`Error::Phase`] when it cannot be read.
     pub fn grant(&self, ask: &PermissionAsk) -> Result<(), Error> {
         self.phase
@@ -1259,7 +1275,9 @@ impl Runs {
     /// phase's status rows `rows` of the workspace whose stable id is `id`
     /// and the dependencies of its run record. A kept unit leaves the
     /// stopped set and still needs what it depends on, so the rule runs
-    /// until nothing more is kept.
+    /// until nothing more is kept. A named unit whose row cannot run, such
+    /// as one that exited, is never kept, because keeping it would keep
+    /// nothing running, and phase's `down` reports it stopped.
     fn still_needed(
         &self,
         id: &WorkspaceId,
@@ -1287,11 +1305,14 @@ impl Runs {
                 .filter(|dependant| !named.contains(dependant.as_str()) || kept.contains(dependant))
                 .collect()
         };
+        let may_run = |name: &str| rows.get(name).is_some_and(|row| row.state.may_run());
         let mut kept: BTreeSet<String> = BTreeSet::new();
         loop {
             let more: Vec<String> = names
                 .iter()
-                .filter(|name| !kept.contains(*name) && !needing(name, &kept).is_empty())
+                .filter(|name| {
+                    !kept.contains(*name) && may_run(name) && !needing(name, &kept).is_empty()
+                })
                 .cloned()
                 .collect();
             if more.is_empty() {
