@@ -456,7 +456,11 @@ fn build<'lock>(
 /// Returns the units that `up` starts in `workspace` when the command line
 /// names `named`: `named` itself, or, when it is empty and `mxv reclaim`
 /// marked the workspace, the marked units that `manifest` still declares.
-/// An empty result means every unit of the manifest.
+/// An empty result means every unit of the manifest. When another
+/// `mxv up` starts the last marked units between the question and the
+/// lock, the selection under the lock becomes every unit, and the build
+/// refuses with `mxv::permissions::not_granted`; nothing starts, and
+/// running the command again asks again.
 fn selection(workspace: &Workspace, manifest: &Manifest, named: &[String]) -> Vec<String> {
     match &workspace.reclaimed {
         // `mxv reclaim` recorded what ran, so `up` starts the same
@@ -580,10 +584,8 @@ pub(crate) fn up(
     crate::preflight::announce(environment, &context.workspace);
     let lock = context.lock_live()?;
     context.mark(&lock)?;
-    if let Ok(Some(manifest)) = context.workspace.manifest() {
-        context.processes = selection(&context.workspace, &manifest, &context.processes);
-    }
     let manifest = required_manifest(&context.workspace)?;
+    context.processes = selection(&context.workspace, &manifest, &context.processes);
     let passed = match build(environment, &mut context, &lock, &manifest)? {
         Ok(passed) => passed,
         Err(interrupted) => return Ok(Err(interrupted)),
