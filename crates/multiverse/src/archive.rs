@@ -84,7 +84,7 @@ pub const HOST_ARCHIVE_VERSION: u32 = 4;
 
 /// The version of an archive record that holds no host data or files,
 /// which every archive of mxv is.
-pub const RETIRED_ARCHIVE_VERSION: u32 = 3;
+pub const NO_HOST_ARCHIVE_VERSION: u32 = 3;
 
 /// The message of the commits that keep a checkout's uncommitted work.
 /// This is the value of mxv's profile, [`Host::mxv`](crate::Host::mxv);

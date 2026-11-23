@@ -133,13 +133,22 @@ pub struct HostFile {
 
 /// Runs the hook of `archives`, when it has one, for the workspace of
 /// `archive`, and lists the files that it wrote in `archive`. The caller
-/// writes the record afterwards. A run that an earlier one left partway,
-/// with `host.partial/` or with `host/` that the record does not list, is
-/// redone from the start.
+/// writes the record afterwards.
+///
+/// When `host/` in the archive's data directory holds exactly the files
+/// that `archive` lists, with the same sizes, modes and digests, an earlier
+/// run finished this step, and the files are kept without a call to the
+/// hook. Otherwise, while no checkout has moved (`moved` is false), the step
+/// is redone from the start: a run that an earlier one left partway, with
+/// `host.partial/` or with `host/` that the record does not list. Once a
+/// checkout has moved, the step is never redone, because the workspace may
+/// be partly gone; the record keeps its list, and a restore checks each
+/// file against its digest.
 pub(super) fn keep(
     archives: &Archives,
     archive: &mut Archive,
     workspace: &Workspace,
+    moved: bool,
 ) -> Result<(), Error> {
     let Some(hook) = archives.hook() else {
         return Ok(());
@@ -147,6 +156,12 @@ pub(super) fn keep(
     let data = archives.data_of(&archive.id);
     let partial = data.join(PARTIAL_DIR);
     let kept = data.join(KEPT_DIR);
+    if holds_listed(&kept, archive)? {
+        return delete_directory(&partial);
+    }
+    if moved {
+        return Ok(());
+    }
     if !archive.host_files.is_empty() {
         // The record stops listing the files before they go, so it never
         // names files that are gone.
@@ -163,20 +178,47 @@ pub(super) fn keep(
             name: archive.name.clone(),
             message: error.message,
         })?;
-    let mut walk = Walk {
-        name: archive.name.clone(),
-        files: Vec::new(),
-        bytes: 0,
-    };
-    walk.dir(&partial, "")?;
-    walk.files.sort_by(|left, right| left.path.cmp(&right.path));
+    let files = walk(&archive.name, &partial)?;
     store::move_aside(&partial, &kept)?;
     store::sync_dir(&data);
-    archive.host_files = walk.files;
+    archive.host_files = files;
     Ok(())
 }
 
-/// The files that [`keep`] found so far.
+/// Reports whether `kept` is a directory that holds exactly the files that
+/// `archive` lists, with the same sizes, modes and digests. A directory
+/// that holds an entry the archive refuses, such as a link, does not.
+fn holds_listed(kept: &Path, archive: &Archive) -> Result<bool, Error> {
+    if !kept.is_dir() {
+        return Ok(false);
+    }
+    match walk(&archive.name, kept) {
+        Ok(files) => Ok(files == archive.host_files),
+        Err(
+            Error::HostFileUnkeepable { .. }
+            | Error::HostFilesTooMany { .. }
+            | Error::HostFileTooLarge { .. }
+            | Error::HostFilesTooLarge { .. },
+        ) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Returns each file below `dir`, in path order, after it checks each
+/// file's kind and the limits, and syncs the files and directories. `name`
+/// is the archive's name, which the errors name.
+fn walk(name: &crate::name::WorkspaceName, dir: &Path) -> Result<Vec<HostFile>, Error> {
+    let mut walk = Walk {
+        name: name.clone(),
+        files: Vec::new(),
+        bytes: 0,
+    };
+    walk.dir(dir, "")?;
+    walk.files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(walk.files)
+}
+
+/// The files that [`walk`] found so far.
 struct Walk {
     /// The archive's name, which the errors name.
     name: crate::name::WorkspaceName,
@@ -268,12 +310,14 @@ fn sync_file(path: &Path) -> Result<(), Error> {
 /// permission bits 0700, checking each file against its digest, and then
 /// runs the hook's check of `workspace`. It returns the refusal when a file
 /// is missing or damaged, or the check fails. The caller marks `into` as
-/// the run's before it calls this, and deletes it after a refusal.
+/// the run's before it calls this, and deletes it after a refusal. It calls
+/// `checkpoint` with `host:<path>` after it copies each file.
 pub(super) fn put_back(
     archives: &Archives,
     archive: &Archive,
     workspace: &Workspace,
     into: &Path,
+    checkpoint: fn(&str) -> Result<(), Error>,
 ) -> Result<Result<(), RestoreRefusal>, Error> {
     let Some(hook) = archives.hook() else {
         return Ok(Ok(()));
@@ -296,6 +340,7 @@ pub(super) fn put_back(
             }
             Err(error) => return Err(error),
         }
+        checkpoint(&format!("host:{}", file.path))?;
     }
     if !damaged.is_empty() {
         return Ok(Err(RestoreRefusal::HostFilesDamaged { paths: damaged }));

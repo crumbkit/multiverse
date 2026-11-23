@@ -12,7 +12,7 @@ use crate::archive::record::now;
 use crate::archive::root::{self, RootEntry, RootKind, Scanned};
 use crate::archive::{
     ARCHIVE_MAX_FILE, Archive, ArchiveId, ArchiveState, ArchivedCheckout, Archives, DIGEST_LENGTH,
-    Kept, KeptStash, RECORD_FILE, RETIRED_ARCHIVE_VERSION, pin_ref,
+    Kept, KeptStash, NO_HOST_ARCHIVE_VERSION, RECORD_FILE, pin_ref,
 };
 use crate::backend::{Backend, Concealed, Head, Operation, RefHolder};
 use crate::disk::DisposablePath;
@@ -1181,8 +1181,8 @@ impl ArchivePlan {
             }
         }
         let earlier = self.resuming.as_ref();
-        let mut archive = Archive {
-            version: RETIRED_ARCHIVE_VERSION,
+        Archive {
+            version: NO_HOST_ARCHIVE_VERSION,
             id: self.id.clone(),
             state: self.start.state(),
             time: earlier.map_or_else(now, |archive| archive.time),
@@ -1218,11 +1218,13 @@ impl ArchivePlan {
                 })
                 .unwrap_or_default(),
             host: workspace.host.clone(),
-            host_files: Vec::new(),
+            // The files that an earlier run's hook wrote stay listed, so a
+            // resumed archive keeps them and does not run the hook again.
+            host_files: earlier
+                .map(|archive| archive.host_files.clone())
+                .unwrap_or_default(),
             restoring: None,
-        };
-        archive.raise_version();
-        archive
+        }
     }
 
     /// Returns the size that the record of this plan would have, in bytes,

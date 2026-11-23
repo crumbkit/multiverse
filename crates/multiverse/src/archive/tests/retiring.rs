@@ -86,7 +86,7 @@ fn an_archive_writes_the_retiring_state_before_its_record_and_retired_before_the
         stopped_at(&setup, "record");
         let archive = setup.record().unwrap();
         assert_eq!(archive.state, ArchiveState::Retiring, "{kind:?}");
-        assert_eq!(archive.version, RETIRED_ARCHIVE_VERSION, "{kind:?}");
+        assert_eq!(archive.version, NO_HOST_ARCHIVE_VERSION, "{kind:?}");
         assert_eq!(
             workspace(&setup).state(),
             WorkspaceState::retiring(archive.id.clone()),
@@ -327,7 +327,7 @@ fn an_older_retiring_archive_beside_a_record_without_a_state_resumes_as_version_
             stopped_at(&setup, "record");
             let archive = setup.record().unwrap();
             assert_eq!(
-                archive.version, RETIRED_ARCHIVE_VERSION,
+                archive.version, NO_HOST_ARCHIVE_VERSION,
                 "{kind:?}, ids {ids}"
             );
             assert_eq!(archive.workspace_id, held.id, "{kind:?}, ids {ids}");

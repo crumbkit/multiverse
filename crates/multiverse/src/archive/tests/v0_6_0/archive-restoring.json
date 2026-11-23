@@ -1,0 +1,59 @@
+{
+  "version": 3,
+  "id": "6217ffbea16d81747cf9d026880a0e4b",
+  "state": "archived",
+  "time": 1795392193,
+  "name": "triage",
+  "workspace_id": "0d62070e8b61e55438388fec13cd8110",
+  "kind": "clone",
+  "path": "/work/mxv/triage",
+  "checkouts": [
+    {
+      "folder": "app",
+      "path": "/work/mxv/triage/app",
+      "source": "/fixture/app",
+      "origin": "/fixture/origin.git",
+      "branch": "triage",
+      "base": "refs/remotes/origin/main",
+      "commit": "40dabf0b6355740c1b69caffeebe0a189c76375d",
+      "mirror": "/work/mirrors/local/fixture/origin.git.git",
+      "pin": "refs/mxv/archives/6217ffbea16d81747cf9d026880a0e4b/app/head",
+      "local_only": [
+        "40dabf0b6355740c1b69caffeebe0a189c76375d",
+        "c0ef55d18af650f3de2b871c7346f6889148c796"
+      ],
+      "kept": {
+        "wip": {
+          "index": "1986159c4688c9ba3c30a33e83ba1309a82bf656",
+          "worktree": "d0ffeda8a94ea04193a72c99184f8c2a4dfe1a7b"
+        }
+      }
+    }
+  ],
+  "root": [
+    {
+      "path": "notes.md",
+      "kind": "file",
+      "digest": "2b8425c4d20e743705f4787b4dda39344b4242bc8636228a00b7d65378aa7694",
+      "mode": 420
+    }
+  ],
+  "ignored": [
+    {
+      "path": "app/.env",
+      "kind": "file",
+      "size": 9,
+      "mode": 420,
+      "digest": "664049a85e2251d253ff78a9a7808b41ef4a9f14c8a1b998b6bffd40b2494808"
+    }
+  ],
+  "restoring": {
+    "directory": true,
+    "branches": [],
+    "agents": true,
+    "marker": true,
+    "manifest": false,
+    "clones": 1,
+    "refs": []
+  }
+}

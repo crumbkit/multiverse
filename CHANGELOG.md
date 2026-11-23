@@ -24,10 +24,12 @@ workspace may need to act on.
   with `RestoreRefusal::HostFilesDamaged`, and a failed check with
   `RestoreRefusal::HostCheckFailed`; both undo the restore and keep the
   archive. An archive keeps at most 1,000 host files and 1 GiB of them,
-  and stops before any checkout moves when the hook writes more.
+  and stops before any checkout moves when the hook writes more. A
+  resumed archive keeps the host files of its earlier run.
 - A workspace or archive that another host profile owns is refused with
   `Error::OtherHost` by `remove`, `archive`, `restore` and
-  `set_host_data`, before anything is written. mxv reports it as
+  `set_host_data`, before anything is written. `add` and the port writes
+  do not check the owner, and keep the record's host data. mxv reports it as
   `mxv::workspace::other_host` and names the owner.
 - A restore without a hook refuses an archive that holds host files with
   `RestoreRefusal::HostHookMissing`, which mxv reports as
@@ -36,8 +38,10 @@ workspace may need to act on.
 ### Changed
 
 - A workspace record that holds host data is written at version 5, and an
-  archive record that holds host data or files at version 4. Records and
-  archives without them keep their versions and bytes, so mxv's own are
+  archive record that holds host data or files at version 4
+  (`HOST_ARCHIVE_VERSION`; one without them stays at
+  `NO_HOST_ARCHIVE_VERSION`, 3). Records and archives without them keep
+  their versions and bytes, so mxv's own are
   unchanged and an older mxv still reads them. multiverse 0.6.0 and older
   refuse a version-5 record instead of rewriting it without the host's
   data.

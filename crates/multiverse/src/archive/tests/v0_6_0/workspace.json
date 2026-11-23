@@ -1,0 +1,20 @@
+{
+  "version": 3,
+  "kind": "clone",
+  "id": "0d62070e8b61e55438388fec13cd8110",
+  "state": "live",
+  "name": "triage",
+  "path": "/work/mxv/triage",
+  "checkouts": [
+    {
+      "name": "app",
+      "backend": "git",
+      "source": "/fixture/app",
+      "path": "/work/mxv/triage/app",
+      "branch": "triage",
+      "base": "refs/remotes/origin/main",
+      "commit": "0dce4112a344e128c6fbb4a5708baf6deb76472e",
+      "mirror": "/work/mirrors/local/fixture/origin.git.git"
+    }
+  ]
+}

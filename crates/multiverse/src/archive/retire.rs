@@ -10,7 +10,7 @@ use std::path::Path;
 use crate::archive::admit::{ArchivePlan, ArchivePlanned, ArchiveRefusal, submodule_items};
 use crate::archive::root::Owner;
 use crate::archive::{
-    Archive, ArchiveState, ArchivedCheckout, Archives, KeptWip, RETIRED_ARCHIVE_VERSION, quarantine,
+    Archive, ArchiveState, ArchivedCheckout, Archives, KeptWip, NO_HOST_ARCHIVE_VERSION, quarantine,
 };
 use crate::archive::{IgnoredEntry, IgnoredSource, host_files, ignored, root};
 use crate::backend::{Backend, Head, RefHolder, WipTrees};
@@ -384,10 +384,10 @@ impl<B: Backend> Workspaces<B> {
         // names. The record takes the stable id that the move to retiring
         // gave a workspace without one.
         let mut archive = plan.record(&name);
-        archives.write(&archive)?;
+        archives.write(&mut archive)?;
         (self.checkpoint)("record")?;
         self.commit_wip(&plan, &mut archive, &index)?;
-        archives.write(&archive)?;
+        archives.write(&mut archive)?;
         (self.checkpoint)("wip")?;
         for (planned, archived) in retiring_in(&plan, &archive) {
             self.pin(planned, archived)?;
@@ -401,7 +401,7 @@ impl<B: Backend> Workspaces<B> {
             let carried = archive.ignored.clone();
             archive.ignored =
                 ignored::keep_carrying(&archives.data_of(&archive.id), &sources, &carried)?;
-            archives.write(&archive)?;
+            archives.write(&mut archive)?;
         }
         (self.checkpoint)("ignored")?;
         let generated = self.generated_agents(&plan.removal.workspace)?;
@@ -413,12 +413,20 @@ impl<B: Backend> Workspaces<B> {
             &generated,
             Owner::of(archives, &self.host),
         )?;
-        archives.write(&archive)?;
+        archives.write(&mut archive)?;
         (self.checkpoint)("root")?;
         // The host's files are kept and listed before any checkout moves,
         // so a hook that fails leaves the workspace whole.
-        host_files::keep(archives, &mut archive, &plan.removal.workspace)?;
-        archives.write(&archive)?;
+        // A checkout whose directory is gone was moved by an earlier run of
+        // this archive, because the plan refuses a gone checkout that no
+        // earlier run listed.
+        let moved = plan
+            .removal
+            .checkouts
+            .iter()
+            .any(|planned| planned.directory != Fate::Removed);
+        host_files::keep(archives, &mut archive, &plan.removal.workspace, moved)?;
+        archives.write(&mut archive)?;
         (self.checkpoint)("host")?;
         let mut late = Vec::new();
         for (planned, archived) in retiring_in(&plan, &archive) {
@@ -531,7 +539,7 @@ impl<B: Backend> Workspaces<B> {
     ) -> Result<ArchiveOutcome, Error> {
         let name = archive.name.clone();
         archive.state = ArchiveState::Retired;
-        archives.write(&archive)?;
+        archives.write(&mut archive)?;
         (self.checkpoint)("retired")?;
         for planned in &mut removal.checkouts {
             // A worktree's branch stays in its repository, and the pin
@@ -575,8 +583,7 @@ impl<B: Backend> Workspaces<B> {
         archive: &mut Archive,
     ) -> Result<(), Error> {
         archive.state = ArchiveState::Archived;
-        archive.version = RETIRED_ARCHIVE_VERSION;
-        archive.raise_version();
+        archive.version = NO_HOST_ARCHIVE_VERSION;
         archives.write(archive)
     }
 

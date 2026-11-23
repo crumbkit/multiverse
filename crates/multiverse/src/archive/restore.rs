@@ -624,7 +624,7 @@ impl<B: Backend> Workspaces<B> {
             return Ok(());
         };
         record.restoring = made.map(|made| RestoreMark(made.clone()));
-        archives.write(&record)
+        archives.write(&mut record)
     }
 
     /// Fetches the origin of the clone `checkout` into its mirror, as a
@@ -912,11 +912,16 @@ impl<B: Backend> Workspaces<B> {
         // The archive leaves the marker out, so the run writes it again,
         // after the root entries in case an older archive holds one.
         self.write_marker(workspace, made)?;
-        if archives.hook().is_some() {
+        // An archive without host data or files has nothing for the hook to
+        // check, so its restore leaves the step and the mark's `host` out.
+        let holds_host = archive.host.is_some() || !archive.host_files.is_empty();
+        if archives.hook().is_some() && holds_host {
             made.host = true;
             self.mark(archives, &archive.name, Some(made))?;
             let into = archive.path.join(self.host.host_dir());
-            if let Err(refusal) = host_files::put_back(archives, archive, workspace, &into)? {
+            if let Err(refusal) =
+                host_files::put_back(archives, archive, workspace, &into, self.checkpoint)?
+            {
                 return Ok(Err(refusal));
             }
         }

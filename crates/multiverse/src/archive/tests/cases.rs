@@ -163,7 +163,7 @@ fn retiring_beside_its_workspace_without_ids(setup: &Setup) -> WorkspaceName {
     );
     let mut archive = setup.record().unwrap();
     archive.workspace_id = None;
-    setup.archives.write(&archive).unwrap();
+    setup.archives.write(&mut archive).unwrap();
     name()
 }
 
@@ -307,7 +307,7 @@ fn archived_with_a_restore_mark(setup: &Setup) -> WorkspaceName {
     setup.create();
     let mut archive = setup.archive();
     archive.restoring = Some(crate::archive::RestoreMark::default());
-    setup.archives.write(&archive).unwrap();
+    setup.archives.write(&mut archive).unwrap();
     name()
 }
 
@@ -324,7 +324,7 @@ fn stopped_rename(setup: &Setup, newer: bool) -> Archive {
     let archive = retired_alone(setup);
     setup
         .archives
-        .write(&archive.renamed(&dated(&archive)))
+        .write(&mut archive.renamed(&dated(&archive)))
         .unwrap();
     if newer {
         setup.create();
@@ -424,7 +424,7 @@ fn repaired_text(repaired: Result<Repaired, Error>, old: &str) -> String {
             // A renamed archive is always one that `mxv archive -w`
             // finishes, at this version.
             assert_eq!(archive.state, ArchiveState::Retired);
-            assert_eq!(archive.version, RETIRED_ARCHIVE_VERSION);
+            assert_eq!(archive.version, NO_HOST_ARCHIVE_VERSION);
             "rename to the dated name".to_owned()
         }
         Ok(Repaired::Deleted(_)) => "delete".to_owned(),

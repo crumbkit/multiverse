@@ -195,11 +195,11 @@ fn a_repair_that_stopped_after_it_deleted_the_work_runs_again() {
     for kind in [Kind::Worktree, Kind::Clone] {
         let made = archived(kind);
         made.kill_at("root");
-        let stopped = made.marked();
+        let mut stopped = made.marked();
         made.repair(Mode::Change);
         // A kill between the undo and the write that clears the mark leaves
         // the mark over what is already gone.
-        made.setup.archives.write(&stopped).unwrap();
+        made.setup.archives.write(&mut stopped).unwrap();
         assert!(matches!(made.repair(Mode::Change), Repaired::Undone { .. }));
         assert_eq!(made.marked(), made.archive, "{kind:?}");
         assert_eq!(made.worktrees(), 1, "{kind:?}");
@@ -247,7 +247,7 @@ fn a_directory_that_the_person_made_is_not_touched_by_a_restore() {
     // cover a directory that holds files.
     let mut marked = archive;
     marked.restoring = Some(RestoreMark::default());
-    setup.archives.write(&marked).unwrap();
+    setup.archives.write(&mut marked).unwrap();
     assert!(matches!(
         setup.restore_refusal(),
         RestoreRefusal::NameTaken { record: false, .. }
@@ -264,7 +264,7 @@ fn an_empty_directory_left_before_the_mark_said_so_is_removed_and_the_restore_fi
     setup.create();
     let mut archive = setup.archive();
     archive.restoring = Some(RestoreMark::default());
-    setup.archives.write(&archive).unwrap();
+    setup.archives.write(&mut archive).unwrap();
     fs::create_dir_all(setup.root.join("triage")).unwrap();
     setup.restore();
     assert!(setup.checkout().is_dir());
@@ -280,7 +280,7 @@ fn a_directory_that_the_mark_says_the_run_made_is_deleted_with_the_half_written_
     mark.0.directory = true;
     mark.0.agents = true;
     archive.restoring = Some(mark);
-    setup.archives.write(&archive).unwrap();
+    setup.archives.write(&mut archive).unwrap();
     let left = setup.root.join("triage");
     fs::create_dir_all(&left).unwrap();
     write(left.join("AGENTS.md"), "half\n");
@@ -299,7 +299,7 @@ fn a_half_written_file_with_crumbkits_temporary_name_is_deleted_with_the_directo
     mark.0.directory = true;
     mark.0.agents = true;
     archive.restoring = Some(mark);
-    setup.archives.write(&archive).unwrap();
+    setup.archives.write(&mut archive).unwrap();
     let left = setup.root.join("triage");
     fs::create_dir_all(&left).unwrap();
     write(left.join(".AGENTS.md.99999.0.tmp"), "half\n");
@@ -439,7 +439,7 @@ fn a_regular_file_where_the_mark_names_a_checkout_or_a_root_directory_is_the_per
         path: "docs".to_owned(),
         kind: crate::archive::RootKind::Directory { mode: 0o755 },
     });
-    made.setup.archives.write(&stopped).unwrap();
+    made.setup.archives.write(&mut stopped).unwrap();
     write(dir.join("docs"), "mine\n");
     // A checkout's folder that the person replaced with a file.
     git(
@@ -506,7 +506,7 @@ fn a_record_without_a_mark_has_no_restoring_key_and_a_mark_round_trips() {
         KeptRef::of_commit(&crate::Host::mxv(), "abc").unwrap(),
     ));
     archive.restoring = Some(mark);
-    setup.archives.write(&archive).unwrap();
+    setup.archives.write(&mut archive).unwrap();
     assert_eq!(setup.record(), Some(archive));
 }
 

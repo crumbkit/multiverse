@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::archive::ignored::{IGNORED_TAR, IgnoredEntry};
 use crate::archive::root::RootEntry;
 use crate::archive::{
-    ARCHIVE_VERSION, ArchiveHook, HEAD_PIN, HOST_ARCHIVE_VERSION, Hook, HostFile, RECORD_FILE,
-    RETIRED_ARCHIVE_VERSION, WIP_INDEX,
+    ARCHIVE_VERSION, ArchiveHook, HEAD_PIN, HOST_ARCHIVE_VERSION, Hook, HostFile,
+    NO_HOST_ARCHIVE_VERSION, RECORD_FILE, WIP_INDEX,
 };
 use crate::backend::RefHolder;
 use crate::error::Error;
@@ -330,7 +330,7 @@ impl ArchivedCheckout {
 #[non_exhaustive]
 pub struct Archive {
     /// The version of the record form: [`HOST_ARCHIVE_VERSION`] when it
-    /// holds a host's data or files, and [`RETIRED_ARCHIVE_VERSION`] or an
+    /// holds a host's data or files, and [`NO_HOST_ARCHIVE_VERSION`] or an
     /// older one otherwise.
     pub version: u32,
     /// The archive's own id, which names its pins.
@@ -468,8 +468,7 @@ impl Archive {
         if renamed.counts_as_retired() {
             renamed.state = ArchiveState::Retired;
         }
-        renamed.version = RETIRED_ARCHIVE_VERSION;
-        renamed.raise_version();
+        renamed.version = NO_HOST_ARCHIVE_VERSION;
         renamed.name = to.clone();
         if let Some(parent) = self.path.parent() {
             renamed.path = parent.join(to.as_str());
@@ -534,18 +533,11 @@ impl Archive {
     }
 
     /// Raises the record's version to [`HOST_ARCHIVE_VERSION`] when it holds
-    /// a host's data or files.
-    pub(crate) fn raise_version(&mut self) {
-        self.version = self.stored_version();
-    }
-
-    /// Returns the version that the record is written at: its own, raised
-    /// to [`HOST_ARCHIVE_VERSION`] when it holds a host's data or files.
-    fn stored_version(&self) -> u32 {
+    /// a host's data or files. [`Archives::write`] calls it before each
+    /// write.
+    fn raise_version(&mut self) {
         if self.host.is_some() || !self.host_files.is_empty() {
-            self.version.max(HOST_ARCHIVE_VERSION)
-        } else {
-            self.version
+            self.version = self.version.max(HOST_ARCHIVE_VERSION);
         }
     }
 
@@ -757,20 +749,15 @@ impl Archives {
     }
 
     /// Writes the record of `archive`, and syncs it and its directory before
-    /// it returns. The archive's directory is private to the person.
-    pub(super) fn write(&self, archive: &Archive) -> Result<(), Error> {
+    /// it returns. The archive's directory is private to the person. This is
+    /// the one place that raises an archive's version to
+    /// [`HOST_ARCHIVE_VERSION`] when it holds a host's data or files, so the
+    /// record in memory and on disk name the same version.
+    pub(super) fn write(&self, archive: &mut Archive) -> Result<(), Error> {
+        archive.raise_version();
         let dir = self.dir_of(&archive.name);
         store::private_dir(&dir)?;
         let target = dir.join(RECORD_FILE);
-        let raised;
-        let archive = if archive.stored_version() == archive.version {
-            archive
-        } else {
-            let mut copy = archive.clone();
-            copy.version = archive.stored_version();
-            raised = copy;
-            &raised
-        };
         let mut bytes =
             serde_json::to_vec_pretty(archive).map_err(|source| Error::CorruptRecord {
                 path: target.clone(),
@@ -846,8 +833,8 @@ impl Archives {
     /// fails, and [`Error::StateUnreadable`] when the old directory cannot
     /// be read.
     pub(crate) fn rename(&self, archive: &Archive, to: &WorkspaceName) -> Result<Archive, Error> {
-        let renamed = archive.renamed(to);
-        self.write(&renamed)?;
+        let mut renamed = archive.renamed(to);
+        self.write(&mut renamed)?;
         let old = self.dir_of(&archive.name);
         let new = self.dir_of(to);
         let unreadable = |source| Error::StateUnreadable {

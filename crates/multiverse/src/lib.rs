@@ -55,10 +55,10 @@ pub use crate::archive::{
     ArchiveOutcome, ArchivePlan, ArchivePlanned, ArchiveRecords, ArchiveRefusal, ArchiveState,
     ArchivedCheckout, ArchivedRemoval, Archives, FileStatus, HOST_ARCHIVE_VERSION, HookError,
     HostFile, IgnoredEntry, IgnoredKind, IgnoredSource, KEPT_NAMESPACE, Kept, KeptStash, KeptWip,
-    LostPin, MOST_HOST_FILE_BYTES, MOST_HOST_FILES, MirrorLoss, OLDER_ARCHIVE_VERSION, PortChange,
-    PutBack, RETIRED_ARCHIVE_VERSION, RestoreMark, RestoreOptions, RestoreOutcome, RestorePlan,
-    RestorePlanned, RestoreRefusal, Restored, RootEntry, RootKind, Uncommitted, Unkeepable, Unkept,
-    UnkeptKind, WIP_MESSAGE,
+    LostPin, MOST_HOST_FILE_BYTES, MOST_HOST_FILES, MirrorLoss, NO_HOST_ARCHIVE_VERSION,
+    OLDER_ARCHIVE_VERSION, PortChange, PutBack, RestoreMark, RestoreOptions, RestoreOutcome,
+    RestorePlan, RestorePlanned, RestoreRefusal, Restored, RootEntry, RootKind, Uncommitted,
+    Unkeepable, Unkept, UnkeptKind, WIP_MESSAGE,
 };
 pub use crate::backend::{
     Backend, Changes, Concealed, Head, Hidden, INITIALIZING, LargeFile, Listed, LocalNames,

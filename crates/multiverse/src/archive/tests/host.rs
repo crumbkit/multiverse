@@ -377,6 +377,156 @@ fn a_later_archive_does_not_copy_the_host_directory_as_a_root_entry() {
     assert!(!hosted.setup.root.join("triage").exists());
 }
 
+/// Stops an archive at `step`, changes the files that the hook's save
+/// would write, runs the archive again, and checks that the archive keeps
+/// the files of the first run and a restore puts them back.
+fn host_files_survive_a_resume_after(kind: Kind, step: &'static str) {
+    let hosted = hosted(kind);
+    hosted.create();
+    stop_at(step);
+    let plan = hosted.setup.plan(ArchiveOptions::default());
+    let stopped = hosted
+        .setup
+        .workspaces
+        .archive(&hosted.setup.archives, plan);
+    clear_hook();
+    assert!(stopped.is_err(), "{kind:?}, {step}: the run did not stop");
+    let first = hosted.setup.record().unwrap().host_files;
+    assert_eq!(first.len(), 2, "{kind:?}, {step}");
+    fs::remove_dir_all(&hosted.evidence.source).unwrap();
+    fs::create_dir(&hosted.evidence.source).unwrap();
+    write(hosted.evidence.source.join("run.log"), "passed 0 of 12\n");
+
+    let mut archive = match hosted.setup.planned(ArchiveOptions::default()) {
+        ArchivePlanned::Finish(archive) | ArchivePlanned::Unchanged(archive) => *archive,
+        ArchivePlanned::Ready(plan) => {
+            match hosted
+                .setup
+                .workspaces
+                .archive(&hosted.setup.archives, *plan)
+                .unwrap()
+            {
+                ArchiveOutcome::Retired { archive, .. } => *archive,
+                ArchiveOutcome::Refused(refusal) => panic!("{kind:?}, {step}: {refusal:?}"),
+            }
+        }
+        ArchivePlanned::Refused(refusal) => panic!("{kind:?}, {step}: {refusal:?}"),
+    };
+    hosted
+        .setup
+        .workspaces
+        .finish_archive(&hosted.setup.archives, &mut archive)
+        .unwrap();
+
+    assert_eq!(archive.host_files, first, "{kind:?}, {step}");
+    for file in &first {
+        let kept = hosted.kept_dir(&archive).join(&file.path);
+        assert_eq!(
+            crate::store::file_digest(&kept).unwrap(),
+            file.digest,
+            "{kind:?}, {step}: {}",
+            file.path
+        );
+    }
+    hosted.setup.restore();
+    assert_eq!(
+        fs::read_to_string(hosted.host_dir().join("run.log")).unwrap(),
+        "passed 12 of 12\n",
+        "{kind:?}, {step}"
+    );
+    assert!(
+        hosted.host_dir().join("notes/task.md").is_file(),
+        "{kind:?}, {step}"
+    );
+}
+
+#[test]
+fn an_archive_resumed_after_its_host_step_keeps_the_host_files_of_the_first_run() {
+    for kind in [Kind::Worktree, Kind::Clone] {
+        for step in [
+            "host",
+            "before-move:app",
+            "cleared:app",
+            "retired:app",
+            "delete",
+        ] {
+            host_files_survive_a_resume_after(kind, step);
+        }
+    }
+}
+
+#[test]
+fn a_restore_of_an_archive_without_host_data_or_files_skips_the_host_step() {
+    let hosted = hosted(Kind::Worktree);
+    fs::remove_dir_all(&hosted.evidence.source).unwrap();
+    fs::create_dir(&hosted.evidence.source).unwrap();
+    hosted.setup.create();
+    let archive = hosted.setup.archive();
+    assert!(archive.host.is_none());
+    assert!(archive.host_files.is_empty());
+    assert_eq!(archive.version, NO_HOST_ARCHIVE_VERSION);
+    set_hook(|at| {
+        assert_ne!(at, "host", "killed at host");
+        Ok(())
+    });
+    let plan = hosted.setup.restore_plan();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        drop(
+            hosted
+                .setup
+                .workspaces
+                .restore(&hosted.setup.archives, plan, &hosted.setup.runs),
+        );
+    }));
+    clear_hook();
+    assert!(result.is_err(), "the run was not killed");
+    let marked = hosted.setup.record().unwrap();
+    assert_eq!(marked.version, NO_HOST_ARCHIVE_VERSION);
+    let mark = serde_json::to_value(marked.restoring.as_ref().unwrap()).unwrap();
+    assert!(mark.get("host").is_none(), "{mark}");
+
+    hosted.setup.restore();
+
+    assert!(!hosted.host_dir().exists());
+    assert!(hosted.evidence.checked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_restore_killed_partway_through_the_host_file_copy_is_undone_by_the_next_restore() {
+    let hosted = hosted(Kind::Clone);
+    hosted.create();
+    hosted.setup.archive();
+    set_hook(|at| {
+        assert_ne!(at, "host:notes/task.md", "killed during the copy");
+        Ok(())
+    });
+    let plan = hosted.setup.restore_plan();
+    let result = catch_unwind(AssertUnwindSafe(|| {
+        drop(
+            hosted
+                .setup
+                .workspaces
+                .restore(&hosted.setup.archives, plan, &hosted.setup.runs),
+        );
+    }));
+    clear_hook();
+    assert!(result.is_err(), "the run was not killed");
+    assert!(hosted.host_dir().join("notes/task.md").is_file());
+    assert!(!hosted.host_dir().join("run.log").exists());
+
+    hosted.setup.restore();
+
+    assert_eq!(
+        fs::read_to_string(hosted.host_dir().join("run.log")).unwrap(),
+        "passed 12 of 12\n"
+    );
+    assert_eq!(
+        *hosted.evidence.checked.lock().unwrap(),
+        [hosted.host_dir()]
+    );
+    assert!(hosted.setup.record().is_none());
+}
+
 #[test]
 fn a_restore_killed_during_the_host_step_is_undone_by_the_next_restore() {
     let hosted = hosted(Kind::Worktree);
@@ -411,22 +561,40 @@ fn a_restore_killed_during_the_host_step_is_undone_by_the_next_restore() {
     assert!(hosted.setup.record().is_none());
 }
 
+/// A workspace record, an archive record and the same archive record with
+/// a restore's mark, which multiverse 0.6.0 wrote. A test at the v0.6.0
+/// tag made them with that version's code; the directories of the test's
+/// temporary repository were then replaced with `/work` and `/fixture`, and
+/// nothing else was changed.
+const WORKSPACE_0_6_0: &str = include_str!("v0_6_0/workspace.json");
+const ARCHIVE_0_6_0: &str = include_str!("v0_6_0/archive.json");
+const RESTORING_ARCHIVE_0_6_0: &str = include_str!("v0_6_0/archive-restoring.json");
+
 #[test]
 fn a_0_6_0_record_and_archive_are_byte_identical_after_a_0_7_0_rewrite() {
-    let setup = setup(Kind::Clone);
-    setup.create();
-    let record = setup.base.join("state/triage.json");
-    let before = fs::read(&record).unwrap();
-    let mut workspace = setup.workspaces.find(&name()).unwrap().unwrap();
-    setup.workspaces.store.update(&mut workspace).unwrap();
-    assert_eq!(fs::read(&record).unwrap(), before);
-    assert!(!String::from_utf8_lossy(&before).contains("\"host\""));
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::new(dir.path().join("state"));
+    let record = dir.path().join("state/triage.json");
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    write(&record, WORKSPACE_0_6_0);
+    let mut workspace = store.read(&name()).unwrap().unwrap();
+    assert!(workspace.host.is_none());
+    store.update(&mut workspace).unwrap();
+    assert_eq!(fs::read_to_string(&record).unwrap(), WORKSPACE_0_6_0);
 
-    let archive = setup.archive();
-    let path = setup.archives.dir_of(&name()).join(RECORD_FILE);
-    let before = fs::read(&path).unwrap();
-    setup.archives.write(&archive).unwrap();
-    assert_eq!(fs::read(&path).unwrap(), before);
-    assert_eq!(archive.version, RETIRED_ARCHIVE_VERSION);
-    assert!(!String::from_utf8_lossy(&before).contains("host"));
+    let archives = Archives::new(dir.path().join("archives"), dir.path().join("data"));
+    let path = archives.dir_of(&name()).join(RECORD_FILE);
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    for text in [ARCHIVE_0_6_0, RESTORING_ARCHIVE_0_6_0] {
+        write(&path, text);
+        let mut archive = archives.read(&name()).unwrap().unwrap();
+        assert!(archive.host.is_none());
+        assert!(archive.host_files.is_empty());
+        archives.write(&mut archive).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), text);
+        assert_eq!(archive.version, NO_HOST_ARCHIVE_VERSION);
+    }
+    let restoring = archives.read(&name()).unwrap().unwrap();
+    let mark = serde_json::to_value(restoring.restoring.as_ref().unwrap()).unwrap();
+    assert!(mark.get("host").is_none(), "{mark}");
 }
