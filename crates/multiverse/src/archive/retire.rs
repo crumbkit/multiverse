@@ -417,15 +417,7 @@ impl<B: Backend> Workspaces<B> {
         (self.checkpoint)("root")?;
         // The host's files are kept and listed before any checkout moves,
         // so a hook that fails leaves the workspace whole.
-        // A checkout whose directory is gone was moved by an earlier run of
-        // this archive, because the plan refuses a gone checkout that no
-        // earlier run listed.
-        let moved = plan
-            .removal
-            .checkouts
-            .iter()
-            .any(|planned| planned.directory != Fate::Removed);
-        host_files::keep(archives, &mut archive, &plan.removal.workspace, moved)?;
+        host_files::keep(archives, &mut archive, &plan.removal.workspace)?;
         archives.write(&mut archive)?;
         (self.checkpoint)("host")?;
         let mut late = Vec::new();

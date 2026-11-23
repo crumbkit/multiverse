@@ -441,6 +441,40 @@ fn host_files_survive_a_resume_after(kind: Kind, step: &'static str) {
 }
 
 #[test]
+fn an_archive_stopped_before_its_host_step_whose_checkout_is_then_deleted_keeps_the_host_files() {
+    for step in ["record", "wip", "pins", "ignored", "root"] {
+        let hosted = hosted(Kind::Clone);
+        hosted.create();
+        stop_at(step);
+        let plan = hosted.setup.plan(ArchiveOptions::default());
+        let stopped = hosted
+            .setup
+            .workspaces
+            .archive(&hosted.setup.archives, plan);
+        clear_hook();
+        assert!(stopped.is_err(), "{step}: the run did not stop");
+        assert!(
+            hosted.setup.record().unwrap().host_files.is_empty(),
+            "{step}"
+        );
+        fs::remove_dir_all(hosted.setup.checkout()).unwrap();
+
+        let archive = hosted.setup.archive();
+
+        let paths: Vec<&str> = archive
+            .host_files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect();
+        assert_eq!(paths, ["notes/task.md", "run.log"], "{step}");
+        assert!(
+            hosted.kept_dir(&archive).join("run.log").is_file(),
+            "{step}"
+        );
+    }
+}
+
+#[test]
 fn an_archive_resumed_after_its_host_step_keeps_the_host_files_of_the_first_run() {
     for kind in [Kind::Worktree, Kind::Clone] {
         for step in [
@@ -563,9 +597,10 @@ fn a_restore_killed_during_the_host_step_is_undone_by_the_next_restore() {
 
 /// A workspace record, an archive record and the same archive record with
 /// a restore's mark, which multiverse 0.6.0 wrote. A test at the v0.6.0
-/// tag made them with that version's code; the directories of the test's
+/// tag made them with that version's code. The directories of the test's
 /// temporary repository were then replaced with `/work` and `/fixture`, and
-/// nothing else was changed.
+/// the percent-encoded fixture directory inside each `mirror` path with
+/// `fixture`. Nothing else was changed.
 const WORKSPACE_0_6_0: &str = include_str!("v0_6_0/workspace.json");
 const ARCHIVE_0_6_0: &str = include_str!("v0_6_0/archive.json");
 const RESTORING_ARCHIVE_0_6_0: &str = include_str!("v0_6_0/archive-restoring.json");

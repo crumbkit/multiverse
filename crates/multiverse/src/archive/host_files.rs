@@ -135,20 +135,24 @@ pub struct HostFile {
 /// `archive`, and lists the files that it wrote in `archive`. The caller
 /// writes the record afterwards.
 ///
-/// When `host/` in the archive's data directory holds exactly the files
-/// that `archive` lists, with the same sizes, modes and digests, an earlier
-/// run finished this step, and the files are kept without a call to the
-/// hook. Otherwise, while no checkout has moved (`moved` is false), the step
-/// is redone from the start: a run that an earlier one left partway, with
-/// `host.partial/` or with `host/` that the record does not list. Once a
-/// checkout has moved, the step is never redone, because the workspace may
-/// be partly gone; the record keeps its list, and a restore checks each
-/// file against its digest.
+/// The record alone decides what happens:
+///
+/// - When `host/` in the archive's data directory holds exactly the files
+///   that `archive` lists, with the same sizes, modes and digests, an
+///   earlier run finished this step, and the files are kept without a call
+///   to the hook.
+/// - When the record lists no host files, the step is redone from the
+///   start, after a run that an earlier one left partway, with
+///   `host.partial/` or with `host/` that the record does not list. No
+///   checkout has moved then, because checkouts move only after a run
+///   writes a record that lists the files of `host/`.
+/// - When the record lists files that `host/` no longer matches, both stay
+///   as they are, because the workspace may be partly gone. A restore
+///   checks each file against its digest and refuses a damaged one.
 pub(super) fn keep(
     archives: &Archives,
     archive: &mut Archive,
     workspace: &Workspace,
-    moved: bool,
 ) -> Result<(), Error> {
     let Some(hook) = archives.hook() else {
         return Ok(());
@@ -159,14 +163,8 @@ pub(super) fn keep(
     if holds_listed(&kept, archive)? {
         return delete_directory(&partial);
     }
-    if moved {
-        return Ok(());
-    }
     if !archive.host_files.is_empty() {
-        // The record stops listing the files before they go, so it never
-        // names files that are gone.
-        archive.host_files.clear();
-        archives.write(archive)?;
+        return Ok(());
     }
     delete_directory(&partial)?;
     delete_directory(&kept)?;

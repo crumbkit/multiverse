@@ -469,6 +469,7 @@ impl Archive {
             renamed.state = ArchiveState::Retired;
         }
         renamed.version = NO_HOST_ARCHIVE_VERSION;
+        renamed.raise_version();
         renamed.name = to.clone();
         if let Some(parent) = self.path.parent() {
             renamed.path = parent.join(to.as_str());
@@ -534,7 +535,8 @@ impl Archive {
 
     /// Raises the record's version to [`HOST_ARCHIVE_VERSION`] when it holds
     /// a host's data or files. [`Archives::write`] calls it before each
-    /// write.
+    /// write, and [`Archive::renamed`] calls it so that a dry-run repair
+    /// reports the version that a write would give.
     fn raise_version(&mut self) {
         if self.host.is_some() || !self.host_files.is_empty() {
             self.version = self.version.max(HOST_ARCHIVE_VERSION);
