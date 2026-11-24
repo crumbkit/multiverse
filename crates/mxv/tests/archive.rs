@@ -784,6 +784,113 @@ fn a_restore_stopped_before_it_deleted_its_archive_is_finished_by_restoring_agai
     assert!(setup.workspace().join("app").is_dir(), "{document}");
 }
 
+impl Setup {
+    /// Commits an `mxv.toml` that declares the route `web`, and points mxv
+    /// at a Caddy program that does not exist and at free high ports, so a
+    /// sync of the proxy warns with `mxv::proxy::caddy_missing`.
+    fn declare_route_without_caddy(&self) {
+        let checkout = self.checkout();
+        write(
+            &checkout.join("mxv.toml"),
+            "ports = [\"web\"]\nroutes = [\"web\"]\n",
+        );
+        git(&checkout, &["add", "mxv.toml"]);
+        git(&checkout, &["commit", "--quiet", "-m", "Route"]);
+        let free = || {
+            std::net::TcpListener::bind(("127.0.0.1", 0))
+                .unwrap()
+                .local_addr()
+                .unwrap()
+                .port()
+        };
+        write(
+            &self.root().join("config/mxv/config.toml"),
+            &format!(
+                "caddy = \"/nonexistent/caddy\"\nproxy_http = \"127.0.0.1:{}\"\nproxy_https = \"127.0.0.1:{}\"\n",
+                free(),
+                free()
+            ),
+        );
+        // The route is served only once the ledger gives its port a number.
+        let (exit, document) = self.run(&["ports", "reset", "-w", "triage"]);
+        assert_eq!(exit, 0, "{document}");
+    }
+
+    /// Runs `mxv` with `args` and `--json` at the root, and returns the
+    /// exit code, the document that it printed and its standard error.
+    fn run_with_errors(&self, args: &[&str]) -> (i32, Value, String) {
+        grants::before(&self.root().join("state/mxv"), args);
+        let output = self
+            .command(&self.root())
+            .args(args)
+            .arg("--json")
+            .output()
+            .unwrap();
+        let errors = String::from_utf8_lossy(&output.stderr).into_owned();
+        let document = serde_json::from_slice(&output.stdout)
+            .unwrap_or_else(|error| panic!("{args:?}: {error}: {errors}"));
+        (output.status.code().unwrap(), document, errors)
+    }
+
+    /// Archives and restores `triage`, which declares a route, and writes
+    /// the archive record back, as a restore that stopped after it wrote
+    /// the workspace's record and before it deleted the archive and synced
+    /// the proxy leaves it. Returns the record's path.
+    fn stop_routed_restore_before_its_sync(&self) -> PathBuf {
+        self.declare_route_without_caddy();
+        self.archive();
+        let record = self.archive_record("triage");
+        let saved = fs::read_to_string(&record).unwrap();
+        let (exit, document, errors) = self.run_with_errors(&["restore", "triage", "--yes"]);
+        assert_eq!(exit, 0, "{document}");
+        assert_eq!(document["data"]["state"], "done", "{document}");
+        assert!(
+            errors.contains("error code: mxv::proxy::caddy_missing"),
+            "a full restore syncs the proxy: {errors}"
+        );
+        write(&record, &saved);
+        record
+    }
+}
+
+#[test]
+fn a_restore_rerun_that_finds_the_workspace_restored_syncs_the_proxy() {
+    let setup = Setup::new();
+    let record = setup.stop_routed_restore_before_its_sync();
+    let (exit, document, errors) = setup.run_with_errors(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}{errors}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(!record.exists(), "{document}");
+    assert!(
+        errors.contains("mxv could not serve the routes of triage"),
+        "{errors}"
+    );
+    assert!(
+        errors.contains("error code: mxv::proxy::caddy_missing"),
+        "{errors}"
+    );
+    // A rerun with no archive left syncs too, so a run that died between
+    // the deletion and the sync is repaired by the next one.
+    let (exit, document, errors) = setup.run_with_errors(&["restore", "triage", "--yes"]);
+    assert_eq!(exit, 0, "{document}{errors}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(
+        errors.contains("error code: mxv::proxy::caddy_missing"),
+        "{errors}"
+    );
+}
+
+#[test]
+fn a_dry_run_of_a_restore_rerun_syncs_nothing() {
+    let setup = Setup::new();
+    let record = setup.stop_routed_restore_before_its_sync();
+    let (exit, document, errors) = setup.run_with_errors(&["restore", "triage", "--dry-run"]);
+    assert_eq!(exit, 0, "{document}{errors}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(record.exists(), "{document}");
+    assert!(!errors.contains("mxv::proxy"), "{errors}");
+}
+
 #[test]
 fn an_archive_refuses_while_a_name_is_taken_by_another_archive() {
     let setup = Setup::new();

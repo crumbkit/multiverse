@@ -26,6 +26,15 @@ workspace may need to act on.
 
 ### Fixed
 
+- A rerun of `mxv restore` that finds the workspace already restored
+  serves its routes, and starts the proxy when they need it, as a full
+  restore does. Before, a restore that stopped after it wrote the
+  workspace's record left the routes out of Caddy until the next
+  `mxv up`, `mxv down` or `mxv proxy start`.
+- A rerun of `mxv archive` that finds the workspace already archived
+  takes its routes away from a running proxy. Before, an archive that
+  stopped after it finished left Caddy serving the archived workspace's
+  routes, and `mxv proxy check` failed `caddy runs`.
 - `mxv up`, `mxv restart` and `mxv run` find a deadband daemon that
   listens at `$XDG_RUNTIME_DIR/deadband/deadband.sock`, which deadband
   uses when `DEADBAND_SOCKET`, `DEADBAND_SOCKET_DIR` and `TMPDIR` are

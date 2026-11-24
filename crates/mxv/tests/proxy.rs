@@ -882,6 +882,114 @@ fn a_real_caddy_that_holds_a_route_the_records_no_longer_declare_fails_the_check
     setup.json(&["proxy", "stop"]);
 }
 
+impl Setup {
+    /// Starts the workspace `name`, which serves the route `web`, waits
+    /// until `real` serves it, and stops it, so a later archive has no unit
+    /// to stop.
+    fn served_and_stopped(&self, real: &Real, name: &str) {
+        self.workspace(name, &site());
+        let (exit, document, errors) = self.json_and_errors(&["up", "-w", name]);
+        assert_eq!(exit, 0, "{document}{errors}");
+        real.wait_for("https", &format!("web.{name}.mxv.localhost"), "200");
+        let (exit, document) = self.json(&["down", "-w", name]);
+        assert_eq!(exit, 0, "{document}");
+    }
+
+    /// Returns the path of the archive record of `name`.
+    fn archive_record(&self, name: &str) -> PathBuf {
+        self.root()
+            .join("state/mxv/archives")
+            .join(name)
+            .join("archive.json")
+    }
+
+    /// Returns the path of the workspace record of `name`.
+    fn workspace_record(&self, name: &str) -> PathBuf {
+        self.root()
+            .join("state/mxv/workspaces")
+            .join(format!("{name}.json"))
+    }
+
+    /// Returns the line of `mxv proxy check` that starts with `caddy runs`.
+    fn caddy_runs(&self) -> String {
+        let (_, text, _) = self.text(&["proxy", "check"]);
+        text.lines()
+            .find(|line| line.starts_with("caddy runs"))
+            .unwrap_or_else(|| panic!("no caddy runs row: {text}"))
+            .to_owned()
+    }
+}
+
+#[test]
+fn a_restore_rerun_serves_the_routes_that_an_interrupted_restore_left_out() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    setup.served_and_stopped(&real, "reading-list");
+    let (exit, document) = setup.json(&["archive", "-w", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    let record = setup.archive_record("reading-list");
+    let saved = fs::read_to_string(&record).unwrap();
+    let (exit, document) = setup.json(&["restore", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    // A restore that stopped after it wrote the workspace's record and
+    // before it deleted the archive and synced leaves the archive record
+    // and a proxy that does not serve the workspace.
+    let (exit, document) = setup.json(&["proxy", "stop"]);
+    assert_eq!(exit, 0, "{document}");
+    fs::create_dir_all(record.parent().unwrap()).unwrap();
+    write(&record, &saved);
+    let host = "web.reading-list.mxv.localhost";
+    assert_eq!(real.get("https", host).0, "000");
+    let (exit, document, errors) = setup.json_and_errors(&["restore", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}{errors}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    assert!(!record.exists(), "{document}");
+    let body = real.wait_for("https", host, "502");
+    assert!(
+        body.contains("is a route of the stopped workspace reading-list"),
+        "{body}"
+    );
+}
+
+#[test]
+fn an_archive_rerun_takes_away_the_routes_that_an_interrupted_archive_left() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    setup.served_and_stopped(&real, "reading-list");
+    let workspace = setup.workspace_record("reading-list");
+    let saved = fs::read_to_string(&workspace).unwrap();
+    let (exit, document) = setup.json(&["archive", "-w", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}");
+    // An archive that stopped after it finished and before it synced
+    // leaves Caddy serving the archived workspace's route. The test loads
+    // that route by writing the record and the manifest back for one
+    // `mxv proxy start`, then takes them away again.
+    let manifest = setup.root().join("workspaces/reading-list/app/mxv.toml");
+    fs::create_dir_all(manifest.parent().unwrap()).unwrap();
+    write(&manifest, &site());
+    write(&workspace, &saved);
+    let (exit, document) = setup.json(&["proxy", "start"]);
+    assert_eq!(exit, 0, "{document}");
+    let host = "web.reading-list.mxv.localhost";
+    real.wait_for("https", host, "502");
+    fs::remove_file(&workspace).unwrap();
+    fs::remove_dir_all(setup.root().join("workspaces/reading-list")).unwrap();
+    assert!(setup.caddy_runs().contains("failed"));
+    let (exit, document, errors) =
+        setup.json_and_errors(&["archive", "-w", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{document}{errors}");
+    assert_eq!(document["data"]["state"], "unchanged", "{document}");
+    let (code, body) = real.get("https", host);
+    assert!(
+        !body.contains("reading-list"),
+        "{host} answered {code} as the archived workspace's route: {body}"
+    );
+    let running = setup.caddy_runs();
+    assert!(!running.contains("failed"), "{running}");
+}
+
 #[test]
 fn a_real_caddy_that_install_starts_leaves_the_trust_to_a_person_at_a_terminal() {
     let Some(real) = real() else { return };
