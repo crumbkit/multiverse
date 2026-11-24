@@ -24,6 +24,12 @@ workspace may need to act on.
 
 ### Fixed
 
+- `mxv up`, `mxv restart` and `mxv run` find a deadband daemon that
+  listens at `$XDG_RUNTIME_DIR/deadband/deadband.sock`, which deadband
+  uses when `DEADBAND_SOCKET`, `DEADBAND_SOCKET_DIR` and `TMPDIR` are
+  unset, as on Linux with a systemd login session. Before, mxv looked in
+  `/tmp/deadband-<uid>`, found no daemon and started every build and task
+  at once without a place.
 - A command that waited for a workspace's lock while an `mxv archive` and
   an `mxv restore` or `mxv new` replaced the workspace with another of the
   same name now fails with `mxv::workspace::not_found` and changes
