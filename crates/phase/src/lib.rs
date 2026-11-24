@@ -58,7 +58,7 @@ pub use crate::grants::{Asked, Grant, GrantScope, Grants, Growth};
 pub use crate::logs::{LineSink, LogLine, LogNote, LogRequest, LogStream, MOST_TAIL_BYTES, tail};
 pub use crate::name::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VariableName, VolumeName,
-    WorkspaceId, WorkspaceName, is_unit_name,
+    WorkspaceId, WorkspaceName, is_unit_name, is_variable_name,
 };
 pub use crate::phase::{
     DEFAULT_KILL_WAIT, DEFAULT_LOCK_WAIT, DEFAULT_START_GRACE, Phase, UpDeadlines,

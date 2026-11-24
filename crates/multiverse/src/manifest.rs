@@ -110,6 +110,7 @@ use serde::Deserialize;
 use serde::de::IgnoredAny;
 use toml::Spanned;
 
+use crate::braces::{self, Piece};
 use crate::disposable::{BadGlob, PathGlob};
 use crate::host::ManifestNames;
 use crate::name::{WorkspaceName, is_unit_name};
@@ -583,36 +584,19 @@ impl EnvValue {
     /// Reads `text`, or returns `None` when a brace is neither doubled nor
     /// part of a `{port.<name>}` placeholder whose name is a port name.
     fn parse(text: &str) -> Option<Self> {
-        let mut parts = Vec::new();
-        let mut literal = String::new();
-        let mut rest = text;
-        while let Some(at) = rest.find(['{', '}']) {
-            literal.push_str(rest.get(..at)?);
-            let tail = rest.get(at..)?;
-            if let Some(after) = tail.strip_prefix("{{") {
-                literal.push('{');
-                rest = after;
-            } else if let Some(after) = tail.strip_prefix("}}") {
-                literal.push('}');
-                rest = after;
-            } else {
-                let inside = tail.strip_prefix("{port.")?;
-                let end = inside.find('}')?;
-                let port = inside.get(..end)?;
-                if !is_unit_name(port) {
-                    return None;
-                }
-                if !literal.is_empty() {
-                    parts.push(Part::Text(std::mem::take(&mut literal)));
-                }
-                parts.push(Part::Port(port.to_owned()));
-                rest = inside.get(end + 1..)?;
-            }
-        }
-        literal.push_str(rest);
-        if !literal.is_empty() {
-            parts.push(Part::Text(literal));
-        }
+        let parts = braces::split(text, |inside| {
+            inside
+                .strip_prefix("port.")
+                .filter(|port| is_unit_name(port))
+                .map(str::to_owned)
+        })
+        .ok()?
+        .into_iter()
+        .map(|piece| match piece {
+            Piece::Text(literal) => Part::Text(literal),
+            Piece::Placeholder(port) => Part::Port(port),
+        })
+        .collect();
         Some(Self {
             text: text.to_owned(),
             parts,
@@ -1208,17 +1192,6 @@ fn unknown_field(message: &str) -> Option<String> {
     let rest = message.strip_prefix("unknown field `")?;
     let end = rest.find('`')?;
     rest.get(..end).map(str::to_owned)
-}
-
-/// Reports whether `name` is a valid environment variable name: an ASCII
-/// letter or `_`, then letters, digits and `_`.
-fn is_variable(name: &str) -> bool {
-    name.chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 /// Returns the sentence of a process, container or port named `name`,
@@ -3058,7 +3031,7 @@ fn check_variable(
     process: &str,
     variable: &Spanned<String>,
 ) -> Result<(), ManifestError> {
-    if is_variable(variable.get_ref()) {
+    if phase::is_variable_name(variable.get_ref()) {
         Ok(())
     } else {
         Err(errors.invalid(

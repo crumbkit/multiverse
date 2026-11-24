@@ -394,6 +394,35 @@ fn a_plan_refuses_a_variable_name_that_a_process_cannot_receive() {
 }
 
 #[test]
+fn a_variable_name_is_an_ascii_letter_or_underscore_then_letters_digits_and_underscores() {
+    for name in ["A", "_", "PATH", "a1_b"] {
+        let mut api = host_app("api");
+        api.processes[0].env.insert(name.into());
+        api.overrides.insert(name.into());
+        assert!(plan(vec![api]).is_ok(), "{name}");
+    }
+    for name in ["", "1A", "A-B", "A=B", "É", "A B"] {
+        let mut api = host_app("api");
+        api.processes[0].env.insert(name.into());
+        assert_eq!(
+            process_problem(api),
+            ProcessProblem::BadVariableName(name.into()),
+            "{name}"
+        );
+        let mut api = host_app("api");
+        api.overrides.insert(name.into());
+        assert_eq!(
+            plan(vec![api]),
+            Err(PlanError::BadOverride {
+                app: "api".parse().unwrap(),
+                name: name.into(),
+            }),
+            "{name}"
+        );
+    }
+}
+
+#[test]
 fn a_plan_refuses_an_override_name_that_a_process_cannot_receive() {
     let mut api = host_app("api");
     api.overrides.insert(String::new());

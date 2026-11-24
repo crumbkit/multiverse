@@ -21,6 +21,7 @@
 
 mod archive;
 mod backend;
+mod braces;
 mod clock;
 mod clone;
 mod disk;

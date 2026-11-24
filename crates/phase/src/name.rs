@@ -130,6 +130,20 @@ pub fn is_unit_name(text: &str) -> bool {
     check(text, Rule::Unit).is_ok()
 }
 
+/// Reports whether a process can receive a variable named `name`: 1 or more
+/// ASCII letters, digits and `_`, starting with an ASCII letter or `_`.
+/// phase refuses a plan that passes a process any other name, and a host
+/// program uses this rule to refuse such a name before it builds a plan.
+#[must_use]
+pub fn is_variable_name(name: &str) -> bool {
+    name.chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '_')
+}
+
 /// Checks `text` against `rule`.
 fn check(text: &str, rule: Rule) -> Result<(), BadName> {
     let Some(first) = text.chars().next() else {
