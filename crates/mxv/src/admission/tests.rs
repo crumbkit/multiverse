@@ -92,3 +92,20 @@ fn the_user_directory_is_used_when_the_environment_has_no_deadband_socket_dir() 
     });
     assert_eq!(path, Path::new("/user/tmp/deadband.sock"));
 }
+
+#[test]
+fn the_socket_is_under_xdg_runtime_dir_read_from_the_environment_when_nothing_else_is_set() {
+    let environment = read_environment(&[("XDG_RUNTIME_DIR", "/run/user/1000")]);
+    let path = socket_path(environment.deadband_variables(), || None);
+    assert_eq!(path, Path::new("/run/user/1000/deadband/deadband.sock"));
+}
+
+#[test]
+fn tmpdir_read_from_the_environment_wins_over_xdg_runtime_dir() {
+    let environment = read_environment(&[
+        ("XDG_RUNTIME_DIR", "/run/user/1000"),
+        ("TMPDIR", "/shell/tmp"),
+    ]);
+    let path = socket_path(environment.deadband_variables(), || None);
+    assert_eq!(path, Path::new("/shell/tmp/deadband.sock"));
+}

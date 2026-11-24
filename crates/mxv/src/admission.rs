@@ -160,7 +160,9 @@ impl Deadband {
 /// The launchd daemon listens in the per-user temporary directory whatever
 /// `TMPDIR` a shell has, so that directory comes before `TMPDIR`.
 /// `DEADBAND_SOCKET` and `DEADBAND_SOCKET_DIR` still win, and then
-/// `user_directory` is not called.
+/// `user_directory` is not called. When none of those gives a directory,
+/// the socket is `deadband/deadband.sock` in `XDG_RUNTIME_DIR`, and when
+/// that is unset or empty it is in `/tmp/deadband-<uid>`.
 fn socket_path(
     variables: &BTreeMap<String, OsString>,
     user_directory: impl FnOnce() -> Option<PathBuf>,
