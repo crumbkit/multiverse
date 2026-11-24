@@ -1246,7 +1246,9 @@ pub(crate) fn archive(
         .map_err(MxvFailure::from)?
     {
         ArchivePlanned::Ready(plan) => *plan,
-        ArchivePlanned::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive, false))),
+        ArchivePlanned::Unchanged(archive) => {
+            return archived_already(environment, &archive, served);
+        }
         ArchivePlanned::Refused(refusal) => return Err(refused(&name, refusal)),
         ArchivePlanned::Finish(archive) => {
             return finish_stopped(output, environment, args, &lifecycle, &archive, served);
@@ -1276,7 +1278,7 @@ pub(crate) fn archive(
     let done = match lifecycle.archive(plan, &asked).map_err(MxvFailure::from)? {
         Archived::Done(done) => *done,
         Archived::Finished(done) => return finished(environment, &name, *done, served),
-        Archived::Unchanged(archive) => return Ok(Prose::new(unchanged(&archive, false))),
+        Archived::Unchanged(archive) => return archived_already(environment, &archive, served),
         Archived::Refused(refusal) => return Err(refused(&name, refusal)),
         Archived::Changed => return Err(changed(&name).into()),
         Archived::InUse(reason) => {
@@ -1345,7 +1347,7 @@ fn finish_stopped(
         .map_err(MxvFailure::from)?
     {
         Finished::Done(done) => finished(environment, &archive.name, *done, served),
-        Finished::Unchanged(archive) => Ok(Prose::new(unchanged(&archive, false))),
+        Finished::Unchanged(archive) => archived_already(environment, &archive, served),
         Finished::Changed => Err(changed(&archive.name).into()),
         Finished::Refused(refusal) => Err(refused(&archive.name, refusal)),
     }
@@ -1368,6 +1370,19 @@ fn finished(
     };
     sync_after_archive(environment, &archive.workspace(), served)?;
     Ok(Prose::new(result_of(&archive, &[], result, false)))
+}
+
+/// Returns the result of an archive that finds `archive` already
+/// archived. An earlier run may have stopped after it finished the archive
+/// and before it synced the proxy, so the proxy, when it runs, loses the
+/// routes of the archived workspace here too.
+fn archived_already(
+    environment: &Environment,
+    archive: &Archive,
+    served: &mut crate::proxy::Served,
+) -> Result<Prose<ArchiveResult>, crumbkit::Error> {
+    sync_after_archive(environment, &archive.workspace(), served)?;
+    Ok(Prose::new(unchanged(archive, false)))
 }
 
 /// Takes the routes of the archived `workspace` away from the proxy when
@@ -1555,6 +1570,48 @@ fn restored_already(
     }))
 }
 
+/// Returns `result`, the result of a restore of `name` that found the
+/// workspace already restored, after it syncs the proxy as a full restore
+/// does, unless the run is a dry run.
+fn synced_rerun(
+    output: &Run,
+    environment: &Environment,
+    name: &WorkspaceName,
+    result: Result<Prose<RestoreResult>, crumbkit::Error>,
+    served: &mut crate::proxy::Served,
+) -> Result<Prose<RestoreResult>, crumbkit::Error> {
+    let result = result?;
+    if !output.is_dry_run() {
+        sync_after_restore(environment, name, served)?;
+    }
+    Ok(result)
+}
+
+/// Serves the routes of the restored workspace `name`, and starts the
+/// proxy when they need it. A restore that finds its work already done
+/// syncs too, because an earlier run may have stopped after it wrote the
+/// workspace's record and before it synced. The sync runs after the lock
+/// is released, which is harmless because it reads every record again
+/// under the proxy's own lock. Returns the workspace's record.
+fn sync_after_restore(
+    environment: &Environment,
+    name: &WorkspaceName,
+    served: &mut crate::proxy::Served,
+) -> Result<Option<Workspace>, crumbkit::Error> {
+    let store = multiverse::Store::new(environment.records()?);
+    let workspace = store.read(name).map_err(MxvFailure::from)?;
+    if let Some(workspace) = &workspace {
+        crate::proxy::sync(
+            environment,
+            &store,
+            workspace,
+            multiverse::SyncMode::Start,
+            served,
+        );
+    }
+    Ok(workspace)
+}
+
 /// Returns what `args` allows the restore to do.
 fn restore_options(args: &RestoreArgs) -> multiverse::RestoreOptions {
     multiverse::RestoreOptions::new(args.force, args.from_origin)
@@ -1579,7 +1636,7 @@ pub(crate) fn restore(
     {
         RestorePlanned::Ready(plan) => *plan,
         RestorePlanned::Unchanged { stale } => {
-            return restored_already(
+            let result = restored_already(
                 output,
                 environment,
                 &workspaces,
@@ -1588,6 +1645,7 @@ pub(crate) fn restore(
                 args,
                 stale,
             );
+            return synced_rerun(output, environment, &name, result, served);
         }
         RestorePlanned::Refused(refusal) => {
             return Err(restore_refusal(&name, refusal, || finisher(environment, &name)).into());
@@ -1645,7 +1703,7 @@ pub(crate) fn restore(
         // Another run restored the workspace after the question, so the
         // result is the one of a restore that finds nothing to do.
         Restoration::Unchanged => {
-            return restored_already(
+            let result = restored_already(
                 output,
                 environment,
                 &workspaces,
@@ -1654,6 +1712,7 @@ pub(crate) fn restore(
                 args,
                 None,
             );
+            return synced_rerun(output, environment, &name, result, served);
         }
         Restoration::Changed => {
             return Err(MxvFailure::RestoreChanged {
@@ -1665,16 +1724,7 @@ pub(crate) fn restore(
             return Err(restore_refusal(&name, refusal, || finisher(environment, &name)).into());
         }
     };
-    // The sync runs after the library released the lock, which is harmless
-    // because it reads every record again under the proxy's own lock.
-    if let Some(workspace) = store.read(&name).map_err(MxvFailure::from)? {
-        crate::proxy::sync(
-            environment,
-            &store,
-            &workspace,
-            multiverse::SyncMode::Start,
-            served,
-        );
+    if let Some(workspace) = sync_after_restore(environment, &name, served)? {
         crate::preflight::announce(environment, &workspace);
     }
     let lost_pins = restored.lost_pins.clone();
