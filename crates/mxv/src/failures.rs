@@ -624,7 +624,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
 ];
 
 /// Returns `path` as text for a field or a hint.
-fn shown(path: &Path) -> String {
+pub(crate) fn shown(path: &Path) -> String {
     path.display().to_string()
 }
 

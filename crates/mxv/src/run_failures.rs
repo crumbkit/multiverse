@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
 use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem, Waited};
 
-use crate::failures::remove_volumes_line;
+use crate::failures::{remove_volumes_line, shown};
 
 /// The code of a process verb that names no workspace, run outside every
 /// workspace.
@@ -361,11 +361,6 @@ fn fmt_unstoppable(
             not_started.join(", ")
         )
     }
-}
-
-/// Returns `path` as text for a field or a hint.
-fn shown(path: &Path) -> String {
-    path.display().to_string()
 }
 
 /// Returns the recovery of the process `process` of `workspace`, which

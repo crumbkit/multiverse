@@ -26,6 +26,8 @@ mod run_failures;
 mod sweep;
 #[cfg(test)]
 mod testing;
+#[cfg(test)]
+mod tests;
 mod units;
 mod verbs;
 
@@ -306,12 +308,15 @@ pub const KEEPER_WORDS: [&str; 2] = ["phase", "keep"];
 #[doc(hidden)]
 #[must_use]
 pub fn is_keeper(args: &[OsString]) -> bool {
-    args.get(1..3).is_some_and(|words| {
-        words
-            .iter()
-            .zip(KEEPER_WORDS)
-            .all(|(word, keeper)| word == keeper)
-    })
+    starts_with_words(args, &KEEPER_WORDS)
+}
+
+/// Reports whether the items of `args`, the whole command line, that
+/// follow the program are `words`, in order. Items after `words` may be
+/// anything.
+fn starts_with_words(args: &[OsString], words: &[&str]) -> bool {
+    args.get(1..=words.len())
+        .is_some_and(|given| given.iter().zip(words).all(|(arg, word)| arg == word))
 }
 
 /// The word that follows the program on the command line of each of mxv's
@@ -336,12 +341,7 @@ const PROVISION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(1
 #[doc(hidden)]
 #[must_use]
 pub fn is_provisioner(args: &[OsString]) -> bool {
-    args.get(1..3).is_some_and(|words| {
-        words
-            .iter()
-            .zip(PROVISION_WORDS)
-            .all(|(word, provision)| word == provision)
-    })
+    starts_with_words(args, &PROVISION_WORDS)
 }
 
 /// Creates the resources of the spec that follows `mxv phase provision`,
@@ -405,12 +405,7 @@ pub const SERVICES_WORDS: [&str; 2] = ["phase", "services"];
 #[doc(hidden)]
 #[must_use]
 pub fn is_services(args: &[OsString]) -> bool {
-    args.get(1..3).is_some_and(|words| {
-        words
-            .iter()
-            .zip(SERVICES_WORDS)
-            .all(|(word, services)| word == services)
-    })
+    starts_with_words(args, &SERVICES_WORDS)
 }
 
 /// Serves the listeners that follow `mxv phase services` until TERM or

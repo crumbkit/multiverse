@@ -295,3 +295,22 @@ fn archives_of_another_host_read_as_a_defect_of_mxv_to_report() {
     };
     assert!(hint.contains("this is a defect of mxv"), "{hint}");
 }
+
+#[test]
+fn shown_writes_an_absolute_or_relative_path_as_it_was_given() {
+    use std::path::Path;
+
+    assert_eq!(super::shown(Path::new("/srv/ws/triage")), "/srv/ws/triage");
+    assert_eq!(super::shown(Path::new("ws/./triage/")), "ws/./triage/");
+    assert_eq!(super::shown(Path::new("")), "");
+}
+
+#[test]
+fn shown_writes_bytes_of_a_path_that_are_not_utf_8_as_the_replacement_character() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::Path;
+
+    let path = Path::new(OsStr::from_bytes(b"/srv/\xffws"));
+    assert_eq!(super::shown(path), "/srv/\u{fffd}ws");
+}
