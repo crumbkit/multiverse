@@ -422,7 +422,9 @@ fn clone_into(
 }
 
 /// Adds the checkout that `args` names to a workspace, or plans it on a
-/// dry run. It holds the workspace's lock, which `up` and `down` take, and
+/// dry run. It holds the workspace's lock, which `up` and `down` take,
+/// refuses a workspace that another workspace of the name replaced while
+/// it waited for the lock, as [`processes::Context::lock`] does, and
 /// refuses while the workspace's units run, because
 /// adding a second checkout renames the first checkout's units and ports.
 pub(crate) fn add(
@@ -471,7 +473,9 @@ pub(crate) fn add(
         }
         None => None,
     };
-    let _lock = processes::lock(environment, &name)?;
+    // The record under the lock may differ from the one read before the
+    // wait, such as in its ports or volumes, so the checks below read it.
+    let (_lock, workspace) = processes::lock_workspace(environment, &workspace)?;
     let running = processes::running(environment, &workspace)?;
     if !running.is_empty() {
         return Err(RunFailure::Running {

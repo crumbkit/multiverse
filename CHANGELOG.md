@@ -26,6 +26,11 @@ workspace may need to act on.
 
 ### Fixed
 
+- `mxv add` refuses with `mxv::workspace::not_found`, and changes
+  nothing, when the workspace was archived or removed and another
+  workspace of the same name took its place while the command waited for
+  the workspace's lock. Before, it added its checkout to the new
+  workspace.
 - A rerun of `mxv restore` that finds the workspace already restored
   serves its routes, and starts the proxy when they need it, as a full
   restore does. Before, a restore that stopped after it wrote the
@@ -56,10 +61,6 @@ workspace may need to act on.
 
 ### Known issues
 
-- `mxv add` does not compare the workspace's stable id after it waits for
-  the lock, so an `mxv add` that waited while the workspace was archived
-  and replaced by another of the same name adds its checkout to the new
-  workspace.
 - A command does not detect the replacement of a workspace whose record
   held no stable id when the command read it, because any write gives
   such a record its first id. Only records that an mxv from before

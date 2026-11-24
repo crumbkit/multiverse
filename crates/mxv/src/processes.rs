@@ -133,21 +133,7 @@ impl Context {
     /// and starts or stops nothing.
     pub(crate) fn lock(&mut self) -> Result<WorkspaceLock, MxvFailure> {
         let lock = self.runs.lock(&self.workspace.name)?;
-        let read = self
-            .store
-            .read(&self.workspace.name)?
-            .ok_or_else(|| MxvFailure::NotFound {
-                name: self.workspace.name.to_string(),
-            })?;
-        if let (Some(before), Some(now)) = (&self.workspace.id, &read.id)
-            && before != now
-        {
-            return Err(MxvFailure::Replaced {
-                name: self.workspace.name.to_string(),
-                id: now.to_string(),
-            });
-        }
-        self.workspace = read;
+        self.workspace = same_workspace(&self.workspace, self.store.read(&self.workspace.name)?)?;
         Ok(lock)
     }
 
@@ -1058,6 +1044,53 @@ pub(crate) fn running(
     workspace: &Workspace,
 ) -> Result<Vec<String>, MxvFailure> {
     Ok(environment.runs()?.running(workspace)?)
+}
+
+/// Returns `read`, the record of the workspace `before` that a command
+/// read again once it held the workspace's lock, when it is the same
+/// workspace as `before`. A record that holds no stable id before or after
+/// the wait counts as the same workspace, as [`Context::lock`] says.
+///
+/// # Errors
+///
+/// Returns [`MxvFailure::NotFound`] when `read` is `None`, and
+/// [`MxvFailure::Replaced`] when `read` holds another stable id than
+/// `before`.
+fn same_workspace(before: &Workspace, read: Option<Workspace>) -> Result<Workspace, MxvFailure> {
+    let read = read.ok_or_else(|| MxvFailure::NotFound {
+        name: before.name.to_string(),
+    })?;
+    if let (Some(was), Some(now)) = (&before.id, &read.id)
+        && was != now
+    {
+        return Err(MxvFailure::Replaced {
+            name: before.name.to_string(),
+            id: now.to_string(),
+        });
+    }
+    Ok(read)
+}
+
+/// Takes the lock of `workspace`, which `up` and `down` also take, and
+/// reads its record again under the lock, for `mxv add`. It returns the
+/// lock and the record under it.
+///
+/// # Errors
+///
+/// Returns the errors of [`Context::lock`]: [`MxvFailure::NotFound`] when
+/// the record is gone once the command holds the lock, and
+/// [`MxvFailure::Replaced`] when another workspace of the name, with
+/// another stable id, took the name while the command waited.
+pub(crate) fn lock_workspace(
+    environment: &Environment,
+    workspace: &Workspace,
+) -> Result<(WorkspaceLock, Workspace), MxvFailure> {
+    let lock = environment.runs()?.lock(&workspace.name)?;
+    let read = same_workspace(
+        workspace,
+        Store::new(environment.records()?).read(&workspace.name)?,
+    )?;
+    Ok((lock, read))
 }
 
 /// Takes the lock of the workspace `name`, which `up` and `down` also

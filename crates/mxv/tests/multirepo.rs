@@ -9,11 +9,18 @@
 
 #[path = "support/grants.rs"]
 mod grants;
+#[path = "support/held_lock.rs"]
+#[expect(
+    dead_code,
+    reason = "these tests only hold a lock, and the helper also deletes a record while it holds one"
+)]
+mod held_lock;
 #[path = "support/git.rs"]
 mod support;
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use snapbox::cmd::Command;
@@ -813,4 +820,66 @@ fn add_and_clean_run_on_a_live_workspace() {
     let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", "web"]);
     assert_eq!(exit, 0, "{document}");
     assert!(workspace.join("web").exists());
+}
+
+/// Holds the lock of the workspace `name` under mxv's state directory
+/// `state`, runs `command` in a thread, and waits until the command has
+/// touched the workspace, which `mxv add` does after it reads the
+/// workspace's record and before it takes the lock. It then runs
+/// `meanwhile`, releases the lock, and returns what `command` returned.
+fn meanwhile_while_locked<T: Send>(
+    state: &Path,
+    name: &str,
+    command: impl FnOnce() -> T + Send,
+    meanwhile: impl FnOnce(),
+) -> T {
+    let touched = state.join("runs").join(name).join(".touched");
+    if touched.exists() {
+        fs::remove_file(&touched).unwrap();
+    }
+    let held = held_lock::hold(state, name);
+    std::thread::scope(|scope| {
+        let waiting = scope.spawn(command);
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !touched.exists() && !waiting.is_finished() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(touched.exists(), "the command never touched {name}");
+        meanwhile();
+        drop(held);
+        waiting.join().unwrap()
+    })
+}
+
+#[test]
+fn an_add_that_waited_while_the_workspace_was_replaced_is_not_found_and_leaves_the_new_one() {
+    let setup = Setup::new();
+    let workspace = setup.created("triage", &["api"]);
+    let state = setup.root().join("state/mxv");
+    let record = state.join("workspaces/triage.json");
+    let mut replacement = String::new();
+    let mut before = String::new();
+
+    let (exit, document) = meanwhile_while_locked(
+        &state,
+        "triage",
+        || setup.json(&["add", "-w", "triage", "--repo", "web"]),
+        || {
+            // An `mxv archive` and then an `mxv new` of the same name leave
+            // a record of the name with another stable id.
+            let mut replaced: Value =
+                serde_json::from_str(&fs::read_to_string(&record).unwrap()).unwrap();
+            replacement = replaced["id"].as_str().unwrap().chars().rev().collect();
+            replaced["id"] = Value::from(replacement.clone());
+            before = serde_json::to_string_pretty(&replaced).unwrap();
+            write_text(&record, &before);
+        },
+    );
+
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::workspace::not_found", "{document}");
+    let message = document["message"].as_str().unwrap();
+    assert!(message.contains(&replacement), "{message}");
+    assert!(!workspace.join("web").exists());
+    assert_eq!(setup.record("triage"), before);
 }
