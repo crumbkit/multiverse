@@ -44,6 +44,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::braces::{self, BadBrace, Piece};
+
 #[cfg(test)]
 mod tests;
 
@@ -461,40 +463,14 @@ impl ServiceValue {
     ///
     /// Returns the text from the bad brace to the end of `text`.
     pub fn parse(text: &str) -> Result<Self, String> {
-        let mut parts = Vec::new();
-        let mut literal = String::new();
-        let mut rest = text;
-        while let Some(at) = rest.find(['{', '}']) {
-            literal.push_str(rest.get(..at).unwrap_or_default());
-            let tail = rest.get(at..).unwrap_or_default();
-            if let Some(after) = tail.strip_prefix("{{") {
-                literal.push('{');
-                rest = after;
-            } else if let Some(after) = tail.strip_prefix("}}") {
-                literal.push('}');
-                rest = after;
-            } else {
-                let placeholder = tail
-                    .strip_prefix('{')
-                    .and_then(|inside| {
-                        let end = inside.find('}')?;
-                        Some((
-                            Placeholder::parse(inside.get(..end)?)?,
-                            inside.get(end + 1..)?,
-                        ))
-                    })
-                    .ok_or_else(|| tail.to_owned())?;
-                if !literal.is_empty() {
-                    parts.push(ValuePart::Text(std::mem::take(&mut literal)));
-                }
-                parts.push(ValuePart::Placeholder(placeholder.0));
-                rest = placeholder.1;
-            }
-        }
-        literal.push_str(rest);
-        if !literal.is_empty() {
-            parts.push(ValuePart::Text(literal));
-        }
+        let parts = braces::split(text, Placeholder::parse)
+            .map_err(|BadBrace(bad)| bad.to_owned())?
+            .into_iter()
+            .map(|piece| match piece {
+                Piece::Text(literal) => ValuePart::Text(literal),
+                Piece::Placeholder(placeholder) => ValuePart::Placeholder(placeholder),
+            })
+            .collect();
         Ok(Self { parts })
     }
 

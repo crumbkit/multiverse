@@ -13,7 +13,7 @@ use super::probe::{
 };
 use super::restart::Restart;
 use super::{AppPlan, MOST_READY_TIMEOUT, MOST_STOP_GRACE, ProcessKind, ProcessPlan, RunnerKind};
-use crate::name::{AppName, PortName, ProcessName};
+use crate::name::{AppName, PortName, ProcessName, is_variable_name};
 use crate::source::Source;
 
 /// The reason that a set of apps is not a valid plan.
@@ -577,17 +577,6 @@ impl fmt::Display for ProcessProblem {
             Self::OneshotWithPort => formatter.write_str("it is a oneshot that listens on a port"),
         }
     }
-}
-
-/// Reports whether a process can receive a variable named `name`: 1 or more
-/// ASCII letters, digits and `_`, starting with a letter or `_`.
-fn is_variable_name(name: &str) -> bool {
-    name.chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
-        && name
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 /// Reports whether `owner` is a numeric `uid:gid`, such as `999:999`.

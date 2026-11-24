@@ -214,3 +214,50 @@ fn two_services_that_bind_one_variable_clash_unless_it_renders_alike() {
     let clash = check_bindings([(&names[0], &s3), (&names[1], &dynamodb)]).unwrap_err();
     assert_eq!((clash.what, clash.name.as_str()), ("variable", "ENDPOINT"));
 }
+
+#[test]
+fn a_value_reads_doubled_braces_as_literals_and_single_braces_as_placeholders() {
+    let cases = [
+        ("", ""),
+        ("plain", "plain"),
+        ("{{", "{"),
+        ("}}", "}"),
+        ("a{{b}}c", "a{b}c"),
+        ("{{}}", "{}"),
+        ("{port}", "1"),
+        ("x{port}y", "x1y"),
+        ("{port}tail", "1tail"),
+        ("head{port}", "head1"),
+        ("{port}{port}", "11"),
+        ("{{port}}", "{port}"),
+        ("{{{port}}}", "{1}"),
+        ("{port}}}", "1}"),
+        ("é{port}ü", "é1ü"),
+    ];
+    for (text, rendered) in cases {
+        let value = ServiceValue::parse(text).unwrap_or_else(|bad| panic!("{text}: {bad}"));
+        assert_eq!(value.render(Some(1)), rendered, "{text}");
+    }
+}
+
+#[test]
+fn a_value_refuses_a_lone_brace_with_the_text_from_that_brace_on() {
+    let cases = [
+        ("{", "{"),
+        ("}", "}"),
+        ("a}b", "}b"),
+        ("}{", "}{"),
+        ("{}", "{}"),
+        ("{{{", "{"),
+        ("}}}", "}"),
+        ("{port", "{port"),
+        ("{{port}", "}"),
+        ("{port}}", "}"),
+        ("{port}{", "{"),
+        ("{table.{a}}", "}"),
+        ("{nope}{port}", "{nope}{port}"),
+    ];
+    for (text, bad) in cases {
+        assert_eq!(ServiceValue::parse(text), Err(bad.to_owned()), "{text}");
+    }
+}

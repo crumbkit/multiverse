@@ -7,6 +7,8 @@ workspace may need to act on.
 
 ### Added
 
+- `phase::is_variable_name` reports whether a name is one phase passes to
+  a process: an ASCII letter or `_`, then ASCII letters, digits and `_`.
 - `Runs::stable_id` returns a workspace's stable id, and mints and saves
   one when the record holds none, only while the caller holds the
   workspace's lock.

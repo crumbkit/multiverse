@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::manifest::{
-    DEFAULT_READY_TIMEOUT, Joined, Manifest, ManifestError, ManifestProblem, Permissions,
+    DEFAULT_READY_TIMEOUT, EnvValue, Joined, Manifest, ManifestError, ManifestProblem, Permissions,
     Published, ReadyCheck, StarmapFound, TaskName, Unit,
 };
 
@@ -785,6 +785,90 @@ fn a_brace_that_opens_no_port_placeholder_fails_with_its_line() {
         assert!(
             matches!(&problem, ManifestProblem::Invalid { message } if message.contains("{{") && message.contains("`URL`")),
             "{value}: {problem:?}"
+        );
+    }
+}
+
+#[test]
+fn an_env_value_reads_doubled_braces_as_literals_and_single_braces_as_port_placeholders() {
+    let ports = BTreeMap::from([("api".to_owned(), 1)]);
+    let cases = [
+        ("", ""),
+        ("plain", "plain"),
+        ("{{", "{"),
+        ("}}", "}"),
+        ("a{{b}}c", "a{b}c"),
+        ("{{}}", "{}"),
+        ("{port.api}", "1"),
+        ("x{port.api}y", "x1y"),
+        ("{port.api}tail", "1tail"),
+        ("head{port.api}", "head1"),
+        ("{port.api}{port.api}", "11"),
+        ("{{port.api}}", "{port.api}"),
+        ("{{{port.api}}}", "{1}"),
+        ("{port.api}}}", "1}"),
+        ("é{port.api}ü", "é1ü"),
+    ];
+    for (text, rendered) in cases {
+        let value = EnvValue::parse(text).unwrap_or_else(|| panic!("{text}"));
+        assert_eq!(value.render(&ports), rendered, "{text}");
+        assert_eq!(value, text, "{text}");
+    }
+}
+
+#[test]
+fn an_env_value_refuses_a_brace_that_is_neither_doubled_nor_a_port_placeholder() {
+    for text in [
+        "{",
+        "}",
+        "a}b",
+        "}{",
+        "{}",
+        "{{{",
+        "}}}",
+        "{port",
+        "{port}",
+        "{port.api",
+        "{{port.api}",
+        "{port.api}}",
+        "{port.api}{",
+        "{port.{api}}",
+        "{port.a.b}",
+        "{nope}{port.api}",
+    ] {
+        assert!(EnvValue::parse(text).is_none(), "{text}");
+    }
+}
+
+#[test]
+fn a_doubled_brace_around_a_port_placeholder_is_literal_text_beside_a_real_placeholder() {
+    let manifest = parse(
+        "ports = [\"api\"]\n[processes.a]\nargv = [\"true\"]\nenv = { URL = \"{{port.api}}={port.api}\" }\n",
+    )
+    .unwrap();
+    let url = &manifest.processes["a"].env["URL"];
+    let ports = BTreeMap::from([("api".to_owned(), 24001)]);
+    assert_eq!(url.render(&ports), "{port.api}=24001");
+    assert_eq!(url.ports().collect::<Vec<_>>(), ["api"]);
+}
+
+#[test]
+fn an_env_variable_name_is_an_ascii_letter_or_underscore_then_letters_digits_and_underscores() {
+    for name in ["A", "_", "LOG", "a1_b"] {
+        let manifest = parse(&format!(
+            "[processes.a]\nargv = [\"true\"]\nenv = {{ \"{name}\" = \"x\" }}\n"
+        ))
+        .unwrap_or_else(|error| panic!("{name}: {error:?}"));
+        assert_eq!(manifest.processes["a"].env[name], "x", "{name}");
+    }
+    for name in ["", "1A", "A-B", "A=B", "É", "A B"] {
+        let (line, problem) = problem(&format!(
+            "[processes.a]\nargv = [\"true\"]\nenv = {{ \"{name}\" = \"x\" }}\n"
+        ));
+        assert_eq!(line, Some(3), "{name}");
+        assert!(
+            matches!(&problem, ManifestProblem::Invalid { message } if *message == format!("`{name}` of `a` is not an environment variable name")),
+            "{name}: {problem:?}"
         );
     }
 }

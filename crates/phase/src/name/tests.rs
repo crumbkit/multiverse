@@ -1,6 +1,6 @@
 use super::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VariableName, VolumeName,
-    WorkspaceId, WorkspaceName,
+    WorkspaceId, WorkspaceName, is_variable_name,
 };
 
 #[test]
@@ -111,4 +111,15 @@ fn a_variable_name_refuses_an_empty_name_an_equals_sign_and_nul() {
         "CARGO_BUILD_JOBS".parse::<VariableName>().unwrap().as_str(),
         "CARGO_BUILD_JOBS"
     );
+}
+
+#[test]
+fn a_variable_name_starts_with_an_ascii_letter_or_underscore_and_holds_letters_digits_and_underscores()
+ {
+    for name in ["A", "_", "PATH", "a1_b"] {
+        assert!(is_variable_name(name), "{name}");
+    }
+    for name in ["", "1A", "A-B", "A=B", "É", "A B"] {
+        assert!(!is_variable_name(name), "{name}");
+    }
 }
