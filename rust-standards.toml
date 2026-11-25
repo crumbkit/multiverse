@@ -13,13 +13,21 @@ profiles = ["base", "library", "cli", "child-process", "durable-state"]
 [[decision]]
 id = "lanes"
 requirement = """
-- Lane: `lane` in .github/workflows/ci.yml, on each pull request and each push to main. It runs every step of the pull-request lane in the standards' order (format, workflows, deny, shear, clippy, tests, doctests, rustdoc, features), then `msrv` (LIB-4). Its budget is fifteen minutes, the job's timeout.
+- Lane: `lane` in .github/workflows/ci.yml, on each pull request and each push to main. It calls the standards' shared lane, .github/workflows/rust-lane.yml, with `library: true`, so its check is `lane / lane`. The shared lane runs every step of the pull-request lane in the standards' order (format, workflows, secrets, deny, shear, clippy, tests, doctests, rustdoc, features). Its budget is fifteen minutes, the job's timeout.
+- Lane: `multiverse` in .github/workflows/ci.yml, on each pull request and each push to main. It runs the steps that the shared lane does not: `msrv` (LIB-4), the tests again with the container test image present, so the container tests of phase and mxv run, and `tests without the sandbox`. Its budget is fifteen minutes, the job's timeout.
+- No check is required to merge a pull request until the owner adds a ruleset on `main`. A ruleset would require `lane / lane` and `multiverse`.
 - Lane: `advisories` in .github/workflows/ci.yml, daily at 06:43 UTC and on demand (BASE-29). Nothing waits for it.
 - Lane: `macos` in .github/workflows/ci.yml, daily at 06:43 UTC and on demand. It runs clippy, tests and doctests on macOS, which builds the macOS-only code. Nothing waits for it.
 - Lane: release in .github/workflows/release.yml, on each push of a `v*` tag. It runs `advisories` (BASE-29), builds `mxv` with `cargo auditable` (BASE-30) for aarch64-apple-darwin, aarch64-unknown-linux-gnu and x86_64-unknown-linux-gnu, and attaches the archives and SHA256SUMS to the tag's GitHub release, which waits for both. A pull request that changes the file builds the archives and releases nothing.
 """
 reason = "The pull-request lane stays within fifteen minutes on a small workspace and grows with the code. A daily advisory run catches an advisory published against a dependency already on main. A daily macOS run checks the macOS-only code without making pull requests wait for a macOS runner."
 realizations = [".github/workflows/ci.yml"]
+
+[[decision]]
+id = "lane-commit"
+requirement = "The `lane` job's `uses:` line names the shared lane at 5ba71ff31c5f5d8e69b34d04bb65bd0177f7ebeb, which is ahead of `standards.commit` (7c9a7577fed4fe5ba0682960c0380af0a75dace4). The two stay apart until multiverse takes that version of the standards in its own change, which moves `standards.commit` to the `uses:` commit and takes or excepts the rest of that version's diff."
+reason = "adoption.md says the two commits move together. 7c9a757 has no shared lane, so the `lane` job can only call it at a later commit. Taking 5ba71ff's other changes, such as the BASE-56 lints and the BASE-5 clippy entries, is a change of its own."
+realizations = [".github/workflows/ci.yml", "rust-standards.toml"]
 
 [[decision]]
 id = "release-profile"
