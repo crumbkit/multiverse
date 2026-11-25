@@ -19,6 +19,10 @@ updates:
       interval: weekly
     cooldown:
       default-days: 7
+    # The project moves the shared lane's commit by hand, together with its
+    # map's `standards.commit` (adoption.md).
+    ignore:
+      - dependency-name: crumbkit/rust-standards
     groups:
       github-actions:
         patterns: ["*"]
