@@ -4,7 +4,7 @@
 # against.
 
 schema = "rust-standards/adoption/v1"
-standards = { version = "draft", commit = "7c9a7577fed4fe5ba0682960c0380af0a75dace4" }
+standards = { version = "draft", commit = "5ba71ff31c5f5d8e69b34d04bb65bd0177f7ebeb" }
 
 # multiverse publishes a library crate, builds the `mxv` command, starts git
 # and app processes, and keeps workspace records and a port ledger on disk.
@@ -20,25 +20,19 @@ requirement = """
 - Lane: `macos` in .github/workflows/ci.yml, daily at 06:43 UTC and on demand. It runs clippy, tests and doctests on macOS, which builds the macOS-only code. Nothing waits for it.
 - Lane: release in .github/workflows/release.yml, on each push of a `v*` tag. It runs `advisories` (BASE-29), builds `mxv` with `cargo auditable` (BASE-30) for aarch64-apple-darwin, aarch64-unknown-linux-gnu and x86_64-unknown-linux-gnu, and attaches the archives and SHA256SUMS to the tag's GitHub release, which waits for both. A pull request that changes the file builds the archives and releases nothing.
 """
-reason = "The pull-request lane stays within fifteen minutes on a small workspace and grows with the code. A daily advisory run catches an advisory published against a dependency already on main. A daily macOS run checks the macOS-only code without making pull requests wait for a macOS runner."
+purpose = "The pull-request lane stays within fifteen minutes on a small workspace and grows with the code. A daily advisory run catches an advisory published against a dependency already on main. A daily macOS run checks the macOS-only code without making pull requests wait for a macOS runner."
 realizations = [".github/workflows/ci.yml"]
-
-[[decision]]
-id = "lane-commit"
-requirement = "The `lane` job's `uses:` line names the shared lane at 5ba71ff31c5f5d8e69b34d04bb65bd0177f7ebeb, which is ahead of `standards.commit` (7c9a7577fed4fe5ba0682960c0380af0a75dace4). The two stay apart until multiverse takes that version of the standards in its own change, which moves `standards.commit` to the `uses:` commit and takes or excepts the rest of that version's diff."
-reason = "adoption.md says the two commits move together. 7c9a757 has no shared lane, so the `lane` job can only call it at a later commit. Taking 5ba71ff's other changes, such as the BASE-56 lints and the BASE-5 clippy entries, is a change of its own."
-realizations = [".github/workflows/ci.yml", "rust-standards.toml"]
 
 [[decision]]
 id = "release-profile"
 requirement = "`[profile.release]` sets `overflow-checks = true` and leaves `lto`, `codegen-units` and `strip` at Cargo's defaults."
-reason = "multiverse ships no binary yet, so no measurement shows what a size or speed setting would gain. The pull request that decides how mxv ships records its settings here."
+purpose = "multiverse ships no binary yet, so no measurement shows what a size or speed setting would gain. The pull request that decides how mxv ships records its settings here."
 realizations = ["Cargo.toml"]
 
 [[decision]]
 id = "unsafe-libproc"
 requirement = "`unsafe_code` is `deny` in the workspace lints. Three modules of shipped code expect it: crates/phase/src/record/process/darwin.rs, crates/phase/src/sandbox/launch.rs and crates/mxv/src/admission.rs. Five test modules of phase also expect it: crates/phase/src/engine/exec/tests.rs, crates/phase/src/engine/keeper/tests.rs, crates/phase/src/engine/probe/tests.rs, crates/phase/src/sandbox/tests.rs and crates/phase/src/record/process/darwin/tests.rs. The multiverse crate holds no unsafe code, and mxv reads the process table through phase. launch.rs holds one unsafe block, with a SAFETY comment, that borrows each raw descriptor above standard error so the launcher can set close-on-exec on it. admission.rs holds one unsafe block, with a SAFETY comment, that reads a signal's setting with `sigaction`. darwin.rs holds one unsafe block per libproc call (`proc_pidinfo` for a process's `proc_bsdinfo` and for its descriptor list, `proc_pidfdinfo` and `proc_listpids`), each with a SAFETY comment (BASE-3). The block of `proc_pidinfo(PROC_PIDTBSDINFO)` clears errno before its call, so a failure that sets no errno is never read as a stale one. The blocks pass only buffers that the module owns, with their sizes, and safe code reads the fields from the bytes."
-reason = "macOS gives a process's start time to the microsecond, and the sockets of a process's descriptors, only through libproc, which has no safe interface in std or rustix. The libproc crate wraps it without unsafe code, but its build runs bindgen, which makes every macOS build need libclang. The launcher needs its block because rustix has no `close_range` and setting a flag on a raw descriptor needs `BorrowedFd::borrow_raw`. admission.rs needs its block because only `sigaction` reads a signal's setting, and neither rustix nor signal-hook offers it."
+purpose = "macOS gives a process's start time to the microsecond, and the sockets of a process's descriptors, only through libproc, which has no safe interface in std or rustix. The libproc crate wraps it without unsafe code, but its build runs bindgen, which makes every macOS build need libclang. The launcher needs its block because rustix has no `close_range` and setting a flag on a raw descriptor needs `BorrowedFd::borrow_raw`. admission.rs needs its block because only `sigaction` reads a signal's setting, and neither rustix nor signal-hook offers it."
 realizations = ["Cargo.toml", "crates/phase/src/record/process/darwin.rs", "crates/phase/src/sandbox/launch.rs", "crates/mxv/src/admission.rs"]
 
 [[decision]]
@@ -52,7 +46,7 @@ requirement = """
 - Removing a clone fetches nothing. It counts as unpushed each commit that the clone or an initialised submodule holds in `HEAD`, a branch, a tag or a note, and that no remote branch of the clone, and no head or tag that the clone's mirror last fetched from `origin`, holds. It also counts each commit made on a detached `HEAD` that only the reflog of `HEAD` holds, unless the reflog of a local branch holds it or a commit with the same patch is on `origin` or a local branch, so a rebase, an amend or a reset on a branch never makes a removal need `--delete-unmerged`. Before it counts, it copies the mirror's heads and tags into `refs/mxv/origin/` in the clone with a local fetch from the mirror. The mirror holds no notes, so a note counts as unpushed until it is deleted.
 - No origin URL that mxv prints or records carries a user name or password, and neither does any line of git's standard error that mxv quotes. An archive record is the one exception: it keeps the user name of an `ssh://` origin, because a restored clone connects with that name, and it never holds a password.
 """
-reason = "This amends the Mirrors row of the build plan that was signed off on 30 October 2026. That row kept a bare mirror of each repository and created every workspace as a git worktree of the mirror, so that mxv never added worktrees to the person's own clone. The bare mirror stays, and each workspace becomes a `git clone --shared` from it in place of a worktree. A worktree shares its repository's git directory, including its hooks, config and branches, so an agent in one workspace could move another workspace's branch or run a hook that someone planted there. A sandboxed agent must not be able to write a shared git directory. The eval `/evals/agent-sandbox-macos` in the personal board confined an agent's process to its workspace on macOS only with a git directory for each workspace: with worktrees of a shared mirror, the sandbox had to let the agent write the mirror, and an agent in one workspace moved another workspace's branch. A clone with its own `.git` lets the sandbox allow writes to the workspace alone."
+purpose = "This amends the Mirrors row of the build plan that was signed off on 30 October 2026. That row kept a bare mirror of each repository and created every workspace as a git worktree of the mirror, so that mxv never added worktrees to the person's own clone. The bare mirror stays, and each workspace becomes a `git clone --shared` from it in place of a worktree. A worktree shares its repository's git directory, including its hooks, config and branches, so an agent in one workspace could move another workspace's branch or run a hook that someone planted there. A sandboxed agent must not be able to write a shared git directory. The eval `/evals/agent-sandbox-macos` in the personal board confined an agent's process to its workspace on macOS only with a git directory for each workspace: with worktrees of a shared mirror, the sandbox had to let the agent write the mirror, and an agent in one workspace moved another workspace's branch. A clone with its own `.git` lets the sandbox allow writes to the workspace alone."
 realizations = [
     "crates/multiverse/src/mirror.rs",
     "crates/multiverse/src/workspaces.rs",
@@ -73,7 +67,7 @@ requirement = """
 - `--manifest` refuses a file inside a git work tree or under the workspace root with `mxv::manifest::untrusted`, and a template must be a regular file outside the workspace root. A malformed template fails `new` only when the origins it lists include the repository's, and is otherwise skipped with a warning.
 - A top-level table whose name is close to one of mxv's own, and phase's `[process.*]`, parse with a warning, which `up` prints on standard error and `status`, `show` and `new` put in `warnings`.
 """
-reason = "Luke and phase agreed the rule, and crates/phase/docs/design.md describes the same lookup in \"Which manifest is read\". A workspace manifest lets a person run an app that a repository declares differently, or not at all, without changing the shared repository. Reading one file keeps it clear which keys apply, and passing other tables through lets phase own the schema of its own tables in the same file."
+purpose = "The owner and phase agreed the rule, and crates/phase/docs/design.md describes the same lookup in \"Which manifest is read\". A workspace manifest lets a person run an app that a repository declares differently, or not at all, without changing the shared repository. Reading one file keeps it clear which keys apply, and passing other tables through lets phase own the schema of its own tables in the same file."
 realizations = [
     "crates/multiverse/src/lookup.rs",
     "crates/multiverse/src/template.rs",
@@ -82,3 +76,38 @@ realizations = [
     "crates/mxv/src/verbs.rs",
     "crates/mxv/src/rows.rs",
 ]
+
+[[exception]]
+rule = "BASE-5"
+paths = ["clippy.toml"]
+owner = "the owner"
+reason = "clippy.toml leaves out the base entries that 5ba71ff added for the clock (`Instant::now`, `SystemTime::now`), the file system apart from `std::fs::write`, `File::create` and `OpenOptions::new` (`std::fs::read`, `read_to_string`, `read_dir`, `File::open`, `File::options` and the `tokio::fs` calls), the network (`TcpStream::connect`) and the print macros. With those entries at warn on main 11edce18, clippy reported 699 firings: 598 in tests and 101 in production code across 44 files, the most in crates/phase/src/engine/probe/http.rs and crates/multiverse/src/store.rs. phase has a clock owner, crates/phase/src/clock.rs, but the multiverse and mxv crates have none, and no crate has an owning module for file reads or the network yet."
+correction = "Give each effect one owning module per crate, route the production sites through it, put `#[expect]` on each test or test module that uses an effect, add the left-out entries to clippy.toml and delete this exception. The task /repos/notes-personal/tasks/multiverse-gives-the-clock-file-system-network-and-print-mac.md in the owner's board tracks it."
+
+[[exception]]
+rule = "BASE-56"
+items = ["lint:clippy::wildcard_enum_match_arm"]
+owner = "the owner"
+reason = "Cargo.toml sets `wildcard_enum_match_arm` to allow. With the lint at warn on main 11edce18, clippy reported 159 wildcard arms on enums: 82 in production code and 77 in tests. `match_wildcard_for_single_variants` is at deny, and its one firing, in a test, names its variant."
+correction = "Name the variants in each arm, or keep an arm with `#[expect]` as adoption.md describes, then set the lint to deny and delete this exception. The task /repos/notes-personal/tasks/multiverse-names-the-variants-in-its-wildcard-enum-match-arm.md in the owner's board tracks it."
+
+[[exception]]
+rule = "CLI-11"
+paths = ["crates/mxv/tests/"]
+owner = "the owner"
+reason = "mxv has no test that runs each example at a pseudo-terminal and in a pipe and compares the bytes."
+correction = "Add that test and delete this exception."
+
+[[exception]]
+rule = "CLI-12"
+paths = ["crates/mxv/tests/"]
+owner = "the owner"
+reason = "mxv has no test that runs each prompting command without a terminal on standard input and expects a failure code that names the answering flag."
+correction = "Add that test, with `check_effects` in the convention tests, and delete this exception."
+
+[[exception]]
+rule = "CLI-14"
+paths = ["crates/mxv/tests/"]
+owner = "the owner"
+reason = "mxv has no test that runs a command that prints colour at a pseudo-terminal with `NO_COLOR=1` and finds no escape codes."
+correction = "Add that test and delete this exception."

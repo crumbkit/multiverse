@@ -1,14 +1,19 @@
-# The union of the clippy.toml fragments of the base, cli, child-process and
+# The union of the clippy.toml fragments of the base, child-process and
 # durable-state profiles of the Rust standards. Each effect belongs to one
 # owning module, which suppresses the lint with #[expect] and a reason
 # (BASE-5). An entry whose owning module exists names its path in the
 # reason, and the others name the module that the build plan gives the
 # effect.
+#
+# The base fragment's entries for the clock, the network and the print
+# macros are left out, and so are its file-system entries other than
+# std::fs::write, std::fs::File::create and std::fs::OpenOptions::new.
+# rust-standards.toml records them as an exception to BASE-5 until each
+# effect has its owning module.
 
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
-allow-dbg-in-tests = true
 allow-print-in-tests = true
 allow-indexing-slicing-in-tests = true
 too-many-lines-threshold = 150 # BASE-10
@@ -30,7 +35,7 @@ disallowed-methods = [
     # BASE-11
     { path = "std::thread::sleep", reason = "wait for an observable signal, or sleep in the clock owner" },
     { path = "tokio::time::sleep", reason = "wait for an observable signal, or sleep in the clock owner", allow-invalid = true },
-    # CLI-1
+    # BASE-5: the standard streams (CLI-1)
     { path = "std::io::stdout", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
     { path = "std::io::stderr", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
     { path = "std::io::stdin", reason = "read through crumbkit's Output in crates/mxv/src/lib.rs, which knows whether input is a terminal" },
@@ -45,12 +50,13 @@ disallowed-methods = [
     { path = "tokio::process::Command::status", reason = "start processes through the library's git and process modules", allow-invalid = true },
     { path = "tokio::process::Command::output", reason = "start processes through the library's git and process modules", allow-invalid = true },
     { path = "crumbkit_process::run", reason = "start processes through the library's git and process modules" },
-    # DUR-1
+    # BASE-5: the file system, whose writes the atomic writer owns (DUR-1)
     { path = "std::fs::write", reason = "write through the library's store module" },
-    { path = "std::fs::copy", reason = "write through the library's store module" },
-    { path = "std::fs::rename", reason = "write through the library's store module" },
     { path = "std::fs::File::create", reason = "write through the library's store module" },
     { path = "std::fs::OpenOptions::new", reason = "write through the library's store module" },
+    # DUR-1
+    { path = "std::fs::copy", reason = "write through the library's store module" },
+    { path = "std::fs::rename", reason = "write through the library's store module" },
     # DUR-2
     { path = "std::fs::File::lock", reason = "lock through the library's store module, which owns the deadline" },
     { path = "std::fs::File::try_lock", reason = "lock through the library's store module, which owns the deadline" },
@@ -68,6 +74,7 @@ disallowed-types = [
     { path = "std::process::Child", reason = "let the library's process module hold the child, which owns its deadline and cleanup" },
 ]
 
-# BASE-7: the untyped-error macros of the project's error crates. multiverse
-# depends on no error crate yet.
+# BASE-5: the standard-stream macros are left out under the BASE-5
+# exception in rust-standards.toml. BASE-7: the untyped-error macros of the
+# project's error crates. multiverse depends on no error crate yet.
 disallowed-macros = []

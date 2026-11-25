@@ -4,10 +4,10 @@
 # `lane / lane`. The `multiverse` job runs the steps that the shared lane does
 # not: the MSRV check (LIB-4), the container tests of phase and mxv, and the
 # tests of mxv-phase without its sandbox feature. The map's `lanes` decision
-# in rust-standards.toml records every lane, and its `lane-commit` decision
-# records why the `uses:` commit is ahead of `standards.commit`. The step
-# names are the standards' step names, so a failure reads the same in CI and
-# in AGENTS.md.
+# in rust-standards.toml records every lane. The `uses:` commit is the commit
+# that `standards.commit` names, and the two move together. The step names are
+# the standards' step names, so a failure reads the same in CI and in
+# AGENTS.md.
 name: CI
 
 on:

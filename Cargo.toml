@@ -198,7 +198,7 @@ cast_precision_loss = "deny"             # BASE-12
 cast_lossless = "deny"                   # BASE-12
 disallowed_methods = "deny"              # BASE-5, BASE-6, BASE-7, BASE-11
 disallowed_types = "deny"                # BASE-5
-disallowed_macros = "deny"               # BASE-7
+disallowed_macros = "deny"               # BASE-5, BASE-7
 print_stdout = "deny"                    # BASE-5
 print_stderr = "deny"                    # BASE-5
 mod_module_files = "deny"                # BASE-9
@@ -208,6 +208,10 @@ enum_glob_use = "deny"                   # BASE-13
 ref_option = "deny"                      # BASE-14
 needless_for_each = "deny"               # BASE-15
 fn_params_excessive_bools = "deny"       # BASE-16
+# BASE-56: rust-standards.toml records an exception for
+# wildcard_enum_match_arm, which stays at allow until its firings are fixed.
+wildcard_enum_match_arm = "allow"        # BASE-56
+match_wildcard_for_single_variants = "deny" # BASE-56
 missing_errors_doc = "deny"              # LIB-2
 missing_panics_doc = "deny"              # LIB-2
 must_use_candidate = "deny"              # LIB-3
