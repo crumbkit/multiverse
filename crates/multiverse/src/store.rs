@@ -1,5 +1,5 @@
 //! The state store, which is the one module that writes durable files
-//! (DUR-1). It keeps one JSON record for each workspace, named after the
+//! (DUR-1) and the one module that reads and opens files (BASE-5). It keeps one JSON record for each workspace, named after the
 //! workspace, in one directory, and writes each workspace's `AGENTS.md`.
 //!
 //! It also owns the advisory locks that keep two mxv commands from starting
@@ -9,6 +9,10 @@
 //! happens when the [`Lock`] drops or the process that holds it ends, so a
 //! crashed mxv leaves no stale lock.
 //!
+//! The rest of multiverse reads files through [`read`], [`read_to_string`],
+//! [`read_dir`] and [`open`], which call the standard library's functions
+//! of the same names unchanged.
+//!
 //! [`replace_file`] and [`lock`] call crumbkit-durable. The other writes
 //! stay here, because crumbkit-durable has no create-if-absent, no
 //! streamed write and no permission bits other than 0600 and the umask's.
@@ -16,13 +20,14 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crumbkit_durable::{LockError, Mode, PathLock, WriteStep};
 use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 
 use crate::archive::{ArchiveId, MintHeld, mint_held};
+use crate::clock;
 use crate::error::Error;
 use crate::host::{Host, ManifestNames};
 use crate::name::WorkspaceName;
@@ -126,7 +131,7 @@ impl Store {
             path: self.dir.clone(),
             source,
         };
-        let entries = match fs::read_dir(&self.dir) {
+        let entries = match read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 return Ok(Records {
@@ -446,7 +451,7 @@ fn read_record(path: &Path) -> Result<Option<Workspace>, Error> {
         path: path.to_path_buf(),
         source,
     };
-    let file = match File::open(path) {
+    let file = match open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(unreadable(error)),
@@ -528,11 +533,54 @@ fn write_temp(target: &Path, bytes: &[u8]) -> Result<PathBuf, Error> {
     Ok(temp)
 }
 
+/// Reads the whole file at `path`, as [`fs::read`] does.
+///
+/// # Errors
+///
+/// Returns the error of [`fs::read`], such as `NotFound` when no file is at
+/// `path`.
+pub(crate) fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
+    fs::read(path)
+}
+
+/// Reads the whole file at `path` as UTF-8 text, as [`fs::read_to_string`]
+/// does.
+///
+/// # Errors
+///
+/// Returns the error of [`fs::read_to_string`], such as `NotFound` when no
+/// file is at `path` and `InvalidData` when the file is not UTF-8.
+pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
+    fs::read_to_string(path)
+}
+
+/// Returns an iterator over the entries of the directory `path`, as
+/// [`fs::read_dir`] does.
+///
+/// # Errors
+///
+/// Returns the error of [`fs::read_dir`], such as `NotFound` when no
+/// directory is at `path`.
+pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<fs::ReadDir> {
+    fs::read_dir(path)
+}
+
+/// Opens the file or directory at `path` for reading, as [`File::open`]
+/// does.
+///
+/// # Errors
+///
+/// Returns the error of [`File::open`], such as `NotFound` when nothing is
+/// at `path`.
+pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<File> {
+    File::open(path)
+}
+
 /// Syncs the directory `dir`, so a rename or a removal in it survives a
 /// power loss. A platform that cannot open a directory as a file, such as
 /// Windows, skips the sync, because it has no other way to sync one.
 pub(crate) fn sync_dir(dir: &Path) {
-    if let Ok(handle) = File::open(dir) {
+    if let Ok(handle) = open(dir) {
         let _ = handle.sync_all();
     }
 }
@@ -559,7 +607,7 @@ pub(crate) fn entries(dir: &Path) -> Result<Vec<Entry>, Error> {
         path: dir.to_path_buf(),
         source,
     };
-    let listed = match fs::read_dir(dir) {
+    let listed = match read_dir(dir) {
         Ok(listed) => listed,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(unreadable(error)),
@@ -592,7 +640,7 @@ pub(crate) fn entries(dir: &Path) -> Result<Vec<Entry>, Error> {
 /// [`Error::Unwritable`] when a step of the write fails. The temporary file
 /// is removed after a failure.
 pub(crate) fn copy_file(from: &Path, to: &Path, mode: u32) -> Result<String, Error> {
-    let mut source = File::open(from).map_err(|source| Error::StateUnreadable {
+    let mut source = open(from).map_err(|source| Error::StateUnreadable {
         path: from.to_path_buf(),
         source,
     })?;
@@ -769,7 +817,7 @@ pub(crate) fn temp_of(found: &str) -> impl Iterator<Item = &str> {
 /// form that [`temp_of`] reads: `.<name>.<pid>.tmp` and crumbkit-durable's
 /// `.<name>.<pid>.<n>.tmp`.
 fn remove_stale_temps(dir: &Path, name: &str) -> Result<(), Error> {
-    let entries = match fs::read_dir(dir) {
+    let entries = match read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {
@@ -806,7 +854,7 @@ pub(crate) fn file_digest(path: &Path) -> Result<String, Error> {
         path: path.to_path_buf(),
         source,
     };
-    let mut file = File::open(path).map_err(unreadable)?;
+    let mut file = open(path).map_err(unreadable)?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];
     loop {
@@ -891,7 +939,7 @@ pub(crate) fn touch_file(path: &Path) -> Result<(), Error> {
     )]
     let opened = OpenOptions::new().create(true).append(true).open(path);
     opened
-        .and_then(|file| file.set_modified(std::time::SystemTime::now()))
+        .and_then(|file| file.set_modified(clock::wall_now()))
         .map_err(unwritable)
 }
 
@@ -967,7 +1015,7 @@ pub(crate) fn lock(path: &Path, wait: Duration) -> Result<Lock, Error> {
         clippy::disallowed_methods,
         reason = "crates/multiverse/src/store.rs owns file locks and their deadline (DUR-2)"
     )]
-    let taken = PathLock::acquire(path, Instant::now() + wait);
+    let taken = PathLock::acquire(path, clock::now() + wait);
     match taken {
         Ok(lock) => Ok(Lock { _lock: lock }),
         Err(LockError::Busy { .. }) => Err(Error::Busy {

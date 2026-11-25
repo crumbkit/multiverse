@@ -263,7 +263,7 @@ fn append(
             digest: store::hex_digest(&Sha256::digest(bytes)),
         });
     }
-    let file = File::open(on_disk).map_err(unreadable)?;
+    let file = store::open(on_disk).map_err(unreadable)?;
     let opened = file.metadata().map_err(unreadable)?;
     if !opened.is_file() {
         return Err(unreadable(io::Error::new(
@@ -465,7 +465,7 @@ fn each_entry(
     kept: &[IgnoredEntry],
     mut visit: impl FnMut(&IgnoredEntry, &mut tar::Entry<'_, File>) -> Result<(), Error>,
 ) -> Result<(), Error> {
-    let file = match File::open(tar) {
+    let file = match store::open(tar) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(source) => {

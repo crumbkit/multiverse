@@ -1237,7 +1237,7 @@ fn path_is_free(archive: &Archive) -> Result<bool, Error> {
         (Entry::Absent, _) => Ok(true),
         (Entry::Present, Some(mark)) if mark.made_directory() => Ok(true),
         (Entry::Present, Some(_)) => {
-            Ok(std::fs::read_dir(&archive.path).is_ok_and(|mut entries| entries.next().is_none()))
+            Ok(store::read_dir(&archive.path).is_ok_and(|mut entries| entries.next().is_none()))
         }
         _ => Ok(false),
     }
@@ -1345,7 +1345,7 @@ fn find_other_files(
         path: dir.to_path_buf(),
         source,
     };
-    let entries = match std::fs::read_dir(dir) {
+    let entries = match store::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(source) => return Err(unreadable(source)),

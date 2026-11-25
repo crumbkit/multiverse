@@ -6,7 +6,7 @@ use std::fs;
 use std::io;
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use phase::container::{
     VolumeKey, WorkspaceVolumes, app_volume_labels, app_volume_name, app_volumes,
@@ -24,6 +24,7 @@ use super::{
     received,
 };
 use crate::archive::MintHeld;
+use crate::clock;
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
@@ -963,7 +964,7 @@ impl Runs {
                 + phase_plan::BACKEND_READY_TIMEOUT * backends
                 + phase_plan::PROVISION_TIMEOUT
         };
-        let now = Instant::now();
+        let now = clock::now();
         let deadlines = UpDeadlines::new(now + BUILD_WAIT, now + ready_wait + START_MARGIN);
         let report = self
             .phase
@@ -1040,7 +1041,7 @@ impl Runs {
         if started.is_empty() {
             return;
         }
-        let deadline = Instant::now() + self.stop_wait(started.len());
+        let deadline = clock::now() + self.stop_wait(started.len());
         let _ = self.phase.down(id, &Selection::only(started), deadline);
     }
 
@@ -1284,7 +1285,7 @@ impl Runs {
             } else {
                 stopping.len()
             };
-            let deadline = Instant::now() + self.stop_wait(count);
+            let deadline = clock::now() + self.stop_wait(count);
             let report = self
                 .phase
                 .down(id, &selection(&stopping), deadline)

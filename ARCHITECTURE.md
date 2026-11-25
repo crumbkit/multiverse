@@ -15,7 +15,7 @@ The dependency direction is `mxv` to `multiverse` to `phase`. `phase` never depe
 
 `mxv` also uses `crumbkit` for its command conventions and `crumbkit-usage` for its local usage log. `phase` uses `nono` for the sandbox behind its default `sandbox` feature. `services` uses `dynoxide-rs` and `tokio`.
 
-Three modules have a single job that the rest of `multiverse` goes through. `crates/multiverse/src/git.rs` starts git. `crates/multiverse/src/store.rs` writes durable files. `crates/multiverse/src/ports.rs` opens sockets to allocate ports.
+Four modules have a single job that the rest of `multiverse` goes through. `crates/multiverse/src/git.rs` starts git. `crates/multiverse/src/store.rs` writes durable files, and reads, opens and lists files through `store::read`, `store::read_to_string`, `store::read_dir` and `store::open`. `crates/multiverse/src/ports.rs` opens sockets, to allocate ports and to connect to one through `ports::connect`. `crates/multiverse/src/clock.rs` reads the time through `clock::now` and `clock::wall_now`, and pauses between polls.
 
 ## `mxv new`
 

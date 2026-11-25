@@ -98,7 +98,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read as _};
 use std::ops::Range;
 use std::path::{Component, Path, PathBuf};
@@ -116,6 +116,7 @@ use crate::host::ManifestNames;
 use crate::name::{WorkspaceName, is_unit_name};
 use crate::redacted::Redacted;
 use crate::service::{Backend, PROVISION_APP, RESERVED_PREFIX, Service};
+use crate::store;
 
 mod services;
 #[cfg(test)]
@@ -1496,7 +1497,7 @@ impl Manifest {
                 message: error.to_string(),
             },
         };
-        let file = match File::open(&path) {
+        let file = match store::open(&path) {
             Ok(file) => file,
             // A symbolic link that leads nowhere is a file that cannot be
             // read, so the next manifest never takes its place.

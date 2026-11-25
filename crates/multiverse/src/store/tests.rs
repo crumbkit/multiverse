@@ -1217,3 +1217,41 @@ fn a_temporary_file_names_its_target_in_the_old_form_and_in_crumbkits_form() {
     assert!(targets(".AGENTS.md.tmp").is_empty());
     assert!(targets(".AGENTS.md.x.tmp").is_empty());
 }
+
+#[test]
+fn the_store_reads_a_file_as_bytes_and_as_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("note");
+    write(&path, "hello");
+    assert_eq!(crate::store::read(&path).unwrap(), b"hello");
+    assert_eq!(crate::store::read_to_string(&path).unwrap(), "hello");
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut crate::store::open(&path).unwrap(), &mut text).unwrap();
+    assert_eq!(text, "hello");
+}
+
+#[test]
+fn the_store_reports_a_missing_file_as_not_found() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("absent");
+    let kinds = [
+        crate::store::read(&path).unwrap_err().kind(),
+        crate::store::read_to_string(&path).unwrap_err().kind(),
+        crate::store::open(&path).unwrap_err().kind(),
+        crate::store::read_dir(&path).unwrap_err().kind(),
+    ];
+    assert_eq!(kinds, [std::io::ErrorKind::NotFound; 4]);
+}
+
+#[test]
+fn the_store_lists_a_directory_s_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path().join("a"), "");
+    write(dir.path().join("b"), "");
+    let mut names: Vec<_> = crate::store::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["a", "b"]);
+}

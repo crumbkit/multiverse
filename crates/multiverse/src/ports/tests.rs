@@ -58,3 +58,14 @@ fn an_address_is_not_bindable_while_a_wildcard_listener_holds_its_port() {
     let error = can_bind(SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, port))).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::AddrInUse);
 }
+
+#[test]
+fn a_connection_to_a_listener_reaches_it_and_one_to_a_closed_port_is_refused() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let stream = crate::ports::connect(&address, std::time::Duration::from_secs(5)).unwrap();
+    assert_eq!(stream.peer_addr().unwrap(), address);
+    drop(listener);
+    let refused = crate::ports::connect(&address, std::time::Duration::from_secs(5));
+    assert!(refused.is_err(), "{refused:?}");
+}

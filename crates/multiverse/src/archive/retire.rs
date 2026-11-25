@@ -3,7 +3,6 @@
 //! the root files, and retiring each checkout.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
 use std::io;
 use std::path::Path;
 
@@ -200,7 +199,7 @@ fn collect_paths(
         path: dir.to_path_buf(),
         source,
     };
-    for entry in fs::read_dir(dir).map_err(unreadable)? {
+    for entry in store::read_dir(dir).map_err(unreadable)? {
         let entry = entry.map_err(unreadable)?;
         let path = entry.path();
         let relative = path
@@ -230,7 +229,7 @@ fn collect_top_level(root: &Path, dir: &Path, inside: &mut BTreeSet<String>) -> 
         path: dir.to_path_buf(),
         source,
     };
-    for entry in fs::read_dir(dir).map_err(unreadable)? {
+    for entry in store::read_dir(dir).map_err(unreadable)? {
         let path = entry.map_err(unreadable)?.path();
         let relative = path.strip_prefix(root).unwrap_or(&path);
         inside.insert(relative.to_string_lossy().into_owned());
