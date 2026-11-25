@@ -9,6 +9,14 @@
 //! network that carries that id, so it never touches another workspace's.
 
 #![cfg(test)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write, and connect to ports that they or the code under test listen on"
+)]
+#![expect(
+    clippy::disallowed_macros,
+    reason = "the tests print on standard output why they skip, which the test runner shows"
+)]
 
 #[path = "support/grants.rs"]
 mod grants;

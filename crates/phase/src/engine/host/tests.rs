@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_macros,
+    reason = "the tests print on standard error why they skip, which the test runner shows"
+)]
+
 use std::fs::{self, OpenOptions};
 use std::io::Write as _;
 use std::path::Path;

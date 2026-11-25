@@ -128,6 +128,10 @@ pub(crate) fn read(path: &Path, home: &Path) -> Result<Config, MxvFailure> {
 ///
 /// Returns the error of [`std::fs::read_to_string`], such as one of kind
 /// [`io::ErrorKind::NotFound`] for a missing file.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/mxv/src/config.rs is the file-system owner, and it reads files (BASE-5)"
+)]
 pub(crate) fn read_to_string(path: &Path) -> io::Result<String> {
     std::fs::read_to_string(path)
 }

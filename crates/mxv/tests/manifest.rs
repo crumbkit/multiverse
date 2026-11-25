@@ -2,6 +2,11 @@
 //! accepts, and that it declares the tasks and the need that the file's
 //! comments describe.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::path::Path;
 
 use multiverse::Manifest;

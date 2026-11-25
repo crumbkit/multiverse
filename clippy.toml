@@ -1,15 +1,15 @@
 # The union of the clippy.toml fragments of the base, child-process and
 # durable-state profiles of the Rust standards. Each effect belongs to one
-# owning module, which suppresses the lint with #[expect] and a reason
-# (BASE-5). An entry whose owning module exists names its path in the
-# reason, and the others name the module that the build plan gives the
-# effect.
+# owning module per crate, which suppresses the lint with #[expect] and a
+# reason (BASE-5). Each entry's reason names the owning modules.
 #
-# The base fragment's entries for the clock, the network and the print
-# macros are left out, and so are its file-system entries other than
-# std::fs::write, std::fs::File::create and std::fs::OpenOptions::new.
-# rust-standards.toml records them as an exception to BASE-5 until each
-# effect has its owning module.
+# The owners of each effect:
+# - the clock: crates/multiverse/src/clock.rs, crates/phase/src/clock.rs and
+#   crates/mxv/src/clock.rs;
+# - file reads and opens: crates/multiverse/src/store.rs,
+#   crates/phase/src/record/store.rs and crates/mxv/src/config.rs;
+# - the network: crates/multiverse/src/ports.rs and crates/phase/src/net.rs;
+# - the standard streams: crates/mxv/src/lib.rs, through crumbkit::finish.
 
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
@@ -35,6 +35,27 @@ disallowed-methods = [
     # BASE-11
     { path = "std::thread::sleep", reason = "wait for an observable signal, or sleep in the clock owner" },
     { path = "tokio::time::sleep", reason = "wait for an observable signal, or sleep in the clock owner", allow-invalid = true },
+    # BASE-5: the clock
+    { path = "std::time::Instant::now", reason = "read the time from the crate's clock module, such as crates/multiverse/src/clock.rs" },
+    { path = "std::time::SystemTime::now", reason = "read the time from the crate's clock module, such as crates/multiverse/src/clock.rs" },
+    { path = "tokio::time::Instant::now", reason = "read the time from the crate's clock module, such as crates/multiverse/src/clock.rs", allow-invalid = true },
+    # BASE-5: file reads and opens
+    { path = "std::fs::read", reason = "read files through the crate's store module, such as crates/multiverse/src/store.rs" },
+    { path = "std::fs::read_to_string", reason = "read files through the crate's store module, such as crates/multiverse/src/store.rs" },
+    { path = "std::fs::read_dir", reason = "read directories through the crate's store module, such as crates/multiverse/src/store.rs" },
+    { path = "std::fs::File::open", reason = "open files through the crate's store module, such as crates/multiverse/src/store.rs" },
+    { path = "std::fs::File::options", reason = "open files through the crate's store module, such as crates/multiverse/src/store.rs" },
+    { path = "tokio::fs::read", reason = "read files through the crate's store module, such as crates/multiverse/src/store.rs", allow-invalid = true },
+    { path = "tokio::fs::read_to_string", reason = "read files through the crate's store module, such as crates/multiverse/src/store.rs", allow-invalid = true },
+    { path = "tokio::fs::read_dir", reason = "read directories through the crate's store module, such as crates/multiverse/src/store.rs", allow-invalid = true },
+    { path = "tokio::fs::write", reason = "write through the library's store module", allow-invalid = true },
+    { path = "tokio::fs::File::open", reason = "open files through the crate's store module, such as crates/multiverse/src/store.rs", allow-invalid = true },
+    { path = "tokio::fs::File::create", reason = "write through the library's store module", allow-invalid = true },
+    { path = "tokio::fs::OpenOptions::new", reason = "write through the library's store module", allow-invalid = true },
+    # BASE-5: the network
+    { path = "std::net::TcpStream::connect", reason = "connect through the crate's network module, crates/multiverse/src/ports.rs or crates/phase/src/net.rs" },
+    { path = "std::net::TcpStream::connect_timeout", reason = "connect through the crate's network module, crates/multiverse/src/ports.rs or crates/phase/src/net.rs" },
+    { path = "tokio::net::TcpStream::connect", reason = "connect through the crate's network module, crates/multiverse/src/ports.rs or crates/phase/src/net.rs", allow-invalid = true },
     # BASE-5: the standard streams (CLI-1)
     { path = "std::io::stdout", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
     { path = "std::io::stderr", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
@@ -74,7 +95,11 @@ disallowed-types = [
     { path = "std::process::Child", reason = "let the library's process module hold the child, which owns its deadline and cleanup" },
 ]
 
-# BASE-5: the standard-stream macros are left out under the BASE-5
-# exception in rust-standards.toml. BASE-7: the untyped-error macros of the
-# project's error crates. multiverse depends on no error crate yet.
-disallowed-macros = []
+# BASE-5: the standard-stream macros. BASE-7: the untyped-error macros of
+# the project's error crates. multiverse depends on no error crate yet.
+disallowed-macros = [
+    { path = "std::println", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
+    { path = "std::eprintln", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
+    { path = "std::print", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
+    { path = "std::eprint", reason = "print through crumbkit::finish in crates/mxv/src/lib.rs" },
+]

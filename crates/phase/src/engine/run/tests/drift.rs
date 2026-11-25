@@ -1,6 +1,8 @@
 //! `up` of a host process that runs while its part of the plan has
 //! changed, with the fake host and container runners of the run tests.
 
+#![expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
+
 use super::{Env, World, container_app, host_app, name, notes, outcome, plan};
 use crate::cancel::Cancel;
 use crate::plan::{AppPlan, Permissions};

@@ -2,6 +2,11 @@
 //! `retiring`, which names its archive, and the archive's `retired`, which
 //! says that every checkout was retired.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::rc::Rc;
 
 use super::*;

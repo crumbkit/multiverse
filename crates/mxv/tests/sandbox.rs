@@ -9,6 +9,10 @@
 
 #![cfg(test)]
 #![cfg(any(target_os = "macos", target_os = "linux"))]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
 
 #[cfg(target_os = "macos")]
 #[path = "support/grants.rs"]
@@ -431,6 +435,10 @@ ready = {{ log = "^ready$" }}
 
 #[cfg(target_os = "macos")]
 #[test]
+#[expect(
+    clippy::disallowed_macros,
+    reason = "the test prints on standard output why it skips, which the test runner shows"
+)]
 fn a_sandboxed_node_reports_its_version_into_the_log_that_mxv_keeps() {
     if !support::PATH
         .split(':')

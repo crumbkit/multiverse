@@ -161,6 +161,10 @@ impl FakeSsh {
     }
 
     /// Returns what the runs of the script have logged.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the fake ssh logs its runs to a file that the test reads"
+    )]
     pub(crate) fn logged(&self) -> String {
         std::fs::read_to_string(&self.log).unwrap_or_default()
     }

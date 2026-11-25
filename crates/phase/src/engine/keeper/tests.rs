@@ -4,6 +4,15 @@
 //! finds `keep` among them and runs the keeper as the program that links
 //! phase would.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
+#![expect(
+    clippy::disallowed_macros,
+    reason = "a child test prints what it saw on standard output, where its parent test reads it"
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Read as _, Write};

@@ -7,6 +7,10 @@
 //! with the tests.
 
 #![cfg(test)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
 
 #[path = "support/grants.rs"]
 mod grants;

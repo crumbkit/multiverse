@@ -1,5 +1,10 @@
 //! The tests of the record form's host data and its version rule.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;

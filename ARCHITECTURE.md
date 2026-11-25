@@ -17,6 +17,8 @@ The dependency direction is `mxv` to `multiverse` to `phase`. `phase` never depe
 
 Four modules have a single job that the rest of `multiverse` goes through. `crates/multiverse/src/git.rs` starts git. `crates/multiverse/src/store.rs` writes durable files, and reads, opens and lists files through `store::read`, `store::read_to_string`, `store::read_dir` and `store::open`. `crates/multiverse/src/ports.rs` opens sockets, to allocate ports and to connect to one through `ports::connect`. `crates/multiverse/src/clock.rs` reads the time through `clock::now` and `clock::wall_now`, and pauses between polls.
 
+clippy.toml denies a direct read of the clock, a read or open of a file, a listing of a directory and a TCP connection anywhere outside these modules and their counterparts in phase and mxv, which are `crates/phase/src/clock.rs`, `crates/phase/src/record/store.rs`, `crates/phase/src/net.rs`, `crates/mxv/src/clock.rs` and `crates/mxv/src/config.rs`. Each owner and each test module that uses one of these effects directly carries `#[expect]` with a reason, and so does each test that prints with `println!` or `eprintln!` (BASE-5).
+
 ## `mxv new`
 
 1. `main` in `crates/mxv/src/main.rs` reads the environment once into an `Environment`, and `mxv::run` selects the verb.

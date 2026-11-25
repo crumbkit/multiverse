@@ -1,6 +1,10 @@
 //! The state store, which is the one module that writes durable files
-//! (DUR-1) and the one module that reads and opens files (BASE-5). It keeps one JSON record for each workspace, named after the
-//! workspace, in one directory, and writes each workspace's `AGENTS.md`.
+//! (DUR-1), and the one module that calls the standard library's
+//! `fs::read`, `fs::read_to_string`, `fs::read_dir` and `File::open`
+//! (BASE-5). Other modules still read metadata, such as with
+//! `fs::metadata`, directly. The store keeps one JSON record for each
+//! workspace, named after the workspace, in one directory, and writes each
+//! workspace's `AGENTS.md`.
 //!
 //! It also owns the advisory locks that keep two mxv commands from starting
 //! or stopping one workspace's app, or allocating ports, at the same time.
@@ -539,6 +543,10 @@ fn write_temp(target: &Path, bytes: &[u8]) -> Result<PathBuf, Error> {
 ///
 /// Returns the error of [`fs::read`], such as `NotFound` when no file is at
 /// `path`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/multiverse/src/store.rs is the file-system owner, and it reads and opens files (BASE-5)"
+)]
 pub(crate) fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
     fs::read(path)
 }
@@ -550,6 +558,10 @@ pub(crate) fn read(path: impl AsRef<Path>) -> io::Result<Vec<u8>> {
 ///
 /// Returns the error of [`fs::read_to_string`], such as `NotFound` when no
 /// file is at `path` and `InvalidData` when the file is not UTF-8.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/multiverse/src/store.rs is the file-system owner, and it reads and opens files (BASE-5)"
+)]
 pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
     fs::read_to_string(path)
 }
@@ -561,6 +573,10 @@ pub(crate) fn read_to_string(path: impl AsRef<Path>) -> io::Result<String> {
 ///
 /// Returns the error of [`fs::read_dir`], such as `NotFound` when no
 /// directory is at `path`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/multiverse/src/store.rs is the file-system owner, and it reads and opens files (BASE-5)"
+)]
 pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<fs::ReadDir> {
     fs::read_dir(path)
 }
@@ -572,6 +588,10 @@ pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<fs::ReadDir> {
 ///
 /// Returns the error of [`File::open`], such as `NotFound` when nothing is
 /// at `path`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/multiverse/src/store.rs is the file-system owner, and it reads and opens files (BASE-5)"
+)]
 pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<File> {
     File::open(path)
 }

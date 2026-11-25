@@ -1,6 +1,11 @@
 //! The tests that hold the state diagrams in `crates/mxv/README.md` and
 //! `LIFECYCLE.md` to the states that the records store.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::fs;
 use std::path::Path;
 

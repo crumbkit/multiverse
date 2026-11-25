@@ -1,6 +1,11 @@
 //! The tests of workspaces, archives and restores under a host profile
 //! other than mxv's.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

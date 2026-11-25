@@ -78,13 +78,6 @@ realizations = [
 ]
 
 [[exception]]
-rule = "BASE-5"
-paths = ["clippy.toml"]
-owner = "the owner"
-reason = "clippy.toml leaves out the base entries that 5ba71ff added for the clock (`Instant::now`, `SystemTime::now`), the file system apart from `std::fs::write`, `File::create` and `OpenOptions::new` (`std::fs::read`, `read_to_string`, `read_dir`, `File::open`, `File::options` and the `tokio::fs` calls), the network (`TcpStream::connect`) and the print macros. With those entries at warn on main 11edce18, clippy reported 699 firings: 598 in tests and 101 in production code across 44 files, the most in crates/phase/src/engine/probe/http.rs and crates/multiverse/src/store.rs. phase has a clock owner, crates/phase/src/clock.rs, but the multiverse and mxv crates have none, and no crate has an owning module for file reads or the network yet."
-correction = "Give each effect one owning module per crate, route the production sites through it, put `#[expect]` on each test or test module that uses an effect, add the left-out entries to clippy.toml and delete this exception. The task /repos/notes-personal/tasks/multiverse-gives-the-clock-file-system-network-and-print-mac.md in the owner's board tracks it."
-
-[[exception]]
 rule = "CLI-12"
 paths = ["crates/mxv/src/processes.rs", "crates/mxv/src/proxy.rs"]
 owner = "the owner"

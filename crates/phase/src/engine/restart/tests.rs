@@ -1,3 +1,5 @@
+#![expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
+
 use std::num::NonZeroU32;
 use std::time::{Duration, SystemTime};
 

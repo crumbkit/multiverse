@@ -1,3 +1,5 @@
+#![expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
+
 use super::{
     ContainerId, DockerName, Handle, ObjectKind, Role, SweepOutcome, Swept, SweptItem, SweptObject,
 };

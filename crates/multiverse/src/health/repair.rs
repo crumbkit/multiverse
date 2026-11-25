@@ -9,8 +9,7 @@ use crate::archive::{Archive, ArchiveId, ArchiveRecords, ArchivedRemoval, Archiv
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::name::{MOST_NAME_BYTES, WorkspaceName};
-use crate::store;
-use crate::store::Records;
+use crate::store::{self, Records};
 use crate::workspaces::{Mode, Workspaces};
 
 use super::{

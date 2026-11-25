@@ -436,6 +436,7 @@ impl Runs {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
 mod tests {
     use std::os::unix::process::ExitStatusExt as _;
     use std::process::ExitStatus;

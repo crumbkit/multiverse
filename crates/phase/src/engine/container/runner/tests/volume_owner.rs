@@ -3,6 +3,15 @@
 //! other tests do, and also when the helper image, busybox pinned by
 //! digest, is not pulled, which CI's lane pulls.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+#![expect(
+    clippy::disallowed_macros,
+    reason = "the tests print on standard output why they skip, which the test runner shows"
+)]
+
 use std::path::PathBuf;
 use std::time::Duration;
 

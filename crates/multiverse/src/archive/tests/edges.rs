@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;

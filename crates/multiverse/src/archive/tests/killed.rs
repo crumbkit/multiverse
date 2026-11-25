@@ -2,6 +2,11 @@
 //! what it made. A panic in a checkpoint stands for the kill, because it
 //! unwinds without the undo that a failed step runs.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use super::*;

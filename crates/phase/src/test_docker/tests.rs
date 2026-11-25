@@ -1,6 +1,8 @@
 //! Tests of the rules by which the tests' docker sweep finds a temp root
 //! and decides that its test run has ended. They need no docker daemon.
 
+#![expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};

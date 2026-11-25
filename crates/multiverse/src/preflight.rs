@@ -21,8 +21,7 @@ use std::time::Duration;
 use crate::error::Error;
 use crate::manifest::Secret;
 use crate::process::{Ran, run_command};
-use crate::store;
-use crate::store::write_file_with;
+use crate::store::{self, write_file_with};
 
 #[cfg(test)]
 mod tests;

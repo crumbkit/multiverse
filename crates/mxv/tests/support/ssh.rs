@@ -1,6 +1,11 @@
 //! A stand-in for ssh that the end-to-end tests give git, so a fetch from
 //! an SSH origin needs no server and no key.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::path::{Path, PathBuf};
 
 /// The SSH URL that the tests give an origin. `.invalid` is a name that no

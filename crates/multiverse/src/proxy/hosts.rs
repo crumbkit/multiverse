@@ -149,6 +149,7 @@ pub fn line_for(name: &str) -> String {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
 mod tests {
     use std::collections::BTreeMap;
     use std::net::{IpAddr, Ipv4Addr};

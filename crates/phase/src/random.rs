@@ -5,7 +5,7 @@ use std::fmt::Write as _;
 use std::io::{self, Read as _};
 use std::path::Path;
 
-use crate::record::store::open;
+use crate::record::store;
 
 /// The device that serves the operating system's random bytes.
 pub const RANDOM_DEVICE: &str = "/dev/urandom";
@@ -20,7 +20,7 @@ const ID_BYTES: usize = 16;
 /// Returns the error of opening or reading the device.
 pub(crate) fn hex_id() -> io::Result<String> {
     let mut bytes = [0_u8; ID_BYTES];
-    open(Path::new(RANDOM_DEVICE))?.read_exact(&mut bytes)?;
+    store::open(Path::new(RANDOM_DEVICE))?.read_exact(&mut bytes)?;
     let mut text = String::with_capacity(ID_BYTES * 2);
     for byte in bytes {
         let _ = write!(text, "{byte:02x}");
@@ -35,7 +35,7 @@ pub(crate) fn hex_id() -> io::Result<String> {
 /// Returns the error of opening or reading the device.
 pub(crate) fn bytes<const N: usize>() -> io::Result<[u8; N]> {
     let mut bytes = [0_u8; N];
-    open(Path::new(RANDOM_DEVICE))?.read_exact(&mut bytes)?;
+    store::open(Path::new(RANDOM_DEVICE))?.read_exact(&mut bytes)?;
     Ok(bytes)
 }
 

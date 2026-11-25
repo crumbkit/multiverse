@@ -472,6 +472,7 @@ fn exchange(error: io::Error) -> Failure {
 }
 
 #[cfg(test)]
+#[expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
 mod tests {
     use std::io::{self, Read};
     use std::time::{Duration, Instant};

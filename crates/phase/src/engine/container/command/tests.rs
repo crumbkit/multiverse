@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_macros,
+    reason = "a child test prints what it saw on standard output, where its parent test reads it"
+)]
+
 use std::ops::ControlFlow;
 use std::time::Duration;
 

@@ -1,5 +1,10 @@
 //! Oneshot processes under real keepers that this test binary runs.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
+
 use std::time::{Duration, Instant};
 
 use super::{Greeting, id, real_keeper_running};

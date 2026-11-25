@@ -1,3 +1,5 @@
+#![expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
+
 use std::fs;
 
 use crate::backend::{Backend as _, Changes};

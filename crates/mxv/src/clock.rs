@@ -6,6 +6,10 @@ use std::time::{Instant, SystemTime};
 
 /// Returns the current monotonic time, against which mxv starts a deadline
 /// or measures how long a step took.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/mxv/src/clock.rs is the clock owner, and it reads the time (BASE-5)"
+)]
 pub(crate) fn now() -> Instant {
     Instant::now()
 }
@@ -13,6 +17,10 @@ pub(crate) fn now() -> Instant {
 /// Returns the wall-clock time, against which mxv measures how long ago a
 /// checkout was modified, a workspace was used, a mirror was fetched or an
 /// archive was made.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/mxv/src/clock.rs is the clock owner, and it reads the time (BASE-5)"
+)]
 pub(crate) fn wall_now() -> SystemTime {
     SystemTime::now()
 }

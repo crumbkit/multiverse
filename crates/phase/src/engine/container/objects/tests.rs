@@ -1,3 +1,5 @@
+#![expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
+
 use std::ops::ControlFlow;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
