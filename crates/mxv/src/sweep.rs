@@ -9,7 +9,7 @@
 
 use std::fmt;
 use std::process::ExitCode;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crumbkit::{Document, Listing, Row, Run};
 use multiverse::{GitHub, Verdict, Workspace, WorkspaceState, update_board_mount};
@@ -18,6 +18,7 @@ use serde::Serialize;
 
 use crate::archive::{self, ArchiveArgs};
 use crate::cli::{NewArgs, SweepArgs};
+use crate::clock;
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::proxy::{self, Served};
@@ -249,7 +250,7 @@ fn verdicts(
     budget: Option<Duration>,
     named: Option<&str>,
 ) -> Result<Vec<(Workspace, Verdict)>, crumbkit::Error> {
-    let started = Instant::now();
+    let started = clock::now();
     let workspaces = configured(environment)?;
     let records = workspaces.list().map_err(MxvFailure::from)?;
     let mut found = Vec::new();

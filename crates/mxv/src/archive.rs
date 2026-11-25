@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 use std::fmt;
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 use clap::Args;
 use crumbkit::{Document, DryRun, Listing, Prose, Run, Yes};
@@ -27,6 +27,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::cli::{ListArgs, RemoveArgs};
+use crate::clock;
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -1802,7 +1803,7 @@ fn port_rows(changes: Vec<multiverse::PortChange>) -> Vec<PortRow> {
 
 /// Returns the age of `archive`.
 fn age(archive: &Archive) -> crumbkit::Age {
-    let now = SystemTime::now();
+    let now = clock::wall_now();
     crumbkit::Age::since(UNIX_EPOCH + Duration::from_secs(archive.time), now)
 }
 

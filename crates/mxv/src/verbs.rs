@@ -14,6 +14,7 @@ use multiverse::{
 };
 
 use crate::cli::{AddArgs, CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
+use crate::clock;
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -1031,8 +1032,7 @@ fn refusal(name: &WorkspaceName, allow: Allow, plan: RemovalPlan) -> MxvFailure 
             name,
             path: checkout,
             commits,
-            fetched_ago: fetched
-                .map(|time| crumbkit::Age::since(time, std::time::SystemTime::now())),
+            fetched_ago: fetched.map(|time| crumbkit::Age::since(time, clock::wall_now())),
             allow,
         },
         RemovalPlan::Stashed {

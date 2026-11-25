@@ -34,6 +34,9 @@
 //! relative path, a glob that is absolute or holds `..`, a `clone_on_new`
 //! glob that names `target`, or text that is not TOML fails with
 //! `mxv::config::invalid`, which names the file and the line.
+//!
+//! This module is also mxv's file-system owner (BASE-5): every production
+//! read of a file in mxv goes through [`read_to_string`].
 
 use std::io;
 use std::net::SocketAddr;
@@ -106,7 +109,7 @@ const HIGHEST_PORT: u16 = 32767;
 /// Returns [`MxvFailure::ConfigUnreadable`] when the file is there but
 /// cannot be read, and the errors of [`parse`].
 pub(crate) fn read(path: &Path, home: &Path) -> Result<Config, MxvFailure> {
-    match std::fs::read_to_string(path) {
+    match read_to_string(path) {
         Ok(text) => parse(path, &text, home),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Config::default()),
         Err(source) => Err(MxvFailure::ConfigUnreadable {
@@ -114,6 +117,19 @@ pub(crate) fn read(path: &Path, home: &Path) -> Result<Config, MxvFailure> {
             source,
         }),
     }
+}
+
+/// Reads the whole file at `path` as UTF-8 text, with the result and error
+/// of [`std::fs::read_to_string`]. This module is mxv's file-system owner
+/// (BASE-5), so every production read or open of a file in mxv calls a
+/// function here.
+///
+/// # Errors
+///
+/// Returns the error of [`std::fs::read_to_string`], such as one of kind
+/// [`io::ErrorKind::NotFound`] for a missing file.
+pub(crate) fn read_to_string(path: &Path) -> io::Result<String> {
+    std::fs::read_to_string(path)
 }
 
 /// Parses `text`, the config file at `path`, with `~` meaning `home`.

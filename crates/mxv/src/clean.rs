@@ -22,6 +22,7 @@ use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::cli::CleanArgs;
+use crate::clock;
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -507,7 +508,7 @@ fn clean_one(
             &running,
             &users,
             fresh.modified,
-            SystemTime::now(),
+            clock::wall_now(),
             idle,
         ))
     });
@@ -682,7 +683,7 @@ pub(crate) fn run(
     let config = environment.config()?;
     let idle = plan.idle.or(config.clean_idle).unwrap_or(DEFAULT_IDLE);
     let workspaces = configured(environment)?;
-    let now = SystemTime::now();
+    let now = clock::wall_now();
     let table = multiverse::process_table().map_err(MxvFailure::from)?;
     let mut keys = Vec::new();
     let mut entries = Vec::new();

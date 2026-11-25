@@ -11,6 +11,7 @@ mod admission;
 mod archive;
 mod clean;
 mod cli;
+mod clock;
 mod config;
 mod environment;
 mod exec;
@@ -366,11 +367,9 @@ pub fn provision(args: &[OsString]) -> ExitCode {
     let words = args.get(1 + PROVISION_WORDS.len()..).unwrap_or_default();
     let result = match words {
         [spec] => multiverse::ProvisionSpec::parse(&spec.to_string_lossy()).and_then(|spec| {
-            multiverse::provision(
-                &spec,
-                std::time::Instant::now() + PROVISION_DEADLINE,
-                &mut |line| drop(writeln!(stdout, "mxv-provision: {line}")),
-            )
+            multiverse::provision(&spec, clock::now() + PROVISION_DEADLINE, &mut |line| {
+                drop(writeln!(stdout, "mxv-provision: {line}"))
+            })
         }),
         _ => {
             drop(writeln!(

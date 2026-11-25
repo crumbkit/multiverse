@@ -33,6 +33,7 @@ use serde::Serialize;
 
 use crate::clean::{self, CleanState, Holder, Limit, Selection};
 use crate::cli::{PinArgs, ReclaimArgs};
+use crate::clock;
 use crate::environment::Environment;
 use crate::failures::MxvFailure;
 use crate::processes;
@@ -546,7 +547,7 @@ impl Machine {
         workspace: &Workspace,
         running: &[String],
     ) -> Result<Option<String>, MxvFailure> {
-        let now = SystemTime::now();
+        let now = clock::wall_now();
         if running.is_empty() {
             return Ok(recheck(None, measured.touched, now, self.stop_idle));
         }
@@ -652,7 +653,7 @@ fn memory(
         runs: environment.runs()?,
         table: multiverse::process_table().map_err(MxvFailure::from)?,
         stop_idle: args.idle.or(config.stop_idle).unwrap_or(DEFAULT_STOP_IDLE),
-        now: SystemTime::now(),
+        now: clock::wall_now(),
         workspaces,
     };
     let mut keys: Vec<String> = Vec::new();
@@ -727,7 +728,7 @@ fn stop(
     summary: &mut ReclaimSummary,
     why: &str,
 ) -> Result<ReclaimRow, crumbkit::Error> {
-    let now = SystemTime::now();
+    let now = clock::wall_now();
     let check = |workspace: &Workspace, running: &[String]| {
         machine
             .recheck(measured, workspace, running)
