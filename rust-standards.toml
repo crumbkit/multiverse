@@ -99,13 +99,6 @@ reason = "mxv has no test that runs each example at a pseudo-terminal and in a p
 correction = "Add that test and delete this exception."
 
 [[exception]]
-rule = "CLI-12"
-paths = ["crates/mxv/tests/"]
-owner = "the owner"
-reason = "mxv has no test that runs each prompting command without a terminal on standard input and expects a failure code that names the answering flag."
-correction = "Add that test, with `check_effects` in the convention tests, and delete this exception."
-
-[[exception]]
 rule = "CLI-14"
 paths = ["crates/mxv/tests/"]
 owner = "the owner"
