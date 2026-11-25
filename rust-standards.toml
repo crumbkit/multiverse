@@ -97,3 +97,10 @@ paths = ["crates/mxv/tests/"]
 owner = "the owner"
 reason = "mxv has no test that runs each example at a pseudo-terminal and in a pipe and compares the bytes."
 correction = "Add that test and delete this exception."
+
+[[exception]]
+rule = "CLI-12"
+paths = ["crates/mxv/src/processes.rs", "crates/mxv/src/proxy.rs"]
+owner = "the owner"
+reason = "Two questions have no flag that answers them: the grant of wider permissions that `mxv up` and `mxv restart` ask for, and the trust of the proxy's certificate authority that `mxv proxy trust` and `mxv proxy install` ask for. A flag would let an agent approve its own permissions or make the machine trust a certificate authority, so only a person at a terminal answers them. Without a terminal, or with `--no-input`, each refuses with its own code (`mxv::permissions::not_granted` or `mxv::proxy::trust_needs_terminal`) and a recovery that a person runs at a terminal, as crates/mxv/tests/prompts.rs pins. Every other prompt takes `--yes`, and that test runs each one without a terminal."
+correction = "Keep this exception while these questions stay person-only. Delete it if CLI-12 comes to name a prompt that only a person may answer, or if mxv gives up one of these questions."
