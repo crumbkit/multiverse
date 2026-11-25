@@ -3,9 +3,12 @@
 //!
 //! The test runs each example twice in the fixture that the convention tests
 //! build: once with standard output and standard error on pipes, and once
-//! with each on a pseudo-terminal of its own. Standard input is an empty pipe
+//! with each on a pseudo-terminal of its own. Standard input is `/dev/null`
 //! in both runs, so no command asks a question. Both runs use the same
-//! directories, so the paths that an example prints are the same.
+//! directories, so the paths that an example prints are the same. Both runs
+//! set `TERM=xterm-256color`, as a person's shell does for a pipe too, so the
+//! only difference between them is where the streams go, and clap styles its
+//! help at the terminal as it does in a person's terminal.
 //!
 //! crumbkit's OUTPUT-1 lets colour and the width of a text table differ at a
 //! terminal. The test therefore removes the colour escape codes from what the
@@ -19,75 +22,82 @@
 use std::fs::File;
 use std::io::Read as _;
 use std::os::fd::OwnedFd;
+use std::os::unix::process::CommandExt as _;
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::sync::mpsc::{self, Sender};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 use rustix::process::{Pid, Signal};
 use rustix::pty::OpenptFlags;
 use rustix::termios::{OptionalActions, OutputModes, Winsize};
-use tempfile::TempDir;
 
+#[path = "support/fixture.rs"]
+mod fixture;
 #[path = "support/git.rs"]
 mod support;
 
-use crate::support::{git, repository};
+use crate::fixture::{ENV, NO_LIVE_CHECKOUT, Repositories, repositories};
 
-/// The leaves whose examples the test does not run, each with the reason.
-/// They are the leaves whose examples the convention tests do not run.
-const SKIPPED: &[(&str, &str)] = &[
-    ("up", NO_LIVE_CHECKOUT),
-    ("restart", NO_LIVE_CHECKOUT),
-    ("logs", NO_LIVE_CHECKOUT),
-    ("exec", NO_LIVE_CHECKOUT),
-    ("ports reset", NO_LIVE_CHECKOUT),
+/// Why the test does not compare the examples of a leaf.
+#[derive(Debug, Clone, Copy)]
+enum Skip {
+    /// Each example fails in the fixture, for the reason given, so its two
+    /// runs would compare only one failure with another. The test checks
+    /// that each such example still fails, so a skip that is no longer
+    /// needed fails the test.
+    Fails(&'static str),
+    /// The test does not run the examples at all, for the reason given.
+    NotRun(&'static str),
+}
+
+impl Skip {
+    /// Returns the reason of the skip.
+    const fn reason(self) -> &'static str {
+        match self {
+            Self::Fails(reason) | Self::NotRun(reason) => reason,
+        }
+    }
+}
+
+/// The leaves whose examples the test does not compare, each with the
+/// reason.
+const SKIPPED: &[(&str, Skip)] = &[
+    ("up", Skip::Fails(NO_LIVE_CHECKOUT)),
+    ("restart", Skip::Fails(NO_LIVE_CHECKOUT)),
+    ("logs", Skip::Fails(NO_LIVE_CHECKOUT)),
+    (
+        "exec",
+        Skip::NotRun(
+            "The command takes a place from the deadband daemon of the machine that runs the test before it starts the command, and that daemon makes it wait while the machine is loaded, so the run can outlast any deadline of the test.",
+        ),
+    ),
+    ("ports reset", Skip::Fails(NO_LIVE_CHECKOUT)),
     (
         "add",
-        "The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create.",
+        Skip::Fails(
+            "The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create; tests/workspaces.rs runs the verb.",
+        ),
     ),
     (
         "archive",
-        "The example archives a live workspace, and the fixture's workspace names a checkout under /home/agent, which a test cannot create.",
-    ),
-    (
-        "self usage",
-        "The output names the day the report starts, so a run just after midnight would differ from the run before it.",
-    ),
-    (
-        "self figures list",
-        "The figures come from the usage log of the machine that runs the test, and the first run adds to it.",
-    ),
-    (
-        "self runs list",
-        "The runs come from the usage log of the machine that runs the test, and the first run adds to it.",
-    ),
-    (
-        "proxy trust",
-        "The command asks a person at a terminal and raises the system's password prompt.",
+        Skip::Fails(
+            "The example archives a live workspace, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/archive.rs runs the verb.",
+        ),
     ),
     (
         "proxy install",
-        "The command needs a Caddy program and asks a person at a terminal.",
-    ),
-    (
-        "proxy check",
-        "The command exits with 1 while anything is missing, and the fixture's machine has no Caddy.",
+        Skip::NotRun(
+            "Without a terminal the command still starts Caddy where Caddy is installed, and a test must not start a server on the machine that runs it.",
+        ),
     ),
 ];
 
-/// The reason that a process verb's examples do not run.
-const NO_LIVE_CHECKOUT: &str = "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create.";
-
-/// The variables of every run, which the convention tests also set.
-const ENV: &[(&str, &str)] = &[
-    ("PATH", support::PATH),
-    ("GIT_CONFIG_GLOBAL", "/dev/null"),
-    ("GIT_CONFIG_NOSYSTEM", "1"),
-];
+/// The variables of every run beside [`ENV`] and the XDG directories.
+const TERM: (&str, &str) = ("TERM", "xterm-256color");
 
 /// The XDG variables of every run, each with the directory of the run's
 /// temporary directory that it names.
@@ -98,8 +108,12 @@ const XDG: &[(&str, &str)] = &[
     ("XDG_CACHE_HOME", "cache"),
 ];
 
-/// How long one run may take before the test stops it.
+/// How long one run may take, until both of its streams end, before the
+/// test stops its process group.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How many times the test tries to open a pseudo-terminal before it fails.
+const OPEN_ATTEMPTS: usize = 5;
 
 /// What one run of an example printed, and how it ended.
 #[derive(Debug, PartialEq, Eq)]
@@ -159,14 +173,45 @@ fn each_example_prints_the_same_bytes_at_a_terminal_as_in_a_pipe() {
 #[test]
 fn each_skipped_leaf_names_a_leaf_with_examples() {
     let leaves = mxv::TOOL.get_help().get_leaves();
-    for (skipped, _) in SKIPPED {
+    for (skipped, skip) in SKIPPED {
         assert!(
             leaves
                 .iter()
                 .any(|leaf| leaf.path().join(" ") == *skipped && !leaf.get_examples().is_empty()),
-            "the skipped leaf `{skipped}` names no leaf with examples"
+            "the skipped leaf `{skipped}` names no leaf with examples, so its skip, whose reason is \"{}\", should go",
+            skip.reason()
         );
     }
+}
+
+#[test]
+fn each_example_skipped_for_failing_still_fails_in_the_fixture() {
+    let repositories = repositories();
+    let mut succeeded = Vec::new();
+    for leaf in mxv::TOOL.get_help().get_leaves() {
+        let path = leaf.path().join(" ");
+        let Some((_, Skip::Fails(reason))) = SKIPPED.iter().find(|(skipped, _)| *skipped == path)
+        else {
+            continue;
+        };
+        for example in leaf.get_examples() {
+            let words: Vec<&str> = leaf.path().iter().chain(example.words()).copied().collect();
+            let run = tempfile::tempdir().unwrap();
+            let run_path = run.path().canonicalize().unwrap();
+            let piped = run_once(&repositories, &run_path, &words, Streams::Pipes);
+            if piped.status.success() {
+                succeeded.push(format!(
+                    "mxv {}, skipped because: {reason}",
+                    words.join(" ")
+                ));
+            }
+        }
+    }
+    assert!(
+        succeeded.is_empty(),
+        "these examples succeed in the fixture, so the test can compare them and their skips should go:\n{}",
+        succeeded.join("\n")
+    );
 }
 
 /// Where a run's standard output and standard error go.
@@ -178,6 +223,15 @@ enum Streams {
     Terminals,
 }
 
+/// Which stream a reader thread read.
+#[derive(Debug, Clone, Copy)]
+enum Stream {
+    /// Standard output.
+    Out,
+    /// Standard error.
+    Err,
+}
+
 /// Runs mxv with `words` in a fresh copy of `repositories` and of the XDG
 /// fixture, both under `run`, which the run empties first, so two runs of
 /// one example see the same paths.
@@ -186,7 +240,7 @@ fn run_once(repositories: &Repositories, run: &Path, words: &[&str], streams: St
         std::fs::remove_dir_all(entry.unwrap().path()).unwrap();
     }
     let root = run.join("root");
-    copy_dir(repositories.dir.path(), &root);
+    copy_dir(Path::new(&repositories.path), &root);
     let xdg = run.join("xdg");
     for (_, name) in XDG {
         let fixture = Path::new("tests/fixtures/xdg").join(name);
@@ -205,62 +259,71 @@ fn run_once(repositories: &Repositories, run: &Path, words: &[&str], streams: St
         .args(words)
         .env_clear()
         .envs(ENV.iter().copied())
+        .envs([TERM])
         .envs(
             XDG.iter()
                 .map(|(variable, name)| (*variable, xdg.join(name))),
         )
         .current_dir(&root)
-        .stdin(Stdio::piped());
-    match streams {
+        .stdin(Stdio::null())
+        // The run leads a process group of its own, so the test can stop
+        // every process that it starts, which may hold its streams open.
+        .process_group(0);
+    let (out_read, out_write, err_read, err_write) = match streams {
         Streams::Pipes => {
-            command.stdout(Stdio::piped()).stderr(Stdio::piped());
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "the test runs the built binary with its streams on pipes"
-            )]
-            let mut child = command.spawn().unwrap();
-            drop(child.stdin.take());
-            let stdout = reader(child.stdout.take().unwrap().into());
-            let stderr = reader(child.stderr.take().unwrap().into());
-            let status = wait(child, words);
-            Ran {
-                status,
-                stdout: stdout.join().unwrap(),
-                stderr: stderr.join().unwrap(),
-            }
+            let (out_read, out_write) = std::io::pipe().unwrap();
+            let (err_read, err_write) = std::io::pipe().unwrap();
+            (
+                OwnedFd::from(out_read),
+                OwnedFd::from(out_write),
+                OwnedFd::from(err_read),
+                OwnedFd::from(err_write),
+            )
         }
         Streams::Terminals => {
             let (out_controller, out_terminal) = pseudo_terminal();
             let (err_controller, err_terminal) = pseudo_terminal();
-            command
-                .stdout(Stdio::from(out_terminal))
-                .stderr(Stdio::from(err_terminal));
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "the test runs the built binary with its streams on pseudo-terminals"
-            )]
-            let mut child = command.spawn().unwrap();
-            // The command holds the only copies of the terminal ends now, so
-            // the reads end when it exits. Dropping the command closes the
-            // copies that it kept for the spawn.
-            drop(command);
-            drop(child.stdin.take());
-            let stdout = reader(out_controller);
-            let stderr = reader(err_controller);
-            let status = wait(child, words);
-            Ran {
-                status,
-                stdout: stdout.join().unwrap(),
-                stderr: stderr.join().unwrap(),
-            }
+            (out_controller, out_terminal, err_controller, err_terminal)
         }
+    };
+    command
+        .stdout(Stdio::from(out_write))
+        .stderr(Stdio::from(err_write));
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test runs the built binary with its streams on pipes or pseudo-terminals"
+    )]
+    let child = command.spawn().unwrap();
+    // The run's processes hold the only copies of the writing ends now, so
+    // the reads end when they close them. Dropping the command closes the
+    // copies that it kept for the spawn.
+    drop(command);
+    let (sender, receiver) = mpsc::channel();
+    reader(out_read, Stream::Out, sender.clone());
+    reader(err_read, Stream::Err, sender);
+    let deadline = Instant::now() + TIMEOUT;
+    let mut stdout = None;
+    let mut stderr = None;
+    while stdout.is_none() || stderr.is_none() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match receiver.recv_timeout(left) {
+            Ok((Stream::Out, bytes)) => stdout = Some(bytes),
+            Ok((Stream::Err, bytes)) => stderr = Some(bytes),
+            Err(_) => stop(child, words),
+        }
+    }
+    let status = wait(child, deadline, words);
+    Ran {
+        status,
+        stdout: stdout.unwrap_or_default(),
+        stderr: stderr.unwrap_or_default(),
     }
 }
 
 /// Opens a pseudo-terminal of 1,000 columns without output processing, and
 /// returns its controlling end and its terminal end.
 fn pseudo_terminal() -> (OwnedFd, OwnedFd) {
-    let controller = rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY).unwrap();
+    let controller = open_controller();
     rustix::pty::grantpt(&controller).unwrap();
     rustix::pty::unlockpt(&controller).unwrap();
     let name = rustix::pty::ptsname(&controller, Vec::new()).unwrap();
@@ -286,10 +349,27 @@ fn pseudo_terminal() -> (OwnedFd, OwnedFd) {
     (controller, terminal)
 }
 
-/// Starts a thread that reads `stream` to its end and returns the bytes. A
-/// pseudo-terminal's controlling end on Linux reads as `EIO` once the
-/// terminal end has closed, which the thread takes as the end.
-fn reader(stream: OwnedFd) -> JoinHandle<Vec<u8>> {
+/// Opens the controlling end of a new pseudo-terminal. On a Mac under load,
+/// `posix_openpt` fails now and then, in about one call of 800 when 24
+/// processes open pseudo-terminals at once, though a pseudo-terminal is
+/// free. The test opens about 60 per run and nextest retries no test, so it
+/// tries [`OPEN_ATTEMPTS`] times and fails only when every attempt fails.
+fn open_controller() -> OwnedFd {
+    let mut errors = Vec::new();
+    for _ in 0..OPEN_ATTEMPTS {
+        match rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY) {
+            Ok(controller) => return controller,
+            Err(error) => errors.push(error),
+        }
+    }
+    panic!("the test could not open a pseudo-terminal in {OPEN_ATTEMPTS} attempts: {errors:?}");
+}
+
+/// Starts a thread that reads `stream` to its end and sends the bytes on
+/// `sender`, tagged with `which`. A pseudo-terminal's controlling end on
+/// Linux reads as `EIO` once the terminal end has closed, which the thread
+/// takes as the end.
+fn reader(stream: OwnedFd, which: Stream, sender: Sender<(Stream, Vec<u8>)>) {
     thread::spawn(move || {
         let mut file = File::from(stream);
         let mut bytes = Vec::new();
@@ -303,37 +383,54 @@ fn reader(stream: OwnedFd) -> JoinHandle<Vec<u8>> {
                 Err(error) => panic!("the test could not read a stream: {error}"),
             }
         }
-        bytes
-    })
+        // The receiver is gone only when the run already failed the test.
+        sender.send((which, bytes)).ok();
+    });
 }
 
-/// Waits for `child` to exit, and stops it and fails the test when it runs
-/// longer than [`TIMEOUT`].
+/// Waits for `child`, whose streams have ended, to exit, and stops its
+/// process group and fails the test when it is still running at
+/// `deadline`. A process exits a moment after it closes its streams, so the
+/// test asks again after each short pause.
 #[expect(
     clippy::disallowed_types,
     reason = "the test holds the child that it ran on pseudo-terminals, which the library's process module cannot make"
 )]
-fn wait(mut child: Child, words: &[&str]) -> ExitStatus {
-    let pid = Pid::from_child(&child);
-    let (sender, receiver) = mpsc::channel::<()>();
-    let waiter = thread::spawn(move || {
-        let status = child.wait().unwrap();
-        // Dropping the sender tells the receiver that the run has ended.
-        drop(sender);
-        status
-    });
-    if receiver.recv_timeout(TIMEOUT) == Err(RecvTimeoutError::Timeout) {
-        let killed = rustix::process::kill_process(pid, Signal::KILL);
-        panic!(
-            "mxv {} ran longer than {TIMEOUT:?}, and the test stopped it: {killed:?}",
-            words.join(" ")
-        );
+fn wait(mut child: Child, deadline: Instant, words: &[&str]) -> ExitStatus {
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            return status;
+        }
+        if Instant::now() >= deadline {
+            stop(child, words);
+        }
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "a child's exit gives no signal that the test can wait on without a second thread, so the test polls try_wait"
+        )]
+        thread::sleep(Duration::from_millis(10));
     }
-    waiter.join().unwrap()
+}
+
+/// Stops the process group that `child` leads, which ran longer than
+/// [`TIMEOUT`], and fails the test naming the example. The test has not yet
+/// reaped `child`, so its process id still names its group.
+#[expect(
+    clippy::disallowed_types,
+    reason = "the test holds the child that it ran on pseudo-terminals, which the library's process module cannot make"
+)]
+fn stop(mut child: Child, words: &[&str]) -> ! {
+    let killed = rustix::process::kill_process_group(Pid::from_child(&child), Signal::KILL);
+    let reaped = child.wait();
+    panic!(
+        "mxv {} ran longer than {TIMEOUT:?}, and the test stopped its process group: {killed:?}, {reaped:?}",
+        words.join(" ")
+    );
 }
 
 /// Returns `bytes` without the escape codes that set colours and styles,
-/// which start with `ESC [`, hold digits and semicolons, and end with `m`.
+/// which start with `ESC [`, hold digits, semicolons and colons, and end
+/// with `m`, such as `ESC [1m` and `ESC [4:3m`.
 fn without_colour(bytes: &[u8]) -> Vec<u8> {
     let mut kept = Vec::with_capacity(bytes.len());
     let mut rest = bytes;
@@ -343,7 +440,7 @@ fn without_colour(bytes: &[u8]) -> Vec<u8> {
         {
             let length = after
                 .iter()
-                .take_while(|byte| byte.is_ascii_digit() || **byte == b';')
+                .take_while(|byte| byte.is_ascii_digit() || **byte == b';' || **byte == b':')
                 .count();
             if after.get(length) == Some(&b'm') {
                 rest = &after[length + 1..];
@@ -372,47 +469,4 @@ fn copy_dir(from: &Path, to: &Path) {
             std::fs::copy(entry.path(), &target).unwrap();
         }
     }
-}
-
-/// The directory of repositories that each run starts in a fresh copy of,
-/// which the test deletes when it drops.
-#[derive(Debug)]
-struct Repositories {
-    /// The temporary directory.
-    dir: TempDir,
-}
-
-/// Returns a new directory of the repositories that the convention tests
-/// build: a bare `origin.git`, its clones `app` and `web`, a repository
-/// `plain` without an origin, and a clone `fresh` of an origin without
-/// commits. The clone `app` also holds a branch named `taken`.
-fn repositories() -> Repositories {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    let app = repository(&root);
-    git(&app, &["branch", "taken"]);
-    git(&root, &["clone", "--quiet", "origin.git", "web"]);
-    git(
-        &root.join("web"),
-        &["remote", "set-url", "origin", "../origin.git"],
-    );
-    let plain = root.join("plain");
-    std::fs::create_dir(&plain).unwrap();
-    git(&plain, &["init", "--quiet"]);
-    git(
-        &root,
-        &[
-            "init",
-            "--quiet",
-            "--bare",
-            "--initial-branch=main",
-            "empty.git",
-        ],
-    );
-    git(&root, &["clone", "--quiet", "empty.git", "fresh"]);
-    git(
-        &root.join("fresh"),
-        &["remote", "set-url", "origin", "../empty.git"],
-    );
-    Repositories { dir }
 }
