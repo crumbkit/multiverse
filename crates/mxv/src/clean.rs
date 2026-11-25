@@ -406,6 +406,50 @@ fn record_name(problem: &Error) -> String {
             .file_stem()
             .map(|name| name.to_string_lossy().into_owned())
             .unwrap_or_default(),
+        Error::RepositoryNotFound { .. }
+        | Error::NoOrigin { .. }
+        | Error::EmptyOrigin { .. }
+        | Error::NoDefaultBranch { .. }
+        | Error::ProgramMissing { .. }
+        | Error::CommandFailed { .. }
+        | Error::TimedOut { .. }
+        | Error::Unwritable { .. }
+        | Error::Inaccessible { .. }
+        | Error::RecordMissing { .. }
+        | Error::StateChanged { .. }
+        | Error::TransitionRefused { .. }
+        | Error::MismatchedCheckout { .. }
+        | Error::WrongLock { .. }
+        | Error::HostMismatch { .. }
+        | Error::OtherHost { .. }
+        | Error::HostDataTooLarge { .. }
+        | Error::HostHookFailed { .. }
+        | Error::HostFileUnkeepable { .. }
+        | Error::HostFilesTooMany { .. }
+        | Error::HostFileTooLarge { .. }
+        | Error::HostFilesTooLarge { .. }
+        | Error::ArchiveUnfinished { .. }
+        | Error::ProcessUnstartable { .. }
+        | Error::ProcessTable { .. }
+        | Error::UnsupportedOs { .. }
+        | Error::Busy { .. }
+        | Error::GrantsBusy { .. }
+        | Error::DatedNamesTaken { .. }
+        | Error::StoppedRestoreHoldsOtherFiles { .. }
+        | Error::MirrorBusy { .. }
+        | Error::MirrorFetchFailed { .. }
+        | Error::SshRefused { .. }
+        | Error::TemplateInvalid { .. }
+        | Error::TemplateAmbiguous { .. }
+        | Error::ManifestUntrusted { .. }
+        | Error::NoFreePort { .. }
+        | Error::DockerMissing { .. }
+        | Error::DockerComposeMissing { .. }
+        | Error::DockerNoAddressPool { .. }
+        | Error::DockerUnavailable { .. }
+        | Error::DockerFailed { .. }
+        | Error::DockerForeign { .. }
+        | Error::Phase { .. } => String::new(),
         _ => String::new(),
     }
 }

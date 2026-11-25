@@ -108,14 +108,14 @@ fn name() -> WorkspaceName {
 
 impl Setup {
     fn create(&self) -> Workspace {
-        match self
+        let outcome = self
             .workspaces
             .create(&self.root, &name(), &self.fixture.clone, Mode::Change)
-            .unwrap()
-        {
-            NewOutcome::Created(workspace) => workspace,
-            other => panic!("{other:?}"),
-        }
+            .unwrap();
+        let NewOutcome::Created(workspace) = outcome else {
+            panic!("{outcome:?}");
+        };
+        workspace
     }
 
     fn checkout(&self) -> PathBuf {
@@ -135,17 +135,19 @@ impl Setup {
     }
 
     fn plan(&self, options: ArchiveOptions) -> ArchivePlan {
-        match self.planned(options) {
-            ArchivePlanned::Ready(plan) => *plan,
-            other => panic!("{other:?}"),
-        }
+        let planned = self.planned(options);
+        let ArchivePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
+        };
+        *plan
     }
 
     fn refusal(&self, options: ArchiveOptions) -> ArchiveRefusal {
-        match self.planned(options) {
-            ArchivePlanned::Refused(refusal) => refusal,
-            other => panic!("{other:?}"),
-        }
+        let planned = self.planned(options);
+        let ArchivePlanned::Refused(refusal) = planned else {
+            panic!("{planned:?}");
+        };
+        refusal
     }
 
     fn archive_with(&self, options: ArchiveOptions) -> Archive {
@@ -173,14 +175,14 @@ impl Setup {
     }
 
     fn restore_plan_with(&self, force: bool) -> RestorePlan {
-        match self
+        let planned = self
             .workspaces
             .plan_restore(&self.archives, &name(), RestoreOptions::new(force, false))
-            .unwrap()
-        {
-            RestorePlanned::Ready(plan) => *plan,
-            planned => panic!("{planned:?}"),
-        }
+            .unwrap();
+        let RestorePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
+        };
+        *plan
     }
 
     fn restore(&self) -> Restored {
@@ -201,14 +203,14 @@ impl Setup {
     }
 
     fn restore_from_origin_outcome(&self) -> RestoreOutcome {
-        let plan = match self
+        let planned = self
             .workspaces
             .plan_restore(&self.archives, &name(), RestoreOptions::new(false, true))
-            .unwrap()
-        {
-            RestorePlanned::Ready(plan) => *plan,
-            planned => panic!("{planned:?}"),
+            .unwrap();
+        let RestorePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
         };
+        let plan = *plan;
         self.workspaces
             .restore(&self.archives, plan, &self.runs)
             .unwrap()
@@ -230,14 +232,14 @@ impl Setup {
     }
 
     fn restore_refusal(&self) -> RestoreRefusal {
-        match self
+        let planned = self
             .workspaces
             .plan_restore(&self.archives, &name(), RestoreOptions::default())
-            .unwrap()
-        {
-            RestorePlanned::Refused(refusal) => refusal,
-            planned => panic!("{planned:?}"),
-        }
+            .unwrap();
+        let RestorePlanned::Refused(refusal) = planned else {
+            panic!("{planned:?}");
+        };
+        refusal
     }
 
     fn restore_planned(&self) -> RestorePlanned {
@@ -366,13 +368,12 @@ fn a_workspace_of_two_repositories_comes_back_with_both_checkouts_and_its_record
         let setup = setup(kind);
         let other = fixture_named("web");
         let repos = [Repo::new(&setup.fixture.clone), Repo::new(&other.clone)];
-        let created = match setup
+        let outcome = setup
             .workspaces
             .create_repos(&setup.root, &name(), &repos, Mode::Change, None)
-            .unwrap()
-        {
-            NewOutcome::Created(workspace) => workspace,
-            other => panic!("{other:?}"),
+            .unwrap();
+        let NewOutcome::Created(created) = outcome else {
+            panic!("{outcome:?}");
         };
         let web = setup.root.join("triage/web");
         git(&web, &["commit", "--quiet", "--allow-empty", "-m", "Local"]);
@@ -700,14 +701,13 @@ fn a_rerun_after_a_partial_tar_writes_it_again_and_finishes() {
     let whole = fs::read(&tar).unwrap();
     write(&tar, &whole[..whole.len() / 2]);
 
-    let mut archive = match setup.planned(ArchiveOptions::default()) {
-        ArchivePlanned::Ready(plan) => {
-            match setup.workspaces.archive(&setup.archives, *plan).unwrap() {
-                ArchiveOutcome::Retired { archive, .. } => *archive,
-                ArchiveOutcome::Refused(refusal) => panic!("{refusal:?}"),
-            }
-        }
-        other => panic!("{other:?}"),
+    let planned = setup.planned(ArchiveOptions::default());
+    let ArchivePlanned::Ready(plan) = planned else {
+        panic!("{planned:?}");
+    };
+    let mut archive = match setup.workspaces.archive(&setup.archives, *plan).unwrap() {
+        ArchiveOutcome::Retired { archive, .. } => *archive,
+        ArchiveOutcome::Refused(refusal) => panic!("{refusal:?}"),
     };
     setup
         .workspaces
@@ -2120,14 +2120,14 @@ fn a_failed_from_origin_fetch_leaves_no_mirror_and_the_archive_whole() {
     let mirror = archive.checkouts[0].mirror.clone().unwrap();
     fs::remove_dir_all(&mirror).unwrap();
     let (origin, hidden) = setup.hide_origin();
-    let plan = match setup
+    let planned = setup
         .workspaces
         .plan_restore(&setup.archives, &name(), RestoreOptions::new(false, true))
-        .unwrap()
-    {
-        RestorePlanned::Ready(plan) => *plan,
-        planned => panic!("{planned:?}"),
+        .unwrap();
+    let RestorePlanned::Ready(plan) = planned else {
+        panic!("{planned:?}");
     };
+    let plan = *plan;
     assert!(
         setup
             .workspaces
@@ -2195,15 +2195,18 @@ fn a_pin_name_stays_one_reference_component_for_an_odd_folder() {
 /// Returns the text of the refusal of `planned`, and fails when the archive
 /// was not refused.
 fn refusal_text(planned: ArchivePlanned) -> String {
-    match planned {
-        ArchivePlanned::Refused(ArchiveRefusal::Unkeepable(found)) => found
+    let ArchivePlanned::Refused(refusal) = planned else {
+        panic!("the archive was not refused: {planned:?}");
+    };
+    if let ArchiveRefusal::Unkeepable(found) = refusal {
+        found
             .items
             .iter()
             .map(|item| format!("{item} {item:?}"))
             .collect::<Vec<_>>()
-            .join("\n"),
-        ArchivePlanned::Refused(refusal) => format!("{refusal:?}"),
-        other => panic!("the archive was not refused: {other:?}"),
+            .join("\n")
+    } else {
+        format!("{refusal:?}")
     }
 }
 

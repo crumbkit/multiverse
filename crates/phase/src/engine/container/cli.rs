@@ -226,7 +226,16 @@ fn helper_removal_failure(error: &ContainerError) -> DockerError {
         DockerCause::DockerMissing | DockerCause::DaemonUnavailable | DockerCause::TimedOut => {
             unavailable(error)
         }
-        _ => error.describe(DockerError::refused(error.to_string()).with_cause(error.cause())),
+        DockerCause::ComposeMissing
+        | DockerCause::NoAddressPool
+        | DockerCause::PullFailed
+        | DockerCause::Refused
+        | DockerCause::Cancelled
+        | DockerCause::Foreign
+        | DockerCause::Unexpected
+        | DockerCause::Unknown => {
+            error.describe(DockerError::refused(error.to_string()).with_cause(error.cause()))
+        }
     }
 }
 
@@ -327,7 +336,7 @@ impl Docker for DockerCli {
         } else {
             let operation = match kind {
                 DockerKind::Network => "network rm",
-                _ => "volume rm",
+                DockerKind::Container | DockerKind::Volume | DockerKind::Unknown => "volume rm",
             };
             Err(self.failure(&removed, operation, None))
         }

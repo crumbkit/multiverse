@@ -317,7 +317,12 @@ pub(crate) fn docker_error(error: &ContainerError) -> PhaseError {
         ContainerError::Missing { .. } | ContainerError::Unavailable { .. } => {
             DockerError::unavailable(error.to_string())
         }
-        _ => DockerError::refused(error.to_string()),
+        ContainerError::ComposeMissing { .. }
+        | ContainerError::NoAddressPool { .. }
+        | ContainerError::Failed { .. }
+        | ContainerError::Cancelled { .. }
+        | ContainerError::Foreign { .. }
+        | ContainerError::Unreadable { .. } => DockerError::refused(error.to_string()),
     };
     PhaseError::Docker {
         source: error.describe(source.with_cause(error.cause())),
@@ -454,7 +459,13 @@ impl From<PhaseError> for Halt {
 fn halt(error: &ContainerError) -> Halt {
     match error {
         ContainerError::Cancelled { .. } => Halt::Cancelled,
-        _ => Halt::Failed(docker_error(error)),
+        ContainerError::Missing { .. }
+        | ContainerError::ComposeMissing { .. }
+        | ContainerError::NoAddressPool { .. }
+        | ContainerError::Unavailable { .. }
+        | ContainerError::Failed { .. }
+        | ContainerError::Foreign { .. }
+        | ContainerError::Unreadable { .. } => Halt::Failed(docker_error(error)),
     }
 }
 
@@ -577,7 +588,7 @@ impl Launch<'_> {
         let app = self.start.app;
         let runs_as_image_of = match &app.source {
             Source::Image { image } if app.container.user.is_none() => Some(image.as_str()),
-            _ => None,
+            Source::Release { .. } | Source::Checkout { .. } | Source::Image { .. } => None,
         };
         app_up(
             &AppUp {
@@ -1114,7 +1125,14 @@ fn no_shell_hint(error: ContainerError, files: bool) -> ContainerError {
             cause,
             docker_line,
         },
-        other => other,
+        other @ (ContainerError::Missing { .. }
+        | ContainerError::ComposeMissing { .. }
+        | ContainerError::NoAddressPool { .. }
+        | ContainerError::Unavailable { .. }
+        | ContainerError::Failed { .. }
+        | ContainerError::Cancelled { .. }
+        | ContainerError::Foreign { .. }
+        | ContainerError::Unreadable { .. }) => other,
     }
 }
 
@@ -1140,16 +1158,20 @@ pub(crate) fn secret_values(
         .map(|name| {
             SecretBytes::of(environment, name)
                 .map(|bytes| (name.clone(), bytes))
-                .map_err(|error| match error.kind() {
-                    io::ErrorKind::NotFound => {
-                        format!("the environment source supplied no value for the secret {name}")
-                    }
-                    io::ErrorKind::Unsupported => format!(
-                        "the environment source cannot write the value of the secret {name} to a file, so set secret_delivery = \"env\" for this process"
-                    ),
-                    kind => format!(
-                        "the environment source failed to write the value of the secret {name}: {kind}"
-                    ),
+                .map_err(|error| {
+                    #[expect(clippy::wildcard_enum_match_arm, reason = "std::io::ErrorKind is #[non_exhaustive], and stable Rust cannot name all of its variants")]
+                    let message = match error.kind() {
+                        io::ErrorKind::NotFound => {
+                            format!("the environment source supplied no value for the secret {name}")
+                        }
+                        io::ErrorKind::Unsupported => format!(
+                            "the environment source cannot write the value of the secret {name} to a file, so set secret_delivery = \"env\" for this process"
+                        ),
+                        kind => format!(
+                            "the environment source failed to write the value of the secret {name}: {kind}"
+                        ),
+                    };
+                    message
                 })
         })
         .collect()

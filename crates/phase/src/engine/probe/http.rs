@@ -63,9 +63,13 @@ pub(super) fn connect(port: u16, timeout: Duration) -> Result<TcpStream, Failure
 
 /// Connects to `address` within `timeout`.
 fn connect_to(address: SocketAddr, timeout: Duration) -> Result<TcpStream, Failure> {
-    TcpStream::connect_timeout(&address, timeout).map_err(|error| match error.kind() {
-        io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Failure::TimedOut,
-        kind => Failure::Connect(kind),
+    TcpStream::connect_timeout(&address, timeout).map_err(|error| {
+        #[expect(clippy::wildcard_enum_match_arm, reason = "std::io::ErrorKind is #[non_exhaustive], and stable Rust cannot name all of its variants")]
+        let failure = match error.kind() {
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Failure::TimedOut,
+            kind => Failure::Connect(kind),
+        };
+        failure
     })
 }
 
@@ -455,10 +459,15 @@ fn left(deadline: Instant) -> Result<Duration, Failure> {
 /// Returns the failure of a request that could not be sent or a response
 /// that could not be read.
 fn exchange(error: io::Error) -> Failure {
-    match error.kind() {
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "std::io::ErrorKind is #[non_exhaustive], and stable Rust cannot name all of its variants"
+    )]
+    let failure = match error.kind() {
         io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Failure::TimedOut,
         kind => Failure::Exchange(kind),
-    }
+    };
+    failure
 }
 
 #[cfg(test)]

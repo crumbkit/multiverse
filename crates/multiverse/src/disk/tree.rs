@@ -54,7 +54,10 @@ fn open_parent(
     for component in relative.components() {
         match component {
             Component::Normal(name) => names.push(name),
-            _ => {
+            Component::Prefix(_)
+            | Component::RootDir
+            | Component::CurDir
+            | Component::ParentDir => {
                 return Err((
                     root.join(relative),
                     io::Error::new(

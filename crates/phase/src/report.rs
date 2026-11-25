@@ -397,7 +397,27 @@ impl AppOutcome {
             crate::PhaseError::Docker { source } => {
                 (Some(source.cause()), Some(source.context().clone()))
             }
-            _ => (None, None),
+            crate::PhaseError::NotBuilt { .. }
+            | crate::PhaseError::Environment { .. }
+            | crate::PhaseError::Busy { .. }
+            | crate::PhaseError::RecordUnreadable { .. }
+            | crate::PhaseError::NewerRecord { .. }
+            | crate::PhaseError::GrantsUnreadable { .. }
+            | crate::PhaseError::NewerGrants { .. }
+            | crate::PhaseError::GrantsBusy { .. }
+            | crate::PhaseError::StateUnwritable { .. }
+            | crate::PhaseError::LogUnreadable { .. }
+            | crate::PhaseError::ProcessTable { .. }
+            | crate::PhaseError::KeeperUnstartable { .. }
+            | crate::PhaseError::ProcessUnstartable { .. }
+            | crate::PhaseError::SecretOwnerUnknown { .. }
+            | crate::PhaseError::VolumeOwner { .. }
+            | crate::PhaseError::NotRunnable { .. }
+            | crate::PhaseError::UnknownTarget { .. }
+            | crate::PhaseError::NotRunning { .. }
+            | crate::PhaseError::ExecUnstartable { .. }
+            | crate::PhaseError::ExecNeedsTerminal { .. }
+            | crate::PhaseError::Unplanned { .. } => (None, None),
         };
         Self::Errored {
             code: error.code().to_owned(),

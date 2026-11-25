@@ -460,7 +460,17 @@ pub(super) fn refused(name: &WorkspaceName, refusal: ArchiveRefusal) -> crumbkit
             name: name.to_string(),
         }
         .into(),
-        refusal => archive_refusal(name, refusal).into(),
+        ArchiveRefusal::NotFound
+        | ArchiveRefusal::NameTaken(_)
+        | ArchiveRefusal::WorkspaceRemoved(_)
+        | ArchiveRefusal::PinsGone(_)
+        | ArchiveRefusal::RenameUnfinished(_)
+        | ArchiveRefusal::MirrorMissing { .. }
+        | ArchiveRefusal::Unusable { .. }
+        | ArchiveRefusal::Unkeepable(_)
+        | ArchiveRefusal::SourceChanged { .. }
+        | ArchiveRefusal::RecordTooLarge { .. } => archive_refusal(name, refusal).into(),
+        _ => archive_refusal(name, refusal).into(),
     }
 }
 
@@ -498,6 +508,7 @@ fn archive_refusal(name: &WorkspaceName, refusal: ArchiveRefusal) -> ArchiveFail
         ArchiveRefusal::RecordTooLarge { bytes, most } => {
             ArchiveFailure::RecordTooLarge { name, bytes, most }
         }
+        ArchiveRefusal::NotFound | ArchiveRefusal::Creating => ArchiveFailure::NotFound { name },
         _ => ArchiveFailure::NotFound { name },
     }
 }
@@ -548,6 +559,9 @@ pub(super) fn restore_refusal(
             name,
             owner: owner.map_or_else(|| "unknown".to_owned(), |owner| owner.to_string()),
         },
+        RestoreRefusal::NotFound
+        | RestoreRefusal::HostFilesDamaged { .. }
+        | RestoreRefusal::HostCheckFailed { .. } => ArchiveFailure::RestoreNotFound { name },
         _ => ArchiveFailure::RestoreNotFound { name },
     }
 }
@@ -802,6 +816,7 @@ fn item_line(item: &Unkept) -> String {
             let what = match status {
                 FileStatus::Untracked => "the untracked file",
                 FileStatus::Ignored => "the ignored file",
+                FileStatus::Tracked => "the file",
                 _ => "the file",
             };
             format!(

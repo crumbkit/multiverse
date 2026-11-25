@@ -21,6 +21,7 @@ on:
       - "crates/mxv/src/proxy/**"
       - "crates/mxv/tests/proxy.rs"
       - "crates/mxv/tests/support/listen.rs"
+      - "crates/mxv/tests/support/terminal.rs"
       - "crates/mxv/examples/listen.rs"
       - ".github/workflows/proxy.yml"
   push:

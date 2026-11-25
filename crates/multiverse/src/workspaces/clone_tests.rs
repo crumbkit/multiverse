@@ -63,14 +63,14 @@ fn name(text: &str) -> WorkspaceName {
 }
 
 fn created(setup: &Setup, text: &str) -> Workspace {
-    match setup
+    let outcome = setup
         .workspaces
         .create(&setup.root, &name(text), &setup.fixture.clone, Mode::Change)
-        .unwrap()
-    {
-        NewOutcome::Created(workspace) => workspace,
-        other => panic!("{other:?}"),
-    }
+        .unwrap();
+    let NewOutcome::Created(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    workspace
 }
 
 fn plan(setup: &Setup, text: &str, allow: Allow) -> RemovalPlan {
@@ -370,17 +370,16 @@ fn a_clone_whose_directory_is_gone_is_removed_with_its_record() {
 fn a_workspace_of_worktrees_keeps_working_after_workspaces_gain_mirrors() {
     let setup = setup();
     let worktrees = Workspaces::new(setup.workspaces.store.clone(), Git);
-    let legacy = match worktrees
+    let outcome = worktrees
         .create(
             &setup.root,
             &name("inbox-ingest"),
             &setup.fixture.clone,
             Mode::Change,
         )
-        .unwrap()
-    {
-        NewOutcome::Created(workspace) => workspace,
-        other => panic!("{other:?}"),
+        .unwrap();
+    let NewOutcome::Created(legacy) = outcome else {
+        panic!("{outcome:?}");
     };
     assert_eq!(legacy.kind, WorkspaceKind::Worktree);
     assert_eq!(legacy.version, crate::record::ID_RECORD_VERSION);
@@ -728,7 +727,7 @@ fn a_held_mirror_lock_is_announced_once_before_waiting() {
 }
 
 fn created_with_manifest(setup: &Setup, text: &str, manifest: &str) -> Workspace {
-    match setup
+    let outcome = setup
         .workspaces
         .create_with_manifest(
             &setup.root,
@@ -737,11 +736,11 @@ fn created_with_manifest(setup: &Setup, text: &str, manifest: &str) -> Workspace
             Mode::Change,
             Some(manifest),
         )
-        .unwrap()
-    {
-        NewOutcome::Created(workspace) => workspace,
-        other => panic!("{other:?}"),
-    }
+        .unwrap();
+    let NewOutcome::Created(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    workspace
 }
 
 #[test]

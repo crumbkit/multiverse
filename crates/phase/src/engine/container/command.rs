@@ -218,6 +218,7 @@ pub(super) fn secret_exec(
                 deadline.as_secs()
             ),
         )),
+        Outcome::Stopped(_) => Err(Error::Cancelled { operation }),
         _ => Err(Error::Cancelled { operation }),
     }
 }
@@ -590,6 +591,7 @@ where
     let status = match finished.outcome() {
         Outcome::Ended(status) => exit_status(status),
         Outcome::TimedOut => return Err(timed_out(operation, deadline)),
+        Outcome::Stopped(_) => return Err(Error::Cancelled { operation }),
         _ => return Err(Error::Cancelled { operation }),
     };
     let (stdout, stderr) = finished.into_output();
@@ -607,6 +609,7 @@ where
 fn run_failure(operation: &'static str, deadline: Duration, error: RunError) -> Error {
     match error {
         RunError::Start(source) => start_failure(operation, source),
+        RunError::Run(_) => timed_out(operation, deadline),
         _ => timed_out(operation, deadline),
     }
 }

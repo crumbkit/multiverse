@@ -1296,7 +1296,11 @@ impl Op<'_, '_> {
                     // The readiness deadline cut the watch short, so the
                     // process may still end within its start grace.
                     Outcome::Ready if self.deadlines.ready < grace_end => return Step::Uncertain,
-                    outcome => outcome,
+                    outcome @ (Outcome::Ready
+                    | Outcome::Failing { .. }
+                    | Outcome::NotReady { .. }
+                    | Outcome::Ended
+                    | Outcome::Cancelled) => outcome,
                 }
             }
             Some(probe) => {
@@ -1483,7 +1487,17 @@ impl Op<'_, '_> {
                 AppOutcome::Started | AppOutcome::Restarted => {
                     stopped(&mut by_app, &report.app, report.notes.clone()).unwrap_or(report)
                 }
-                _ => report,
+                AppOutcome::AlreadyRunning
+                | AppOutcome::NotStarted
+                | AppOutcome::Failed { .. }
+                | AppOutcome::Stopped
+                | AppOutcome::Untouched
+                | AppOutcome::NotRunning
+                | AppOutcome::KeptRunning { .. }
+                | AppOutcome::StartUncertain
+                | AppOutcome::StopUncertain
+                | AppOutcome::Left
+                | AppOutcome::Errored { .. } => report,
             })
             .collect();
         let mut current = Some(notes);

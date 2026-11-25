@@ -667,7 +667,7 @@ fn check_shared_writes(apps: &[AppPlan]) -> Result<(), PlanError> {
 fn write_paths(app: &AppPlan) -> Vec<(&String, PathBuf)> {
     let checkout = match &app.source {
         Source::Checkout { dir, .. } => dir.clone(),
-        _ => PathBuf::new(),
+        Source::Release { .. } | Source::Image { .. } => PathBuf::new(),
     };
     app.permissions
         .iter()
@@ -727,7 +727,7 @@ fn check_permissions(
         Source::Checkout { dir, .. } => Some(crate::sandbox::canonical(
             &dir.components().collect::<PathBuf>(),
         )),
-        _ => None,
+        Source::Release { .. } | Source::Image { .. } => None,
     };
     if let Some(path) = permissions.write.iter().find(|path| {
         let path = Path::new(path);

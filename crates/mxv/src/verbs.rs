@@ -857,7 +857,13 @@ pub(crate) fn remove(
     let removal = match plan {
         RemovalPlan::Ready(removal) => removal,
         RemovalPlan::NotFound => return gone(),
-        refused => return Err(refusal(&name, allow, refused).into()),
+        refused @ (RemovalPlan::Dirty { .. }
+        | RemovalPlan::IgnoredFiles { .. }
+        | RemovalPlan::StrayCommits { .. }
+        | RemovalPlan::Unpushed { .. }
+        | RemovalPlan::Stashed { .. }
+        | RemovalPlan::Locked { .. }
+        | RemovalPlan::Unowned { .. }) => return Err(refusal(&name, allow, refused).into()),
     };
     if output.is_dry_run() {
         return Ok(Prose::new(

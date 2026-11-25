@@ -11,10 +11,10 @@ use crate::failures::rendered;
 /// Parses `words` after `mxv` and returns the arguments of `run`.
 fn parsed(words: &[&str]) -> RunArgs {
     let cli = Cli::try_parse_from(std::iter::once("mxv").chain(words.iter().copied())).unwrap();
-    match cli.verb {
-        Verb::Run(args) => args,
-        other => panic!("parsed {other:?}"),
-    }
+    let Verb::Run(args) = cli.verb else {
+        panic!("parsed {:?}", cli.verb);
+    };
+    args
 }
 
 /// Returns the home of `checkout` whose manifest is `manifest` and whose

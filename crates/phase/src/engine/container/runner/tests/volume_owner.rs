@@ -330,14 +330,13 @@ fn a_user_whose_name_resolves_to_uid_0_is_refused_and_nothing_starts() {
 
     let report = world.up(&plan);
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { code, message, .. } => {
-            assert_eq!(code, "phase::container::volume_owner_root");
-            assert!(message.contains("the image's USER"), "{message}");
-            assert!(!message.contains("toor"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { code, message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(code, "phase::container::volume_owner_root");
+    assert!(message.contains("the image's USER"), "{message}");
+    assert!(!message.contains("toor"), "{message}");
     assert!(!world.has_containers());
 }
 
@@ -692,20 +691,19 @@ fn assert_unresolved(world: &World, report: &Report) {
     assert!(!json.contains("\\u001b"), "{json}");
     assert!(!json.contains("no-such"), "{json}");
     assert!(world.state_lacks("no-such"));
-    match outcome(report, "db") {
-        AppOutcome::Errored { code, message, .. } => {
-            assert_eq!(
-                code, "phase::container::volume_owner_unresolved",
-                "{message}"
-            );
-            assert!(message.contains("the image's USER"), "{message}");
-            assert!(message.contains("numeric uid:gid"), "{message}");
-            assert!(message.contains("keep"), "{message}");
-            assert!(message.contains("refused to create or start"), "{message}");
-            assert!(!message.contains("no id program"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(report, "db");
+    let AppOutcome::Errored { code, message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(
+        code, "phase::container::volume_owner_unresolved",
+        "{message}"
+    );
+    assert!(message.contains("the image's USER"), "{message}");
+    assert!(message.contains("numeric uid:gid"), "{message}");
+    assert!(message.contains("keep"), "{message}");
+    assert!(message.contains("refused to create or start"), "{message}");
+    assert!(!message.contains("no id program"), "{message}");
     assert!(!world.has_containers());
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
 }
@@ -732,12 +730,11 @@ fn assert_image_user_hidden(report: &Report) {
     assert!(!json.contains("no_address_pool"), "{json}");
     assert!(!json.contains("fully subnetted"), "{json}");
     assert!(!json.contains("already allocated"), "{json}");
-    match outcome(report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(message.contains("the image's USER"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(report, "db");
+    let AppOutcome::Errored { message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert!(message.contains("the image's USER"), "{message}");
 }
 
 #[test]
@@ -830,17 +827,14 @@ fn an_images_user_that_is_a_word_of_dockers_sentence_leaves_the_sentence_whole()
     let json = serde_json::to_string(&report).unwrap();
     assert!(!json.contains("nosuchgroup"), "{json}");
     assert!(json.contains("docker_line"), "{json}");
-    match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(
-                message.contains(
-                    "Error response from daemon: unable to find group <the image's USER>:"
-                ),
-                "{message}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert!(
+        message.contains("Error response from daemon: unable to find group <the image's USER>:"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -855,20 +849,19 @@ fn a_plans_run_as_user_docker_cannot_find_fails_as_unresolved_and_keeps_dockers_
 
     let report = world.up(&plan);
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { code, message, .. } => {
-            assert_eq!(
-                code, "phase::container::volume_owner_unresolved",
-                "{message}"
-            );
-            assert!(
-                message.contains("unable to find user no-such-plan-user"),
-                "{message}"
-            );
-            assert!(message.contains("keep"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { code, message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(
+        code, "phase::container::volume_owner_unresolved",
+        "{message}"
+    );
+    assert!(
+        message.contains("unable to find user no-such-plan-user"),
+        "{message}"
+    );
+    assert!(message.contains("keep"), "{message}");
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
 }
 
@@ -944,12 +937,11 @@ fn an_images_user_absent_from_its_passwd_file_never_reaches_the_report_when_no_i
     assert!(!json.contains("[31m"), "{json}");
     assert!(!json.contains("no-such"), "{json}");
     assert!(world.state_lacks("no-such"));
-    match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(message.contains("the image's USER"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert!(message.contains("the image's USER"), "{message}");
 }
 
 #[test]
@@ -1129,12 +1121,11 @@ fn a_chown_helper_that_fails_after_the_container_is_created_ends_the_start_and_r
 
     let report = world.up(&plan);
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(message.contains("exited with status 1"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert!(message.contains("exited with status 1"), "{message}");
     assert!(!world.has_containers());
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
     docker(&["volume", "rm", &volume]).unwrap();
@@ -1189,18 +1180,18 @@ fn what_id_prints_in_the_image_never_reaches_the_report() {
         let json = serde_json::to_string(&report).unwrap();
         assert!(!json.contains("made-up"), "{json}");
         assert!(!json.contains("password"), "{json}");
-        match outcome(&report, "db") {
-            AppOutcome::Errored {
-                code: found,
-                message,
-                ..
-            } => {
-                assert_eq!(found, code, "{message}");
-                if status == 3 {
-                    assert!(message.contains("status 3"), "{message}");
-                }
-            }
-            other => panic!("{other:?}"),
+        let reported = outcome(&report, "db");
+        let AppOutcome::Errored {
+            code: found,
+            message,
+            ..
+        } = reported
+        else {
+            panic!("{reported:?}");
+        };
+        assert_eq!(found, code, "{message}");
+        if status == 3 {
+            assert!(message.contains("status 3"), "{message}");
         }
         assert!(world.helpers().is_empty(), "{:?}", world.helpers());
     }
@@ -1232,14 +1223,13 @@ fn an_images_user_that_holds_an_escape_sequence_never_reaches_the_report() {
     let json = serde_json::to_string(&report).unwrap();
     assert!(!json.contains("[31m"), "{json}");
     assert!(!json.contains("\\u001b"), "{json}");
-    match outcome(&report, "db") {
-        AppOutcome::Errored { code, message, .. } => {
-            assert_eq!(code, "phase::container::volume_owner_unresolved");
-            assert!(message.contains("the image's USER"), "{message}");
-            assert!(message.contains("status 3"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { code, message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(code, "phase::container::volume_owner_unresolved");
+    assert!(message.contains("the image's USER"), "{message}");
+    assert!(message.contains("status 3"), "{message}");
     assert!(!world.has_containers());
     assert!(world.helpers().is_empty(), "{:?}", world.helpers());
 }

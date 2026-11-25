@@ -137,6 +137,7 @@ fn state_of(row: &StatusRow) -> ProcessState {
         Phase::Unknown { reason, .. } => ProcessState::Unknown {
             reason: describe_unknown(reason),
         },
+        Phase::Stopped => ProcessState::Stopped,
         _ => ProcessState::Stopped,
     }
 }
@@ -148,6 +149,11 @@ fn ready_of(row: &StatusRow) -> Option<bool> {
     match row.state {
         Phase::Ready => Some(true),
         Phase::Running | Phase::Paused | Phase::Starting | Phase::Restarting => Some(false),
+        Phase::Stopping
+        | Phase::Stopped
+        | Phase::Completed
+        | Phase::Exited { .. }
+        | Phase::Unknown { .. } => None,
         _ => None,
     }
 }
@@ -185,6 +191,12 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
                 Note::VolumeOwnerUnchecked { message, .. } => ProcessNote::VolumeOwnerUnchecked {
                     message: message.clone(),
                 },
+                Note::ListenerUnknown { .. }
+                | Note::DetachedListener { .. }
+                | Note::NotOurs { .. }
+                | Note::GroupUnverified { .. }
+                | Note::Unstoppable { .. }
+                | Note::Sandboxed { .. } => continue,
                 _ => continue,
             };
             notes
@@ -273,6 +285,14 @@ fn left(name: &str, app: &phase::AppReport, row: Option<&StatusRow>) -> Unstoppa
         .find_map(|note| match note {
             Note::Unstoppable { group, .. } => Some((*group, false)),
             Note::GroupUnverified { group, .. } => Some((*group, true)),
+            Note::ListenerUnknown { .. }
+            | Note::DetachedListener { .. }
+            | Note::NotOurs { .. }
+            | Note::SecretsRewritten { .. }
+            | Note::SecretsKept { .. }
+            | Note::PlanChanged { .. }
+            | Note::VolumeOwnerUnchecked { .. }
+            | Note::Sandboxed { .. } => None,
             _ => None,
         })
         .unwrap_or_else(|| (row.and_then(pid).unwrap_or_default(), true));
@@ -1083,6 +1103,15 @@ impl Runs {
                             .collect(),
                     }));
                 }
+                AppOutcome::Started
+                | AppOutcome::AlreadyRunning
+                | AppOutcome::Restarted
+                | AppOutcome::NotStarted
+                | AppOutcome::Stopped
+                | AppOutcome::Untouched
+                | AppOutcome::NotRunning
+                | AppOutcome::KeptRunning { .. }
+                | AppOutcome::StopUncertain => {}
                 _ => {}
             }
         }
@@ -1386,6 +1415,20 @@ impl Runs {
                 context,
                 ..
             } => Err(errored(code, message, *cause, context.as_ref()).naming(name)),
+            AppOutcome::Started
+            | AppOutcome::AlreadyRunning
+            | AppOutcome::Restarted
+            | AppOutcome::NotStarted
+            | AppOutcome::Failed { .. }
+            | AppOutcome::Stopped
+            | AppOutcome::Untouched
+            | AppOutcome::NotRunning
+            | AppOutcome::KeptRunning { .. }
+            | AppOutcome::StartUncertain => {
+                let mut status = Self::phase_unit_status(workspace, manifest, name, None);
+                status.log = row.and_then(|row| row.log.clone());
+                Ok(DownResult::Stopped(status))
+            }
             _ => {
                 let mut status = Self::phase_unit_status(workspace, manifest, name, None);
                 status.log = row.and_then(|row| row.log.clone());
@@ -1501,6 +1544,11 @@ impl Runs {
                         phase::SweepOutcome::Unstoppable => {
                             Some(format!("{what} was still there after phase killed it"))
                         }
+                        phase::SweepOutcome::Stopped
+                        | phase::SweepOutcome::WouldStop
+                        | phase::SweepOutcome::Gone
+                        | phase::SweepOutcome::PidReused
+                        | phase::SweepOutcome::Kept => None,
                         _ => None,
                     }
                 })

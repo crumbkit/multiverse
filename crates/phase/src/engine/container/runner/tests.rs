@@ -371,18 +371,16 @@ fn a_container_that_exits_before_it_is_ready_fails_with_its_exit_code_and_no_out
 
     let json = serde_json::to_string(&report).unwrap();
     assert!(!json.contains("hunter2"), "{json}");
-    match outcome(&report, "db") {
-        AppOutcome::Failed {
-            problem: problem @ StartProblem::Exited { code, .. },
-            ..
-        } => {
-            assert_eq!(*code, Some(3));
-            assert!(!problem.to_string().contains("hunter2"), "{problem}");
-        }
-        other => {
-            panic!("the up reported {other:?} for the container, and the report was {report:?}")
-        }
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Failed {
+        problem: problem @ StartProblem::Exited { code, .. },
+        ..
+    } = reported
+    else {
+        panic!("the up reported {reported:?} for the container, and the report was {report:?}");
+    };
+    assert_eq!(*code, Some(3));
+    assert!(!problem.to_string().contains("hunter2"), "{problem}");
     let label = format!("label=mxv.workspace-id={}", world.id);
     let left = docker(&["container", "ls", "--all", "--quiet", "--filter", &label]).unwrap();
     assert_eq!(left.trim(), "");
@@ -456,13 +454,17 @@ fn a_container_that_crashes_in_a_restart_loop_fails_to_start_as_exited() {
     // 60-second ready deadline, and the start would be uncertain. A start
     // that failed because the container exited shows that the restart
     // loop ended the wait.
-    match outcome(&report, "db") {
-        AppOutcome::Failed {
-            problem: StartProblem::Exited { .. },
-            ..
-        } => {}
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    assert!(
+        matches!(
+            reported,
+            AppOutcome::Failed {
+                problem: StartProblem::Exited { .. },
+                ..
+            }
+        ),
+        "{reported:?}"
+    );
 }
 
 #[test]
@@ -650,7 +652,11 @@ fn a_container_failure_reaches_phase_as_a_docker_error_with_its_cause_and_its_te
             ContainerError::Foreign { name, .. } => {
                 expected = expected.about_foreign(DockerKind::Container, name);
             }
-            _ => {}
+            ContainerError::Missing { .. }
+            | ContainerError::ComposeMissing { .. }
+            | ContainerError::NoAddressPool { .. }
+            | ContainerError::Unavailable { .. }
+            | ContainerError::Unreadable { .. } => {}
         }
         assert_eq!(source, expected, "{error:?}");
     }
@@ -662,9 +668,12 @@ fn a_docker_error_names_the_operation_the_container_and_the_foreign_object() {
     use crate::error::PhaseError;
     use crate::record::docker::DockerKind;
 
-    let docker = |error: &ContainerError| match super::docker_error(error) {
-        PhaseError::Docker { source } => source,
-        other => panic!("{other:?}"),
+    let docker = |error: &ContainerError| {
+        let found = super::docker_error(error);
+        let PhaseError::Docker { source } = found else {
+            panic!("{found:?}");
+        };
+        source
     };
     let up = docker(&ContainerError::failed(
         "compose up",
@@ -1383,10 +1392,11 @@ fn a_required_secret_without_a_value_fails_the_start_before_a_container_exists()
 
     let report = world.up_with(&plan, &Secrets::new(None));
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { code, .. } => assert_eq!(code, "phase::environment"),
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { code, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(code, "phase::environment");
     assert!(!world.has_containers());
 }
 
@@ -1400,14 +1410,13 @@ fn a_container_whose_secret_files_would_belong_to_root_is_refused_before_it_is_c
 
     let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { code, message, .. } => {
-            assert_eq!(code, "phase::container::secret_owner_unknown");
-            assert!(message.contains("secret_owner"), "{message}");
-            assert!(message.contains("secret_delivery"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { code, message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(code, "phase::container::secret_owner_unknown");
+    assert!(message.contains("secret_owner"), "{message}");
+    assert!(message.contains("secret_delivery"), "{message}");
     assert!(!world.has_containers());
 }
 
@@ -1589,13 +1598,12 @@ fn an_image_without_bin_sh_fails_its_start_with_a_pointer_to_environment_secrets
 
     let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(message.contains("/bin/sh"), "{message}");
-            assert!(message.contains("secret_delivery"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert!(message.contains("/bin/sh"), "{message}");
+    assert!(message.contains("secret_delivery"), "{message}");
     assert!(!world.has_containers());
 }
 
@@ -1618,17 +1626,16 @@ fn an_image_without_sleep_fails_its_start_with_status_70_in_phases_own_words() {
 
     let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(message.contains("status 70"), "{message}");
-            assert!(
-                message.contains("gave up waiting for the secret files KEY, TOKEN"),
-                "{message}"
-            );
-            assert!(message.contains("has no sleep program"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert!(message.contains("status 70"), "{message}");
+    assert!(
+        message.contains("gave up waiting for the secret files KEY, TOKEN"),
+        "{message}"
+    );
+    assert!(message.contains("has no sleep program"), "{message}");
     assert!(!world.has_containers());
 }
 
@@ -1684,13 +1691,12 @@ fn an_environment_that_cannot_write_a_secret_leaves_the_running_container_in_pla
     // default `write_value`, which cannot write a value.
     let report = world.up_with(&world.plan(vec![changed]), &Unwritable);
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(message.contains("cannot write the value"), "{message}");
-            assert!(message.contains("secret_delivery"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert!(message.contains("cannot write the value"), "{message}");
+    assert!(message.contains("secret_delivery"), "{message}");
     let state = docker(&[
         "container",
         "inspect",
@@ -2208,20 +2214,20 @@ fn a_required_variable_that_the_source_cannot_supply_fails_the_start_as_before()
 
     let report = world.up_with(&plan, &source);
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored {
-            code,
-            message,
-            cause,
-            context,
-        } => {
-            assert_eq!(code, "phase::environment");
-            assert!(message.contains("db"), "{message}");
-            assert_eq!(*cause, None);
-            assert_eq!(*context, None);
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored {
+        code,
+        message,
+        cause,
+        context,
+    } = reported
+    else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(code, "phase::environment");
+    assert!(message.contains("db"), "{message}");
+    assert_eq!(*cause, None);
+    assert_eq!(*context, None);
     assert!(!world.has_containers());
 }
 
@@ -2290,10 +2296,11 @@ fn a_source_that_leaves_out_a_required_variable_fails_a_container_start() {
 
     let report = world.up_with(&plan, &Listed::of(&[("LANG", LANG)]));
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { code, .. } => assert_eq!(code, "phase::environment"),
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { code, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(code, "phase::environment");
     assert!(!world.has_containers());
 }
 
@@ -3175,21 +3182,21 @@ fn assert_start_reports_no_value(image: &BuiltImage) {
 
     let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored {
-            message, context, ..
-        } => {
-            holds_no_value(message);
-            let context = context.as_ref().unwrap();
-            assert_eq!(context.operation.as_deref(), Some("secret write"));
-            assert_eq!(context.docker_line, None);
-            assert!(
-                message.contains("the script exited with status 1"),
-                "{message}"
-            );
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored {
+        message, context, ..
+    } = reported
+    else {
+        panic!("{reported:?}");
+    };
+    holds_no_value(message);
+    let context = context.as_ref().unwrap();
+    assert_eq!(context.operation.as_deref(), Some("secret write"));
+    assert_eq!(context.docker_line, None);
+    assert!(
+        message.contains("the script exited with status 1"),
+        "{message}"
+    );
     holds_no_value(&format!("{report:?}"));
     holds_no_value(&serde_json::to_string(&report).unwrap());
     assert!(!world.has_containers());
@@ -3258,13 +3265,12 @@ fn a_wrapper_that_prints_a_lookalike_line_and_exits_with_70_leaks_nothing_into_t
 
     let report = world.up_with(&plan, &Secrets::new(Some(TOKEN)));
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { message, .. } => {
-            assert!(message.contains("status 70"), "{message}");
-            assert!(message.contains("gave up waiting"), "{message}");
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { message, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert!(message.contains("status 70"), "{message}");
+    assert!(message.contains("gave up waiting"), "{message}");
     holds_no_value(&format!("{report:?}"));
     holds_no_value(&serde_json::to_string(&report).unwrap());
     assert!(!world.has_containers());

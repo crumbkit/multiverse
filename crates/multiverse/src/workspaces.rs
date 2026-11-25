@@ -2148,7 +2148,53 @@ impl<B: Backend> Workspaces<B> {
             Error::Busy { .. } => Error::MirrorBusy {
                 mirror: mirror.to_path_buf(),
             },
-            other => other,
+            other @ (Error::RepositoryNotFound { .. }
+            | Error::NoOrigin { .. }
+            | Error::EmptyOrigin { .. }
+            | Error::NoDefaultBranch { .. }
+            | Error::ProgramMissing { .. }
+            | Error::CommandFailed { .. }
+            | Error::TimedOut { .. }
+            | Error::StateUnreadable { .. }
+            | Error::Unwritable { .. }
+            | Error::CorruptRecord { .. }
+            | Error::Inaccessible { .. }
+            | Error::MismatchedRecord { .. }
+            | Error::RecordMissing { .. }
+            | Error::StateChanged { .. }
+            | Error::TransitionRefused { .. }
+            | Error::MismatchedCheckout { .. }
+            | Error::WrongLock { .. }
+            | Error::HostMismatch { .. }
+            | Error::OtherHost { .. }
+            | Error::HostDataTooLarge { .. }
+            | Error::HostHookFailed { .. }
+            | Error::HostFileUnkeepable { .. }
+            | Error::HostFilesTooMany { .. }
+            | Error::HostFileTooLarge { .. }
+            | Error::HostFilesTooLarge { .. }
+            | Error::ArchiveUnfinished { .. }
+            | Error::NewerRecord { .. }
+            | Error::ProcessUnstartable { .. }
+            | Error::ProcessTable { .. }
+            | Error::UnsupportedOs { .. }
+            | Error::GrantsBusy { .. }
+            | Error::DatedNamesTaken { .. }
+            | Error::StoppedRestoreHoldsOtherFiles { .. }
+            | Error::MirrorBusy { .. }
+            | Error::MirrorFetchFailed { .. }
+            | Error::SshRefused { .. }
+            | Error::TemplateInvalid { .. }
+            | Error::TemplateAmbiguous { .. }
+            | Error::ManifestUntrusted { .. }
+            | Error::NoFreePort { .. }
+            | Error::DockerMissing { .. }
+            | Error::DockerComposeMissing { .. }
+            | Error::DockerNoAddressPool { .. }
+            | Error::DockerUnavailable { .. }
+            | Error::DockerFailed { .. }
+            | Error::DockerForeign { .. }
+            | Error::Phase { .. }) => other,
         };
         match store::lock(Path::new(&lock), Duration::ZERO) {
             Err(Error::Busy { .. }) => {
@@ -2636,7 +2682,15 @@ impl<B: Backend> Workspaces<B> {
     pub fn remove(&self, confirmed: Removal) -> Result<RemovalOutcome, Error> {
         let mut removal = match self.plan_removal(&confirmed.workspace.name, confirmed.allow)? {
             RemovalPlan::Ready(fresh) if !loses_more(&fresh, &confirmed) => fresh,
-            plan => return Ok(RemovalOutcome::Changed(plan)),
+            plan @ (RemovalPlan::Ready(_)
+            | RemovalPlan::NotFound
+            | RemovalPlan::Dirty { .. }
+            | RemovalPlan::IgnoredFiles { .. }
+            | RemovalPlan::StrayCommits { .. }
+            | RemovalPlan::Unpushed { .. }
+            | RemovalPlan::Stashed { .. }
+            | RemovalPlan::Locked { .. }
+            | RemovalPlan::Unowned { .. }) => return Ok(RemovalOutcome::Changed(plan)),
         };
         for (planned, seen) in removal.checkouts.iter_mut().zip(&confirmed.checkouts) {
             let checkout = &planned.checkout;
