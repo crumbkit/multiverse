@@ -89,11 +89,14 @@ use mxv::{
 };
 use tempfile::TempDir;
 
-use crate::fixture::{ENV, NO_LIVE_CHECKOUT, Repositories, repositories};
+use crate::fixture::{ENV, Repositories, repositories};
 use crate::support::{git, repository};
 
 /// The reason that a code of the container verbs is unprovoked here.
 const DOCKER: &str = "Only a live checkout whose mxv.toml declares containers, with a docker daemon that answers, provokes it; tests/containers.rs provokes it when docker runs.";
+
+/// The reason that a process verb's examples do not run.
+const NO_LIVE_CHECKOUT: &str = "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.";
 
 /// The reason that `down` and `restart` ask no question.
 const NO_QUESTION: &str = "The command stops only units that mxv up started for the named workspace, and it deletes no file that the person wrote, so it asks no question first.";

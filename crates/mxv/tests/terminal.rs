@@ -24,13 +24,13 @@ use std::io::Read as _;
 use std::os::fd::OwnedFd;
 use std::os::unix::process::CommandExt as _;
 use std::path::Path;
-use std::process::{Child, ExitStatus, Stdio};
-use std::sync::mpsc::{self, Sender};
+use std::process::{ExitStatus, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use rustix::fs::{Mode, OFlags};
-use rustix::io::Errno;
+use rustix::io::{Errno, FdFlags};
 use rustix::process::{Pid, Signal};
 use rustix::pty::OpenptFlags;
 use rustix::termios::{OptionalActions, OutputModes, Winsize};
@@ -40,64 +40,22 @@ mod fixture;
 #[path = "support/git.rs"]
 mod support;
 
-use crate::fixture::{ENV, NO_LIVE_CHECKOUT, Repositories, repositories};
+use crate::fixture::{ENV, Repositories, repositories};
 
-/// Why the test does not compare the examples of a leaf.
-#[derive(Debug, Clone, Copy)]
-enum Skip {
-    /// Each example fails in the fixture, for the reason given, so its two
-    /// runs would compare only one failure with another. The test checks
-    /// that each such example still fails, so a skip that is no longer
-    /// needed fails the test.
-    Fails(&'static str),
-    /// The test does not run the examples at all, for the reason given.
-    NotRun(&'static str),
-}
+/// The leaves whose examples the test does not run, each with the reason.
+const SKIPPED: &[(&str, &str)] = &[(
+    "proxy install",
+    "Without a terminal the command still starts Caddy where Caddy is installed, and a test must not start a server on the machine that runs it.",
+)];
 
-impl Skip {
-    /// Returns the reason of the skip.
-    const fn reason(self) -> &'static str {
-        match self {
-            Self::Fails(reason) | Self::NotRun(reason) => reason,
-        }
-    }
-}
-
-/// The leaves whose examples the test does not compare, each with the
-/// reason.
-const SKIPPED: &[(&str, Skip)] = &[
-    ("up", Skip::Fails(NO_LIVE_CHECKOUT)),
-    ("restart", Skip::Fails(NO_LIVE_CHECKOUT)),
-    ("logs", Skip::Fails(NO_LIVE_CHECKOUT)),
-    (
-        "exec",
-        Skip::NotRun(
-            "The command takes a place from the deadband daemon of the machine that runs the test before it starts the command, and that daemon makes it wait while the machine is loaded, so the run can outlast any deadline of the test.",
-        ),
-    ),
-    ("ports reset", Skip::Fails(NO_LIVE_CHECKOUT)),
-    (
-        "add",
-        Skip::Fails(
-            "The example adds a checkout to a workspace of clones, and the fixture's only workspace holds a git worktree under /home/agent, which a test cannot create; tests/workspaces.rs runs the verb.",
-        ),
-    ),
-    (
-        "archive",
-        Skip::Fails(
-            "The example archives a live workspace, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/archive.rs runs the verb.",
-        ),
-    ),
-    (
-        "proxy install",
-        Skip::NotRun(
-            "Without a terminal the command still starts Caddy where Caddy is installed, and a test must not start a server on the machine that runs it.",
-        ),
-    ),
+/// The variables of every run beside [`ENV`] and the XDG directories: a
+/// `TERM` that names a colour terminal, and a deadband socket that does not
+/// exist, so `mxv exec` starts its command at once and never waits for a
+/// place from the deadband daemon of the machine that runs the test.
+const RUN_ENV: &[(&str, &str)] = &[
+    ("TERM", "xterm-256color"),
+    ("DEADBAND_SOCKET", "/nonexistent/deadband.sock"),
 ];
-
-/// The variables of every run beside [`ENV`] and the XDG directories.
-const TERM: (&str, &str) = ("TERM", "xterm-256color");
 
 /// The XDG variables of every run, each with the directory of the run's
 /// temporary directory that it names.
@@ -111,6 +69,10 @@ const XDG: &[(&str, &str)] = &[
 /// How long one run may take, until both of its streams end, before the
 /// test stops its process group.
 const TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long the test waits between two checks of whether a run whose
+/// streams have ended has exited.
+const POLL: Duration = Duration::from_millis(10);
 
 /// How many times the test tries to open a pseudo-terminal before it fails.
 const OPEN_ATTEMPTS: usize = 5;
@@ -173,45 +135,14 @@ fn each_example_prints_the_same_bytes_at_a_terminal_as_in_a_pipe() {
 #[test]
 fn each_skipped_leaf_names_a_leaf_with_examples() {
     let leaves = mxv::TOOL.get_help().get_leaves();
-    for (skipped, skip) in SKIPPED {
+    for (skipped, reason) in SKIPPED {
         assert!(
             leaves
                 .iter()
                 .any(|leaf| leaf.path().join(" ") == *skipped && !leaf.get_examples().is_empty()),
-            "the skipped leaf `{skipped}` names no leaf with examples, so its skip, whose reason is \"{}\", should go",
-            skip.reason()
+            "the skipped leaf `{skipped}` names no leaf with examples, so its skip, whose reason is \"{reason}\", should go"
         );
     }
-}
-
-#[test]
-fn each_example_skipped_for_failing_still_fails_in_the_fixture() {
-    let repositories = repositories();
-    let mut succeeded = Vec::new();
-    for leaf in mxv::TOOL.get_help().get_leaves() {
-        let path = leaf.path().join(" ");
-        let Some((_, Skip::Fails(reason))) = SKIPPED.iter().find(|(skipped, _)| *skipped == path)
-        else {
-            continue;
-        };
-        for example in leaf.get_examples() {
-            let words: Vec<&str> = leaf.path().iter().chain(example.words()).copied().collect();
-            let run = tempfile::tempdir().unwrap();
-            let run_path = run.path().canonicalize().unwrap();
-            let piped = run_once(&repositories, &run_path, &words, Streams::Pipes);
-            if piped.status.success() {
-                succeeded.push(format!(
-                    "mxv {}, skipped because: {reason}",
-                    words.join(" ")
-                ));
-            }
-        }
-    }
-    assert!(
-        succeeded.is_empty(),
-        "these examples succeed in the fixture, so the test can compare them and their skips should go:\n{}",
-        succeeded.join("\n")
-    );
 }
 
 /// Where a run's standard output and standard error go.
@@ -259,7 +190,7 @@ fn run_once(repositories: &Repositories, run: &Path, words: &[&str], streams: St
         .args(words)
         .env_clear()
         .envs(ENV.iter().copied())
-        .envs([TERM])
+        .envs(RUN_ENV.iter().copied())
         .envs(
             XDG.iter()
                 .map(|(variable, name)| (*variable, xdg.join(name))),
@@ -309,7 +240,17 @@ fn run_once(repositories: &Repositories, run: &Path, words: &[&str], streams: St
         match receiver.recv_timeout(left) {
             Ok((Stream::Out, bytes)) => stdout = Some(bytes),
             Ok((Stream::Err, bytes)) => stderr = Some(bytes),
-            Err(_) => stop(child, words),
+            Err(RecvTimeoutError::Timeout) => stop(child, words),
+            // A reader thread drops its sender without sending only when
+            // it panics on a read error, which its panic names.
+            Err(RecvTimeoutError::Disconnected) => {
+                let killed =
+                    rustix::process::kill_process_group(Pid::from_child(&child), Signal::KILL);
+                panic!(
+                    "the test could not read a stream of mxv {}, and stopped its process group: {killed:?}",
+                    words.join(" ")
+                );
+            }
         }
     }
     let status = wait(child, deadline, words);
@@ -358,7 +299,13 @@ fn open_controller() -> OwnedFd {
     let mut errors = Vec::new();
     for _ in 0..OPEN_ATTEMPTS {
         match rustix::pty::openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY) {
-            Ok(controller) => return controller,
+            Ok(controller) => {
+                // `posix_openpt` on macOS cannot set close-on-exec, so the
+                // test sets it, and mxv and the processes it starts do not
+                // inherit the controlling end.
+                rustix::io::fcntl_setfd(&controller, FdFlags::CLOEXEC).unwrap();
+                return controller;
+            }
             Err(error) => errors.push(error),
         }
     }
@@ -396,7 +343,7 @@ fn reader(stream: OwnedFd, which: Stream, sender: Sender<(Stream, Vec<u8>)>) {
     clippy::disallowed_types,
     reason = "the test holds the child that it ran on pseudo-terminals, which the library's process module cannot make"
 )]
-fn wait(mut child: Child, deadline: Instant, words: &[&str]) -> ExitStatus {
+fn wait(mut child: std::process::Child, deadline: Instant, words: &[&str]) -> ExitStatus {
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             return status;
@@ -408,7 +355,7 @@ fn wait(mut child: Child, deadline: Instant, words: &[&str]) -> ExitStatus {
             clippy::disallowed_methods,
             reason = "a child's exit gives no signal that the test can wait on without a second thread, so the test polls try_wait"
         )]
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(POLL);
     }
 }
 
@@ -419,7 +366,7 @@ fn wait(mut child: Child, deadline: Instant, words: &[&str]) -> ExitStatus {
     clippy::disallowed_types,
     reason = "the test holds the child that it ran on pseudo-terminals, which the library's process module cannot make"
 )]
-fn stop(mut child: Child, words: &[&str]) -> ! {
+fn stop(mut child: std::process::Child, words: &[&str]) -> ! {
     let killed = rustix::process::kill_process_group(Pid::from_child(&child), Signal::KILL);
     let reaped = child.wait();
     panic!(

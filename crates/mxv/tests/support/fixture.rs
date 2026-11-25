@@ -1,13 +1,13 @@
 //! The fixture in which the convention tests and the terminal test run the
 //! examples of `mxv`: the variables of each run and a directory of git
 //! repositories.
+//!
+//! The module uses `crate::support`, so a test file that includes it must
+//! also mount `support/git.rs` as the module `support`.
 
 use tempfile::TempDir;
 
 use crate::support::{PATH, git, repository};
-
-/// The reason that a process verb's examples do not run.
-pub(crate) const NO_LIVE_CHECKOUT: &str = "The example starts or reads the processes of a live checkout with an mxv.toml, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs runs the verb.";
 
 /// The variables of every run: a `PATH` that finds git, and git without
 /// the person's configuration. `MXV_ROOT` is unset, so the workspace root
