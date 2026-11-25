@@ -14,6 +14,7 @@ use serde_json::Value;
 use super::{Attempt, Failure, MOST_BODY_BYTES, MOST_RESPONSE_BYTES};
 use crate::cancel::Cancel;
 use crate::clock::now;
+use crate::net;
 use crate::plan::probe::{JsonExpectation, JsonScalar, is_sendable_path};
 
 /// The longest that one read of a response blocks, so the read notices a
@@ -63,7 +64,7 @@ pub(super) fn connect(port: u16, timeout: Duration) -> Result<TcpStream, Failure
 
 /// Connects to `address` within `timeout`.
 fn connect_to(address: SocketAddr, timeout: Duration) -> Result<TcpStream, Failure> {
-    TcpStream::connect_timeout(&address, timeout).map_err(|error| {
+    net::connect_timeout(&address, timeout).map_err(|error| {
         #[expect(clippy::wildcard_enum_match_arm, reason = "std::io::ErrorKind is #[non_exhaustive], and stable Rust cannot name all of its variants")]
         let failure = match error.kind() {
             io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => Failure::TimedOut,

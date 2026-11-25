@@ -6,6 +6,7 @@ use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use crate::engine::probe::LogLines;
+use crate::record::store;
 
 /// The most bytes of a log that one [`LogFollower::lines`] reads.
 pub const MOST_FOLLOW_BYTES: u64 = 1024 * 1024;
@@ -35,7 +36,7 @@ impl LogFollower {
     pub fn from_start(path: &Path) -> io::Result<Self> {
         Ok(Self {
             path: path.to_path_buf(),
-            file: Some(File::open(path)?),
+            file: Some(store::open(path)?),
             partial: Vec::new(),
         })
     }
@@ -47,7 +48,7 @@ impl LogFollower {
     ///
     /// Returns the error of opening the log or of seeking to its end.
     pub fn at_end(path: &Path) -> io::Result<Option<Self>> {
-        let mut file = match File::open(path) {
+        let mut file = match store::open(path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(error),
@@ -124,7 +125,7 @@ impl LogFollower {
     pub fn lines(&mut self) -> io::Result<Vec<String>> {
         let file = match &mut self.file {
             Some(file) => file,
-            None => match File::open(&self.path) {
+            None => match store::open(&self.path) {
                 Ok(file) => self.file.insert(file),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(error) => return Err(error),
@@ -179,7 +180,7 @@ impl LogFollower {
     pub fn rest(&mut self) -> io::Result<Vec<String>> {
         let file = match &mut self.file {
             Some(file) => file,
-            None => match File::open(&self.path) {
+            None => match store::open(&self.path) {
                 Ok(file) => self.file.insert(file),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
                 Err(error) => return Err(error),

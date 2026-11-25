@@ -22,7 +22,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::fs::File;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -33,7 +32,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::PhaseError;
 use crate::name::AppName;
 use crate::plan::{Permissions, STATE};
-use crate::record::store::{Unreplaced, replace_file, secure_dir, take_lock};
+use crate::record::store::{Unreplaced, open, replace_file, secure_dir, take_lock};
 
 #[cfg(test)]
 mod tests;
@@ -440,7 +439,7 @@ pub(crate) fn read(state_dir: &Path, scope: &GrantScope) -> Result<Option<Grants
         path: path.clone(),
         reason,
     };
-    let file = match File::open(&path) {
+    let file = match open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(unreadable(error.to_string())),

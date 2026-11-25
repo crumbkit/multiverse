@@ -1,5 +1,6 @@
 //! The store of run records, which is the one module of phase that writes
-//! durable files (DUR-1) and takes file locks (DUR-2).
+//! durable files (DUR-1), takes file locks (DUR-2), and opens files and
+//! directories to read them (BASE-5).
 //!
 //! The record of a workspace is `<state_dir>/runs/<workspace-id>.json`. The
 //! store writes it with crumbkit-durable's `write_atomically`, which writes
@@ -103,7 +104,7 @@ impl RunStore {
             path: path.clone(),
             reason,
         };
-        let file = match File::open(&path) {
+        let file = match open(&path) {
             Ok(file) => file,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(error) => return Err(unreadable(error.to_string())),
@@ -372,6 +373,28 @@ pub(crate) fn secure_dir(dir: &Path) -> Result<(), PhaseError> {
     Ok(())
 }
 
+/// Opens the file or directory at `path` read-only, as [`File::open`]
+/// does. Every read of a file in phase opens it here.
+///
+/// # Errors
+///
+/// Returns the error of [`File::open`], such as
+/// [`io::ErrorKind::NotFound`] when nothing is at `path`.
+pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<File> {
+    File::open(path)
+}
+
+/// Returns the entries of the directory at `path`, as [`fs::read_dir`]
+/// does. Every listing of a directory in phase starts here.
+///
+/// # Errors
+///
+/// Returns the error of [`fs::read_dir`], such as
+/// [`io::ErrorKind::NotFound`] when nothing is at `path`.
+pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<fs::ReadDir> {
+    fs::read_dir(path)
+}
+
 /// Syncs the directory `dir`, so a rename or a removal in it survives a
 /// power loss. Some file systems cannot sync a directory and fail with
 /// EINVAL, ENOTSUP or ENOSYS, and there the sync is skipped, as
@@ -383,7 +406,7 @@ pub(crate) fn secure_dir(dir: &Path) -> Result<(), PhaseError> {
 /// Returns [`PhaseError::StateUnwritable`] when the directory cannot be
 /// opened or synced for another reason.
 fn sync_directory(dir: &Path) -> Result<(), PhaseError> {
-    let synced = File::open(dir).and_then(|handle| handle.sync_all());
+    let synced = open(dir).and_then(|handle| handle.sync_all());
     match synced {
         Ok(()) => Ok(()),
         Err(error) if cannot_sync_directory(&error) => Ok(()),

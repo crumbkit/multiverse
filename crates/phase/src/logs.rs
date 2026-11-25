@@ -5,7 +5,6 @@
 //!
 //! [`logs`] opens the log and the run record read-only and takes no lock.
 
-use std::fs::File;
 use std::io::{self, Read as _, Seek as _, SeekFrom};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -18,7 +17,7 @@ use crate::error::{Operation, PhaseError};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::record::process::{self, Identity, Processes};
 use crate::record::run::{EntryState, HostEntry};
-use crate::record::store::RunStore;
+use crate::record::store::{self, RunStore};
 
 /// How long [`logs`] waits before it reads a followed log again. A log
 /// file gives no event when it grows, so a follower polls it.
@@ -64,7 +63,7 @@ pub fn tail(path: &Path, lines: usize) -> Vec<String> {
 /// line that starts before those bytes comes back empty, so it loses its
 /// start. A file that cannot be read has no lines.
 fn tail_before(path: &Path, lines: usize, end: u64) -> (Vec<String>, Vec<u8>) {
-    let Ok(mut file) = File::open(path) else {
+    let Ok(mut file) = store::open(path) else {
         return (Vec::new(), Vec::new());
     };
     let start = end.saturating_sub(MOST_TAIL_BYTES);

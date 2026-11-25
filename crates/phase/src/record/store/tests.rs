@@ -1238,3 +1238,28 @@ fn a_directory_sync_that_the_file_system_cannot_do_counts_as_done_as_crumbkit_du
     let denied = std::io::Error::from_raw_os_error(rustix::io::Errno::ACCESS.raw_os_error());
     assert!(!super::cannot_sync_directory(&denied));
 }
+
+#[test]
+fn open_reads_a_file_and_gives_std_s_error_for_a_missing_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("log");
+    write_file(&path, "line\n");
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut super::open(&path).unwrap(), &mut text).unwrap();
+    assert_eq!(text, "line\n");
+    let missing = super::open(dir.path().join("missing")).unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+}
+
+#[test]
+fn read_dir_lists_a_directory_and_gives_std_s_error_for_a_missing_one() {
+    let dir = tempfile::tempdir().unwrap();
+    write_file(&dir.path().join("a"), "");
+    let names: Vec<_> = super::read_dir(dir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["a"]);
+    let missing = super::read_dir(dir.path().join("missing")).unwrap_err();
+    assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+}

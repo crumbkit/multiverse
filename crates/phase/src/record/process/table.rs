@@ -73,7 +73,7 @@ pub fn process_table() -> Result<Vec<TableEntry>, ProcessError> {
 #[cfg(target_os = "linux")]
 fn linux_table() -> Result<Vec<TableEntry>, ProcessError> {
     use super::{ProcRead, read_proc};
-    let entries = std::fs::read_dir("/proc")
+    let entries = crate::record::store::read_dir("/proc")
         .map_err(|error| ProcessError::table(format!("/proc cannot be read: {error}")))?;
     let mut table = Vec::new();
     for entry in entries.flatten() {
