@@ -39,6 +39,9 @@ wildcards = "deny"
 # that is not published, because `cargo publish` leaves out such a
 # dev-dependency.
 allow-wildcard-paths = true
+# SVC-12 bans each store's SDK crate outside the crate that owns the store.
+# multiverse adopts no service profile, so it bans no crate.
+deny = []
 
 [sources]
 # Every crate comes from crates.io, except deadband, which is not published

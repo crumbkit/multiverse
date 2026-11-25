@@ -70,7 +70,7 @@ fn verdict(setup: &Setup, workspace: &Workspace, pulls: bool) -> Verdict {
 fn kept(verdict: &Verdict) -> &str {
     match verdict {
         Verdict::Kept(reason) => reason,
-        other => panic!("{other:?}"),
+        other @ Verdict::Merged => panic!("{other:?}"),
     }
 }
 
