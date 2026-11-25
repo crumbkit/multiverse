@@ -95,8 +95,10 @@ snapbox = { workspace = true, features = ["cmd"] }
 # `std` reads the JSON documents and usage log lines that the binary writes.
 serde_json = { workspace = true, features = ["std"] }
 tempfile = { workspace = true }
-# `pty` and `termios` open the pseudo-terminals at which `tests/no_color.rs`
-# runs the built binary, without unsafe code.
+# rustix's `pty` and `termios` features open the pseudo-terminals at which
+# `tests/no_color.rs` and `tests/terminal.rs` run the built binary, without
+# unsafe code. The workspace's `process` feature lets `tests/terminal.rs`
+# stop a run's process group when the run takes too long.
 rustix = { workspace = true, features = ["pty", "termios"] }
 # starmap parses the repository's `starmap.toml`, so `tests/starmap.rs` can
 # check that it declares the variables that mxv reads. mxv itself does not

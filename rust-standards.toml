@@ -85,13 +85,6 @@ reason = "clippy.toml leaves out the base entries that 5ba71ff added for the clo
 correction = "Give each effect one owning module per crate, route the production sites through it, put `#[expect]` on each test or test module that uses an effect, add the left-out entries to clippy.toml and delete this exception. The task /repos/notes-personal/tasks/multiverse-gives-the-clock-file-system-network-and-print-mac.md in the owner's board tracks it."
 
 [[exception]]
-rule = "CLI-11"
-paths = ["crates/mxv/tests/"]
-owner = "the owner"
-reason = "mxv has no test that runs each example at a pseudo-terminal and in a pipe and compares the bytes."
-correction = "Add that test and delete this exception."
-
-[[exception]]
 rule = "CLI-12"
 paths = ["crates/mxv/src/processes.rs", "crates/mxv/src/proxy.rs"]
 owner = "the owner"

@@ -45,6 +45,8 @@ use crumbkit_test::{
     Allow, Examples, Failing, PathBudgets, Recoveries, Rule, RuntimeFailing, Suite, Twin, Twins,
     Unprovoked,
 };
+#[path = "support/fixture.rs"]
+mod fixture;
 #[path = "support/git.rs"]
 mod support;
 
@@ -87,6 +89,7 @@ use mxv::{
 };
 use tempfile::TempDir;
 
+use crate::fixture::{ENV, Repositories, repositories};
 use crate::support::{git, repository};
 
 /// The reason that a code of the container verbs is unprovoked here.
@@ -253,58 +256,6 @@ const CORRUPT_RECORD: Failing<'static> =
 /// The budgets of the paths through the help, which are crumbkit's
 /// defaults.
 const PATH_BUDGETS: PathBudgets<'_> = PathBudgets::new("tests/golden/examples");
-/// The variables of every run: a `PATH` that finds git, and git without
-/// the person's configuration. `MXV_ROOT` is unset, so the workspace root
-/// comes from the config file of `tests/fixtures/xdg`.
-const ENV: &[(&str, &str)] = &[
-    ("PATH", support::PATH),
-    ("GIT_CONFIG_GLOBAL", "/dev/null"),
-    ("GIT_CONFIG_NOSYSTEM", "1"),
-];
-
-/// The directory of repositories that each run starts in a fresh copy of,
-/// which the test deletes when it drops.
-struct Repositories {
-    /// The temporary directory.
-    _dir: TempDir,
-    /// The directory's path, which [`Examples`] borrows.
-    path: String,
-}
-
-/// Returns a new directory of the repositories that the module docs name.
-/// The clone `app` also holds a branch named `taken`.
-fn repositories() -> Repositories {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path().canonicalize().unwrap();
-    let app = repository(&root);
-    git(&app, &["branch", "taken"]);
-    git(&root, &["clone", "--quiet", "origin.git", "web"]);
-    git(
-        &root.join("web"),
-        &["remote", "set-url", "origin", "../origin.git"],
-    );
-    let plain = root.join("plain");
-    std::fs::create_dir(&plain).unwrap();
-    git(&plain, &["init", "--quiet"]);
-    git(
-        &root,
-        &[
-            "init",
-            "--quiet",
-            "--bare",
-            "--initial-branch=main",
-            "empty.git",
-        ],
-    );
-    git(&root, &["clone", "--quiet", "empty.git", "fresh"]);
-    git(
-        &root.join("fresh"),
-        &["remote", "set-url", "origin", "../empty.git"],
-    );
-    let path = root.to_str().unwrap().to_owned();
-    Repositories { _dir: dir, path }
-}
-
 /// Returns the settings that run the built binary in a fresh copy of the
 /// repositories at `path`, with the XDG state of `tests/fixtures/xdg`.
 fn examples(path: &str) -> Examples<'_> {
