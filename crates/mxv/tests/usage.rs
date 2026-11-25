@@ -3,6 +3,10 @@
 //! lines the runs appended to `mxv/usage.jsonl` there.
 
 #![cfg(test)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
 
 use std::fs;
 

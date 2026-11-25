@@ -2,6 +2,8 @@
 //! the workspace's record during the wait, as an `mxv archive` that held
 //! the lock first would.
 
+#![expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
+
 use std::fs::{self, OpenOptions};
 use std::path::Path;
 use std::time::{Duration, Instant};

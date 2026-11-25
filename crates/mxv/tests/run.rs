@@ -7,6 +7,14 @@
 //! installed program, and skip with a line that says so when it is missing.
 
 #![cfg(test)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+#![expect(
+    clippy::disallowed_macros,
+    reason = "the tests print on standard output why they skip, which the test runner shows"
+)]
 
 #[path = "support/grants.rs"]
 mod grants;

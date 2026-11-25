@@ -2,6 +2,11 @@
 //! the host's own `/bin/sh` with a temporary directory in place of
 //! `/run/secrets`, and of the owner of the secret files.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
+
 use std::collections::BTreeSet;
 use std::io::Write as _;
 use std::path::Path;

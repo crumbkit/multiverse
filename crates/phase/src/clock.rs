@@ -23,6 +23,10 @@ pub(crate) fn pause(interval: Duration) {
 }
 
 /// Returns the current time, against which a poll checks its deadline.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/phase/src/clock.rs is the clock owner, and it reads the time (BASE-5)"
+)]
 pub(crate) fn now() -> Instant {
     Instant::now()
 }
@@ -44,6 +48,10 @@ pub(crate) fn deadline_in(wait: Duration) -> Instant {
 
 /// Returns the wall-clock time, against which phase compares a credential's
 /// expiry and stamps a diagnostic line.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/phase/src/clock.rs is the clock owner, and it reads the time (BASE-5)"
+)]
 pub(crate) fn wall_now() -> SystemTime {
     SystemTime::now()
 }

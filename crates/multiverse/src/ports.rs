@@ -104,6 +104,10 @@ pub(crate) fn accepts(port: u16) -> bool {
 ///
 /// Returns the error of the connection, such as `ConnectionRefused` when
 /// nothing listens on `address` and `TimedOut` when `timeout` passes.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/multiverse/src/ports.rs is the network owner, and it opens TCP connections (BASE-5)"
+)]
 pub(crate) fn connect(address: &SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
     TcpStream::connect_timeout(address, timeout)
 }

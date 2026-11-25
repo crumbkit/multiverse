@@ -380,6 +380,10 @@ pub(crate) fn secure_dir(dir: &Path) -> Result<(), PhaseError> {
 ///
 /// Returns the error of [`File::open`], such as
 /// [`io::ErrorKind::NotFound`] when nothing is at `path`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/phase/src/record/store.rs is the file-system owner, and it opens files and lists directories (BASE-5)"
+)]
 pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<File> {
     File::open(path)
 }
@@ -391,6 +395,10 @@ pub(crate) fn open(path: impl AsRef<Path>) -> io::Result<File> {
 ///
 /// Returns the error of [`fs::read_dir`], such as
 /// [`io::ErrorKind::NotFound`] when nothing is at `path`.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/phase/src/record/store.rs is the file-system owner, and it opens files and lists directories (BASE-5)"
+)]
 pub(crate) fn read_dir(path: impl AsRef<Path>) -> io::Result<fs::ReadDir> {
     fs::read_dir(path)
 }

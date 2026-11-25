@@ -15,6 +15,10 @@ use std::time::Duration;
 /// [`io::ErrorKind::ConnectionRefused`] when nothing listens at `address`,
 /// [`io::ErrorKind::TimedOut`] when `timeout` passes first, and
 /// [`io::ErrorKind::InvalidInput`] when `timeout` is zero.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/phase/src/net.rs is the network owner, and it opens TCP connections (BASE-5)"
+)]
 pub(crate) fn connect_timeout(address: &SocketAddr, timeout: Duration) -> io::Result<TcpStream> {
     TcpStream::connect_timeout(address, timeout)
 }

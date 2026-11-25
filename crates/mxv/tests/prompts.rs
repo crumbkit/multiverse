@@ -22,6 +22,10 @@
 //! want of an answer, so it has no test here.
 
 #![cfg(test)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
 
 #[path = "support/git.rs"]
 mod support;

@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
+
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};

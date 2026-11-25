@@ -22,8 +22,7 @@ use crate::health::{ArchiveCase, archive_case, pins_gone};
 use crate::mirror::recorded_origin;
 use crate::name::WorkspaceName;
 use crate::record::{Made, Workspace, WorkspaceKind, WorkspaceState};
-use crate::store;
-use crate::store::MOST_RECORD_BYTES;
+use crate::store::{self, MOST_RECORD_BYTES};
 use crate::workspaces::{Allow, CheckoutRemoval, Fate, Mode, Removal, RemovalPlan, Workspaces};
 
 /// What the person lets `mxv archive` do.

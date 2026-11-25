@@ -1,3 +1,8 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests connect to ports that they or the code under test listen on"
+)]
+
 use std::ffi::OsString;
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};

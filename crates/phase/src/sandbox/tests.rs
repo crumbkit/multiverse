@@ -1539,6 +1539,14 @@ mod rules {
 }
 
 #[cfg(all(feature = "sandbox", target_os = "macos"))]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write, and connect to ports that they or the code under test listen on"
+)]
+#[expect(
+    clippy::disallowed_macros,
+    reason = "the tests print on standard output what a probe saw or why they skip, which the test runner or a parent test reads"
+)]
 mod seatbelt {
     use std::collections::BTreeSet;
     use std::io::Read as _;

@@ -1,6 +1,11 @@
 //! The check that `starmap.toml` at the repository root declares the
 //! environment variables that mxv reads, no more and no fewer.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::collections::BTreeSet;
 
 /// The text of the repository's `starmap.toml`.

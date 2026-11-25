@@ -23,6 +23,15 @@
 //! checkout. The sweep never touches an object whose run record lies
 //! outside a temp root.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
+#![expect(
+    clippy::disallowed_macros,
+    reason = "the sweep prints on standard output what it removed, which the test runner shows"
+)]
+
 use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::ErrorKind;

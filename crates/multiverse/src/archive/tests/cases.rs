@@ -6,6 +6,11 @@
 //! take their case from one rule, so a row that changes for one reader
 //! and not for the others is a regression.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
+
 use std::time::Duration;
 
 use super::*;

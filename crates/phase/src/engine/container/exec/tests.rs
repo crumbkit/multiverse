@@ -4,6 +4,15 @@
 //! runner's tests do. Each test uses a workspace id of its own and removes
 //! what it created.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
+#![expect(
+    clippy::disallowed_macros,
+    reason = "the tests print on standard output why they skip, which the test runner shows"
+)]
+
 use std::collections::BTreeSet;
 use std::fs::File;
 use std::process::{Command, ExitStatus};

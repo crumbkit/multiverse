@@ -3,6 +3,10 @@
 //! and the XDG directories set to a temporary directory of its own, so no
 //! test writes into the real home directory.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
 // clippy allows `unwrap` only in code under `cfg(test)`, and an integration
 // test's helper functions are not under it without this attribute.
 #![cfg(test)]

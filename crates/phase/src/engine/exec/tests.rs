@@ -1,6 +1,11 @@
 //! Tests of `Phase::exec` for host processes, which run real commands, and
 //! on macOS a real sandbox through this test binary as the launcher.
 
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::os::unix::process::ExitStatusExt as _;
@@ -901,6 +906,10 @@ fn open_terminal(path: &str) -> rustix::io::Result<std::os::fd::OwnedFd> {
 
 #[cfg(target_os = "macos")]
 #[test]
+#[expect(
+    clippy::disallowed_macros,
+    reason = "a child test prints what it saw on standard output, where its parent test reads it"
+)]
 fn the_test_binary_probes_the_callers_terminal_when_it_is_started_as_a_command() {
     use std::os::fd::AsFd as _;
 
@@ -983,6 +992,10 @@ fn exec_probe(
 
 #[cfg(target_os = "macos")]
 #[test]
+#[expect(
+    clippy::disallowed_macros,
+    reason = "a child test prints what it saw on standard output, where its parent test reads it"
+)]
 fn the_test_binary_runs_execs_from_a_terminal_when_it_is_started_as_one() {
     use std::os::fd::AsFd as _;
 

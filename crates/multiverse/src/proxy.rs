@@ -29,8 +29,7 @@ use phase::{
     WorkspaceName as PhaseWorkspace,
 };
 
-use crate::clock;
-use crate::clock::{POLL_INTERVAL, pause};
+use crate::clock::{self, POLL_INTERVAL, pause};
 use crate::error::Error;
 use crate::host::Host;
 use crate::name::WorkspaceName;

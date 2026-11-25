@@ -1,3 +1,5 @@
+#![expect(clippy::disallowed_methods, reason = "the tests read the real clock")]
+
 use std::collections::BTreeMap;
 use std::io::{Read as _, Write as _};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};

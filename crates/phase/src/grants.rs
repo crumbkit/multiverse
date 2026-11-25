@@ -32,7 +32,7 @@ use sha2::{Digest as _, Sha256};
 use crate::error::PhaseError;
 use crate::name::AppName;
 use crate::plan::{Permissions, STATE};
-use crate::record::store::{Unreplaced, open, replace_file, secure_dir, take_lock};
+use crate::record::store::{self, Unreplaced, replace_file, secure_dir, take_lock};
 
 #[cfg(test)]
 mod tests;
@@ -439,7 +439,7 @@ pub(crate) fn read(state_dir: &Path, scope: &GrantScope) -> Result<Option<Grants
         path: path.clone(),
         reason,
     };
-    let file = match open(&path) {
+    let file = match store::open(&path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(unreadable(error.to_string())),

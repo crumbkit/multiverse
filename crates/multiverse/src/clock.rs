@@ -24,12 +24,20 @@ pub(crate) fn pause(interval: Duration) {
 
 /// Returns the current time, against which a wait checks its deadline and
 /// an operation measures how long it took.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/multiverse/src/clock.rs is the clock owner, and it reads the time (BASE-5)"
+)]
 pub(crate) fn now() -> Instant {
     Instant::now()
 }
 
 /// Returns the wall-clock time, which a record stamps as the time a file
 /// was written or a workspace was archived.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "crates/multiverse/src/clock.rs is the clock owner, and it reads the time (BASE-5)"
+)]
 pub(crate) fn wall_now() -> SystemTime {
     SystemTime::now()
 }
@@ -48,7 +56,7 @@ mod tests {
     }
 
     #[test]
-    fn the_wall_clock_lies_after_the_year_2020() {
+    fn the_wall_clock_reads_a_time_after_2020() {
         let since_epoch = wall_now().duration_since(UNIX_EPOCH).unwrap();
         assert!(since_epoch > Duration::from_secs(1_577_836_800));
     }

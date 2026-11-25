@@ -1,3 +1,12 @@
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the real clock and the files and directories that they and the code under test write"
+)]
+#![expect(
+    clippy::disallowed_macros,
+    reason = "the tests print on standard error why they skip, which the test runner shows"
+)]
+
 use std::collections::{BTreeSet, VecDeque};
 use std::io::{self, Read as _, Write as _};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener};

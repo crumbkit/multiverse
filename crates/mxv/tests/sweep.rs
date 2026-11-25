@@ -4,6 +4,10 @@
 //! binary with a fake `board` program on its `PATH`.
 
 #![cfg(test)]
+#![expect(
+    clippy::disallowed_methods,
+    reason = "the tests read the files and directories that they and the code under test write"
+)]
 
 #[path = "support/git.rs"]
 mod support;
