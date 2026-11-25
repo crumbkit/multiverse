@@ -885,8 +885,8 @@ impl Proxy {
                 | AppOutcome::NotRunning
                 | AppOutcome::KeptRunning { .. }
                 | AppOutcome::StopUncertain
-                | AppOutcome::Left
-                | _ => {}
+                | AppOutcome::Left => {}
+                _ => {}
             }
         }
         let deadline = Instant::now() + START_WAIT;

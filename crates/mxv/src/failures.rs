@@ -542,7 +542,7 @@ impl From<Error> for MxvFailure {
             Error::RecordMissing { name } => Self::NotFound {
                 name: name.to_string(),
             },
-            error @ (Error::RepositoryNotFound { .. }
+            Error::RepositoryNotFound { .. }
             | Error::NoOrigin { .. }
             | Error::EmptyOrigin { .. }
             | Error::NoDefaultBranch { .. }
@@ -588,8 +588,8 @@ impl From<Error> for MxvFailure {
             | Error::DockerUnavailable { .. }
             | Error::DockerFailed { .. }
             | Error::DockerForeign { .. }
-            | Error::Phase { .. }
-            | _) => Self::Library(error),
+            | Error::Phase { .. } => Self::Library(error),
+            _ => Self::Library(error),
         }
     }
 }
@@ -839,8 +839,8 @@ impl Failure for MxvFailure {
                 | Error::HostFileUnkeepable { .. }
                 | Error::HostFilesTooMany { .. }
                 | Error::HostFileTooLarge { .. }
-                | Error::HostFilesTooLarge { .. }
-                | _ => FILE_UNWRITABLE,
+                | Error::HostFilesTooLarge { .. } => FILE_UNWRITABLE,
+                _ => FILE_UNWRITABLE,
             },
         }
     }
@@ -1310,26 +1310,23 @@ fn library_recovery(error: &Error) -> Recovery {
         Error::OtherHost { owner, .. } => Recovery::hint(format!(
             "the program whose host profile is {owner} made it; change or remove it with that program"
         )),
-        Error::ArchiveUnfinished {
-            name,
-            readable: true,
-        } => Recovery::hint(format!(
-            "run `mxv archive {name}`, which finishes the archive that an older mxv started, or `mxv remove {name}` when that archive refuses"
-        )),
-        Error::ArchiveUnfinished {
-            name,
-            readable: false,
-        } => Recovery::hint(format!(
-            "read why the archive record of {name} cannot be read in `mxv list --archived`, then move it aside by hand or run `mxv remove {name}`"
-        )),
+        Error::ArchiveUnfinished { name, readable } => Recovery::hint(if *readable {
+            format!(
+                "run `mxv archive {name}`, which finishes the archive that an older mxv started, or `mxv remove {name}` when that archive refuses"
+            )
+        } else {
+            format!(
+                "read why the archive record of {name} cannot be read in `mxv list --archived`, then move it aside by hand or run `mxv remove {name}`"
+            )
+        }),
         Error::RecordMissing { .. }
         | Error::HostDataTooLarge { .. }
         | Error::HostHookFailed { .. }
         | Error::HostFileUnkeepable { .. }
         | Error::HostFilesTooMany { .. }
         | Error::HostFileTooLarge { .. }
-        | Error::HostFilesTooLarge { .. }
-        | _ => Recovery::Retry,
+        | Error::HostFilesTooLarge { .. } => Recovery::Retry,
+        _ => Recovery::Retry,
     }
 }
 
@@ -1481,8 +1478,8 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         | Error::ProcessTable { .. }
         | Error::UnsupportedOs { .. }
         | Error::NoFreePort { .. }
-        | Error::DockerMissing { .. }
-        | _ => Vec::new(),
+        | Error::DockerMissing { .. } => Vec::new(),
+        _ => Vec::new(),
     }
 }
 

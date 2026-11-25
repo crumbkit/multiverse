@@ -402,7 +402,8 @@ impl Failure for RunFailure {
                 // The library marks the problem non-exhaustive, so a
                 // problem that a later version adds reads as invalid until
                 // mxv gives it a code of its own.
-                ManifestProblem::Invalid { .. } | _ => MANIFEST_INVALID,
+                ManifestProblem::Invalid { .. } => MANIFEST_INVALID,
+                _ => MANIFEST_INVALID,
             },
             Self::UnknownProcess { .. } => PROCESS_NOT_FOUND,
             Self::Exited { .. } => PROCESS_EXITED,
@@ -775,9 +776,13 @@ fn manifest_recovery(error: &ManifestError) -> Recovery {
             "fix the line of {} that the message names",
             shown(&error.path)
         )),
-        ManifestProblem::Invalid { .. } | ManifestProblem::Unrunnable { .. } | _ => Recovery::hint(
+        ManifestProblem::Invalid { .. } | ManifestProblem::Unrunnable { .. } => Recovery::hint(
             format!("fix what the message names in {}", shown(&error.path)),
         ),
+        _ => Recovery::hint(format!(
+            "fix what the message names in {}",
+            shown(&error.path)
+        )),
     }
 }
 

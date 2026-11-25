@@ -146,14 +146,14 @@ pub(crate) enum ProxyFailure {
 pub(crate) fn fail(error: ProxyError) -> crumbkit::Error {
     match error {
         ProxyError::Store(inner) => MxvFailure::from(inner).into(),
-        other @ (ProxyError::PortHeld { .. }
+        ProxyError::PortHeld { .. }
         | ProxyError::PortDenied { .. }
         | ProxyError::CaddyMissing { .. }
         | ProxyError::CaddyTooOld { .. }
         | ProxyError::StartFailed { .. }
         | ProxyError::LoadFailed { .. }
-        | ProxyError::SocketPathTooLong { .. }
-        | _) => ProxyFailure::Library(other).into(),
+        | ProxyError::SocketPathTooLong { .. } => ProxyFailure::Library(error).into(),
+        _ => ProxyFailure::Library(error).into(),
     }
 }
 
@@ -167,7 +167,8 @@ fn code_of(error: &ProxyError) -> Code<'static> {
         ProxyError::CaddyTooOld { .. } => PROXY_CADDY_TOO_OLD,
         ProxyError::LoadFailed { .. } => PROXY_LOAD_FAILED,
         ProxyError::SocketPathTooLong { .. } => PROXY_SOCKET_PATH_TOO_LONG,
-        ProxyError::StartFailed { .. } | ProxyError::Store(_) | _ => PROXY_START_FAILED,
+        ProxyError::StartFailed { .. } | ProxyError::Store(_) => PROXY_START_FAILED,
+        _ => PROXY_START_FAILED,
     }
 }
 
@@ -381,14 +382,14 @@ fn displaced_lines(
 fn warning(name: &WorkspaceName, mode: SyncMode, error: ProxyError) -> Vec<String> {
     let code = match &error {
         ProxyError::Store(_) => None,
-        other @ (ProxyError::PortHeld { .. }
+        ProxyError::PortHeld { .. }
         | ProxyError::PortDenied { .. }
         | ProxyError::CaddyMissing { .. }
         | ProxyError::CaddyTooOld { .. }
         | ProxyError::StartFailed { .. }
         | ProxyError::LoadFailed { .. }
-        | ProxyError::SocketPathTooLong { .. }
-        | _) => Some(Spelling::COLONS.spell(code_of(other))),
+        | ProxyError::SocketPathTooLong { .. } => Some(Spelling::COLONS.spell(code_of(&error))),
+        _ => Some(Spelling::COLONS.spell(code_of(&error))),
     };
     let what = match mode {
         SyncMode::Start => "serve",
@@ -403,14 +404,14 @@ fn warning(name: &WorkspaceName, mode: SyncMode, error: ProxyError) -> Vec<Strin
                 format!("{}error code: {spelled}", still_run(mode)),
             ];
         }
-        other @ (ProxyError::PortHeld { .. }
+        ProxyError::PortHeld { .. }
         | ProxyError::PortDenied { .. }
         | ProxyError::CaddyMissing { .. }
         | ProxyError::CaddyTooOld { .. }
         | ProxyError::StartFailed { .. }
         | ProxyError::LoadFailed { .. }
-        | ProxyError::SocketPathTooLong { .. }
-        | _) => other.to_string(),
+        | ProxyError::SocketPathTooLong { .. } => error.to_string(),
+        _ => error.to_string(),
     };
     vec![
         format!("warning: mxv could not {what} the routes of {name}, because {reason}."),

@@ -449,8 +449,8 @@ fn record_name(problem: &Error) -> String {
         | Error::DockerUnavailable { .. }
         | Error::DockerFailed { .. }
         | Error::DockerForeign { .. }
-        | Error::Phase { .. }
-        | _ => String::new(),
+        | Error::Phase { .. } => String::new(),
+        _ => String::new(),
     }
 }
 

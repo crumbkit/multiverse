@@ -137,7 +137,8 @@ fn state_of(row: &StatusRow) -> ProcessState {
         Phase::Unknown { reason, .. } => ProcessState::Unknown {
             reason: describe_unknown(reason),
         },
-        Phase::Stopped | _ => ProcessState::Stopped,
+        Phase::Stopped => ProcessState::Stopped,
+        _ => ProcessState::Stopped,
     }
 }
 
@@ -152,8 +153,8 @@ fn ready_of(row: &StatusRow) -> Option<bool> {
         | Phase::Stopped
         | Phase::Completed
         | Phase::Exited { .. }
-        | Phase::Unknown { .. }
-        | _ => None,
+        | Phase::Unknown { .. } => None,
+        _ => None,
     }
 }
 
@@ -195,8 +196,8 @@ fn notes_of(report: &Report) -> BTreeMap<String, Vec<ProcessNote>> {
                 | Note::NotOurs { .. }
                 | Note::GroupUnverified { .. }
                 | Note::Unstoppable { .. }
-                | Note::Sandboxed { .. }
-                | _ => continue,
+                | Note::Sandboxed { .. } => continue,
+                _ => continue,
             };
             notes
                 .entry(app.app.as_str().to_owned())
@@ -291,8 +292,8 @@ fn left(name: &str, app: &phase::AppReport, row: Option<&StatusRow>) -> Unstoppa
             | Note::SecretsKept { .. }
             | Note::PlanChanged { .. }
             | Note::VolumeOwnerUnchecked { .. }
-            | Note::Sandboxed { .. }
-            | _ => None,
+            | Note::Sandboxed { .. } => None,
+            _ => None,
         })
         .unwrap_or_else(|| (row.and_then(pid).unwrap_or_default(), true));
     Unstoppable {
@@ -1110,8 +1111,8 @@ impl Runs {
                 | AppOutcome::Untouched
                 | AppOutcome::NotRunning
                 | AppOutcome::KeptRunning { .. }
-                | AppOutcome::StopUncertain
-                | _ => {}
+                | AppOutcome::StopUncertain => {}
+                _ => {}
             }
         }
         Ok(None)
@@ -1423,8 +1424,12 @@ impl Runs {
             | AppOutcome::Untouched
             | AppOutcome::NotRunning
             | AppOutcome::KeptRunning { .. }
-            | AppOutcome::StartUncertain
-            | _ => {
+            | AppOutcome::StartUncertain => {
+                let mut status = Self::phase_unit_status(workspace, manifest, name, None);
+                status.log = row.and_then(|row| row.log.clone());
+                Ok(DownResult::Stopped(status))
+            }
+            _ => {
                 let mut status = Self::phase_unit_status(workspace, manifest, name, None);
                 status.log = row.and_then(|row| row.log.clone());
                 Ok(DownResult::Stopped(status))
@@ -1543,8 +1548,8 @@ impl Runs {
                         | phase::SweepOutcome::WouldStop
                         | phase::SweepOutcome::Gone
                         | phase::SweepOutcome::PidReused
-                        | phase::SweepOutcome::Kept
-                        | _ => None,
+                        | phase::SweepOutcome::Kept => None,
+                        _ => None,
                     }
                 })
                 .collect();

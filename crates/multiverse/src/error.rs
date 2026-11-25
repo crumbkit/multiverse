@@ -1185,7 +1185,8 @@ impl From<phase::container::ContainerError> for Error {
             },
             Container::Foreign { kind, name, .. } => Self::DockerForeign { kind, name },
             Container::Unreadable { path, source, .. } => Self::StateUnreadable { path, source },
-            other @ (Container::Cancelled { .. } | _) => Self::engine_failed(&other),
+            Container::Cancelled { .. } => Self::engine_failed(&error),
+            _ => Self::engine_failed(&error),
         }
     }
 }
@@ -1229,7 +1230,7 @@ impl Error {
                 process: app.to_string(),
                 source: io::Error::other(reason),
             },
-            other @ (P::NotBuilt { .. }
+            P::NotBuilt { .. }
             | P::Environment { .. }
             | P::NewerRecord { .. }
             | P::GrantsUnreadable { .. }
@@ -1242,10 +1243,13 @@ impl Error {
             | P::NotRunning { .. }
             | P::ExecUnstartable { .. }
             | P::ExecNeedsTerminal { .. }
-            | P::Unplanned { .. }
-            | _) => Self::Phase {
-                code: other.code(),
-                message: other.to_string(),
+            | P::Unplanned { .. } => Self::Phase {
+                code: error.code(),
+                message: error.to_string(),
+            },
+            _ => Self::Phase {
+                code: error.code(),
+                message: error.to_string(),
             },
         }
     }
@@ -1380,7 +1384,8 @@ impl Error {
                 message,
                 docker_line,
             },
-            C::Cancelled | C::Unknown | _ => Self::Phase { code, message },
+            C::Cancelled | C::Unknown => Self::Phase { code, message },
+            _ => Self::Phase { code, message },
         }
     }
 }
@@ -1397,7 +1402,8 @@ fn docker_kind(kind: phase::DockerKind) -> &'static str {
         phase::DockerKind::Container => "container",
         phase::DockerKind::Volume => "volume",
         phase::DockerKind::Network => "network",
-        phase::DockerKind::Unknown | _ => "object",
+        phase::DockerKind::Unknown => "object",
+        _ => "object",
     }
 }
 
