@@ -20,7 +20,7 @@ mod listen;
 mod tests;
 
 use std::io;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -29,6 +29,7 @@ pub use crate::engine::host::listen::{Holder, listen_holder};
 use crate::engine::keeper::{BeforeGo, Failed, Kept, Launch, spawn};
 use crate::engine::probe::LogLines;
 use crate::error::PhaseError;
+use crate::net;
 use crate::plan::restart::StopSignal;
 use crate::record::process::{self, Identity, System};
 pub use crate::record::process::{
@@ -200,7 +201,7 @@ impl HostRunner for System {
             IpAddr::V6(Ipv6Addr::LOCALHOST),
         ];
         Ok(loopbacks.into_iter().any(|address| {
-            TcpStream::connect_timeout(&SocketAddr::new(address, port), PORT_CONNECT_WAIT).is_ok()
+            net::connect_timeout(&SocketAddr::new(address, port), PORT_CONNECT_WAIT).is_ok()
         }))
     }
 }

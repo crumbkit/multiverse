@@ -149,7 +149,7 @@ fn listening_processes(port: u16) -> Result<Vec<u32>, ProcessError> {
     if inodes.is_empty() {
         return Ok(Vec::new());
     }
-    let entries = std::fs::read_dir("/proc")
+    let entries = crate::record::store::read_dir("/proc")
         .map_err(|error| ProcessError::table(format!("cannot read /proc: {error}")))?;
     let mut holders = Vec::new();
     for entry in entries.flatten() {
@@ -162,7 +162,7 @@ fn listening_processes(port: u16) -> Result<Vec<u32>, ProcessError> {
         };
         // A process that ends meanwhile, or whose descriptors the caller may
         // not read, holds none of the sockets that it can see.
-        let Ok(descriptors) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+        let Ok(descriptors) = crate::record::store::read_dir(format!("/proc/{pid}/fd")) else {
             continue;
         };
         let holds = descriptors.flatten().any(|descriptor| {

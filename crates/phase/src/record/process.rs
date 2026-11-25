@@ -307,7 +307,7 @@ pub(crate) fn read_proc(path: &str) -> Result<ProcRead, ProcessError> {
     use std::io::Read as _;
 
     let mut text = String::new();
-    let read = std::fs::File::open(path)
+    let read = crate::record::store::open(path)
         .and_then(|file| file.take(MOST_PROC_BYTES).read_to_string(&mut text));
     match read {
         Ok(_) => Ok(ProcRead::Text(text)),
@@ -489,7 +489,7 @@ pub fn live_members(group: ProcessGroup) -> Option<Vec<Member>> {
     #[cfg(target_os = "linux")]
     {
         let mut members = Vec::new();
-        for entry in std::fs::read_dir("/proc").ok()? {
+        for entry in crate::record::store::read_dir("/proc").ok()? {
             let Some(pid) = entry
                 .ok()
                 .and_then(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
@@ -587,7 +587,7 @@ fn boot_time() -> Option<SystemTime> {
         let ProcRead::Text(text) = read_proc("/proc/uptime").ok()? else {
             return None;
         };
-        SystemTime::now().checked_sub(uptime(&text)?)
+        crate::clock::wall_now().checked_sub(uptime(&text)?)
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -756,7 +756,7 @@ fn boot_id() -> Result<Option<String>, PhaseError> {
 
     let path = "/proc/sys/kernel/random/boot_id";
     let mut text = String::new();
-    std::fs::File::open(path)
+    crate::record::store::open(path)
         .and_then(|file| file.take(128).read_to_string(&mut text))
         .map_err(|error| PhaseError::ProcessTable {
             message: format!("cannot read {path}: {error}"),

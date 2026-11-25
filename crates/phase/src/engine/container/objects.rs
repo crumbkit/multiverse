@@ -11,7 +11,7 @@
 //!
 
 use std::io::{self, Read as _};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use crate::cancel::Cancel;
@@ -24,6 +24,7 @@ use crate::engine::container::names::{
     ContainerId, Label, Scope, ServiceName, VolumeKey, VolumeName,
 };
 use crate::engine::container::secrets::{IMAGE_CONFIG_FORMAT, ImageConfig};
+use crate::net;
 
 /// How long a readiness probe waits for a published port to close a
 /// connection, which tells a port that nothing inside the container
@@ -622,7 +623,7 @@ pub(crate) fn answers_within(port: u16, timeout: Duration, cancel: &Cancel) -> b
         return false;
     }
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let Ok(mut stream) = TcpStream::connect_timeout(&address, connect) else {
+    let Ok(mut stream) = net::connect_timeout(&address, connect) else {
         return false;
     };
     if timeout.saturating_sub(began.elapsed()) < PROBE_WAIT {

@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::name::{AppName, WorkspaceId};
 use crate::plan::{AppPlan, Permissions, ProcessPlan, RunnerKind, STATE};
+use crate::record::store;
 use crate::source::Source;
 
 #[cfg(all(feature = "sandbox", any(target_os = "macos", target_os = "linux")))]
@@ -855,7 +856,7 @@ fn homebrew_prefix(entry: &Path) -> Option<&'static Path> {
 /// entries of its `etc` named `openssl` or `openssl@<version>`.
 fn openssl_dirs(prefix: &Path) -> Vec<PathBuf> {
     let is_openssl = |name: &str| name == "openssl" || name.starts_with("openssl@");
-    std::fs::read_dir(prefix.join("etc"))
+    store::read_dir(prefix.join("etc"))
         .map(|entries| {
             entries
                 .filter_map(Result::ok)
@@ -1338,7 +1339,7 @@ fn developer_dir(link: &Path, bundles: &[PathBuf], tools: &[PathBuf]) -> Option<
 /// apart from `etc` and `var`.
 fn usr_without_local_data(usr: &Path) -> Vec<PathBuf> {
     let entries = |dir: &Path| -> Vec<PathBuf> {
-        std::fs::read_dir(dir)
+        store::read_dir(dir)
             .map(|entries| {
                 entries
                     .filter_map(Result::ok)
