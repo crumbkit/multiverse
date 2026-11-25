@@ -14,6 +14,8 @@ mod grants;
 mod listen;
 #[path = "support/git.rs"]
 mod support;
+#[path = "support/terminal.rs"]
+mod terminal;
 #[path = "support/ports.rs"]
 mod test_ports;
 
@@ -142,9 +144,13 @@ impl Setup {
 
     fn command(&self, args: &[&str]) -> Command {
         grants::before(&self.root().join("state/mxv"), args);
+        self.with_variables(Command::new(env!("CARGO_BIN_EXE_mxv")).args(args))
+    }
+
+    /// Returns `command` with only the variables of a run of `mxv`.
+    fn with_variables(&self, command: Command) -> Command {
         let root = self.root();
-        Command::new(env!("CARGO_BIN_EXE_mxv"))
-            .args(args)
+        command
             .current_dir(&root)
             .env_clear()
             .env("PATH", PATH)
@@ -172,6 +178,22 @@ impl Setup {
             document,
             String::from_utf8_lossy(&output.stderr).into_owned(),
         )
+    }
+
+    /// Runs `mxv` with `args`, `--no-input` and `--json` at a
+    /// pseudo-terminal, and returns the exit code and the document.
+    fn at_terminal(&self, args: &[&str]) -> (i32, Value) {
+        let mut words = vec![env!("CARGO_BIN_EXE_mxv").to_owned()];
+        words.extend(args.iter().map(|&arg| arg.to_owned()));
+        words.extend(["--no-input".to_owned(), "--json".to_owned()]);
+        let output = self
+            .with_variables(terminal::script(&words))
+            .timeout(Duration::from_secs(60))
+            .output()
+            .unwrap_or_else(|error| panic!("{args:?} at a terminal: {error}"));
+        let text = String::from_utf8_lossy(&output.stdout);
+        let document = terminal::document(&format!("{args:?}"), &text);
+        (output.status.code().unwrap(), document)
     }
 
     fn json(&self, args: &[&str]) -> (i32, Value) {
@@ -988,6 +1010,23 @@ fn an_archive_rerun_takes_away_the_routes_that_an_interrupted_archive_left() {
     );
     let running = setup.caddy_runs();
     assert!(!running.contains("failed"), "{running}");
+}
+
+#[test]
+fn a_real_caddy_that_install_starts_with_no_input_at_a_terminal_leaves_the_trust_to_a_person() {
+    let Some(real) = real() else { return };
+    let setup = Setup::new();
+    real.configure(&setup);
+    let (exit, document) = setup.at_terminal(&["proxy", "install"]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(
+        document["code"], "mxv::proxy::trust_needs_terminal",
+        "{document}"
+    );
+    assert_eq!(document["recovery"]["kind"], "terminal", "{document}");
+    let (exit, status) = setup.json(&["proxy", "status"]);
+    assert_eq!(exit, 0, "{status}");
+    assert!(status.to_string().contains("\"running\":true"), "{status}");
 }
 
 #[test]

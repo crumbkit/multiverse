@@ -46,7 +46,7 @@ pub const PROXY_LOAD_FAILED: Code = Code::from_spelling("mxv::proxy::load_failed
 /// The code of a state directory whose admin socket path is too long.
 pub const PROXY_SOCKET_PATH_TOO_LONG: Code =
     Code::from_spelling("mxv::proxy::socket_path_too_long");
-/// The code of `mxv proxy trust` run without a terminal.
+/// The code of `mxv proxy trust` run without a terminal or with `--no-input`.
 pub const PROXY_TRUST_NEEDS_TERMINAL: Code =
     Code::from_spelling("mxv::proxy::trust_needs_terminal");
 /// The code of a `caddy trust` that ended with a failure.
@@ -124,8 +124,9 @@ pub(crate) const INSTALL: Document<Prose<InstallResult>> = Document::new(
 pub(crate) enum ProxyFailure {
     /// The library could not start Caddy or load the routes.
     Library(ProxyError),
-    /// `mxv proxy trust` or `mxv proxy install` ran without a terminal. It
-    /// holds the words of the command that the person runs.
+    /// `mxv proxy trust` or `mxv proxy install` ran without a terminal, or
+    /// with `--no-input`. It holds the words of the command that the person
+    /// runs.
     TrustNeedsTerminal(&'static [&'static str]),
     /// `mxv proxy check` found rows that are missing or failed.
     CheckFailed {
@@ -775,12 +776,13 @@ pub(crate) fn stop(
 
 /// Asks the person to confirm, then runs `caddy trust`, which adds the
 /// proxy's certificate authority to this machine's trust store. An agent's
-/// shell has no terminal, so it is refused before the proxy is touched.
+/// shell has no terminal, and a caller that passes `--no-input` says that
+/// nobody can answer, so either is refused before the proxy is touched.
 pub(crate) fn trust(
     output: &mut Run,
     environment: &Environment,
 ) -> Result<Prose<TrustResult>, crumbkit::Error> {
-    if !crate::person_can_answer() {
+    if output.no_input() || !crate::person_can_answer() {
         return Err(ProxyFailure::TrustNeedsTerminal(&["proxy", "trust"]).into());
     }
     let proxy = environment.proxy()?;
@@ -918,11 +920,13 @@ fn ran_line(
 /// with the routes of every workspace, or with none, so the person can trust
 /// the authority before any workspace declares a route. It never stops a
 /// Caddy that runs. Running it again changes nothing that is already set up.
-/// Without a terminal it starts Caddy and then refuses to ask.
+/// Without a terminal, or with `--no-input`, it starts Caddy and then
+/// refuses to ask.
 pub(crate) fn install(
     output: &mut Run,
     environment: &Environment,
 ) -> Result<Prose<InstallResult>, crumbkit::Error> {
+    let can_answer = !output.no_input() && crate::person_can_answer();
     let proxy = environment.proxy()?;
     let store = Store::new(environment.records()?);
     let (caddy, version) = proxy.caddy().map_err(fail)?;
@@ -946,7 +950,7 @@ pub(crate) fn install(
         start: &mut start,
         trusted: &mut trusted,
         trust: &mut trust,
-        can_answer: crate::person_can_answer(),
+        can_answer,
     })?;
     Ok(Prose::new(InstallResult {
         caddy: caddy.display().to_string(),
