@@ -783,20 +783,24 @@ impl Proxy {
             (self.settings.http, "proxy_http"),
             (self.settings.https, "proxy_https"),
         ] {
-            ports::can_bind(address).map_err(|error| match error.kind() {
-                io::ErrorKind::AddrInUse => ProxyError::PortHeld {
-                    address,
-                    key,
-                    config: self.settings.config.clone(),
-                },
-                io::ErrorKind::PermissionDenied => ProxyError::PortDenied {
-                    address,
-                    key,
-                    config: self.settings.config.clone(),
-                },
-                _ => ProxyError::StartFailed {
-                    message: format!("{address}: {error}"),
-                },
+            ports::can_bind(address).map_err(|error| {
+                #[expect(clippy::wildcard_enum_match_arm, reason = "std::io::ErrorKind is #[non_exhaustive], and stable Rust cannot name all of its variants")]
+                let refusal = match error.kind() {
+                    io::ErrorKind::AddrInUse => ProxyError::PortHeld {
+                        address,
+                        key,
+                        config: self.settings.config.clone(),
+                    },
+                    io::ErrorKind::PermissionDenied => ProxyError::PortDenied {
+                        address,
+                        key,
+                        config: self.settings.config.clone(),
+                    },
+                    _ => ProxyError::StartFailed {
+                        message: format!("{address}: {error}"),
+                    },
+                };
+                refusal
             })?;
         }
         let (caddy, _) = self.program()?;
@@ -872,6 +876,16 @@ impl Proxy {
                         "phase does not know whether Caddy started".to_owned(),
                     ));
                 }
+                AppOutcome::Started
+                | AppOutcome::AlreadyRunning
+                | AppOutcome::Restarted
+                | AppOutcome::NotStarted
+                | AppOutcome::Stopped
+                | AppOutcome::Untouched
+                | AppOutcome::NotRunning
+                | AppOutcome::KeptRunning { .. }
+                | AppOutcome::StopUncertain
+                | AppOutcome::Left => {}
                 _ => {}
             }
         }

@@ -139,7 +139,7 @@ impl fmt::Display for PreflightResult {
                     match reason {
                         Reason::Unrunnable => "could not start",
                         Reason::TimedOut => "did not finish in time",
-                        _ => "failed",
+                        Reason::Failed | Reason::NotApproved => "failed",
                     }
                 )?,
             }

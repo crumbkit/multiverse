@@ -223,7 +223,9 @@ fn lexical(path: &Path) -> PathBuf {
                 resolved.pop();
             }
             Component::CurDir => {}
-            other => resolved.push(other),
+            other @ (Component::Prefix(_) | Component::RootDir | Component::Normal(_)) => {
+                resolved.push(other)
+            }
         }
     }
     resolved

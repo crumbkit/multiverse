@@ -35,14 +35,14 @@ fn setup() -> Setup {
 
 fn created(setup: &Setup) -> Workspace {
     let name: WorkspaceName = "reading-list".parse().unwrap();
-    match setup
+    let outcome = setup
         .workspaces
         .create(&setup.root, &name, &setup.fixture.clone, Mode::Change)
-        .unwrap()
-    {
-        NewOutcome::Created(workspace) => workspace,
-        other => panic!("{other:?}"),
-    }
+        .unwrap();
+    let NewOutcome::Created(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    workspace
 }
 
 fn commit(checkout: &Path, file: &str, text: &str) {

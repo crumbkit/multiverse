@@ -406,7 +406,12 @@ fn planned_text(planned: Result<ArchivePlanned, Error>) -> String {
             ArchiveRefusal::RenameUnfinished(_) => {
                 "refuse: rename unfinished with the dated name".to_owned()
             }
-            other => format!("refuse: {other:?}"),
+            other @ (ArchiveRefusal::Creating
+            | ArchiveRefusal::MirrorMissing { .. }
+            | ArchiveRefusal::Unusable { .. }
+            | ArchiveRefusal::Unkeepable(_)
+            | ArchiveRefusal::SourceChanged { .. }
+            | ArchiveRefusal::RecordTooLarge { .. }) => format!("refuse: {other:?}"),
         },
     }
 }

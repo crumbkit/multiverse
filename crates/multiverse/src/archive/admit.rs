@@ -1054,7 +1054,11 @@ impl<B: Backend> Workspaces<B> {
                 folder_of(&checkout),
                 "it is a symbolic link, or its repository does not list it",
             )),
-            other => Err(unusable(
+            other @ (RemovalPlan::Dirty { .. }
+            | RemovalPlan::IgnoredFiles { .. }
+            | RemovalPlan::StrayCommits { .. }
+            | RemovalPlan::Unpushed { .. }
+            | RemovalPlan::Stashed { .. }) => Err(unusable(
                 name.as_str(),
                 &format!("the removal plan refused it unexpectedly: {other:?}"),
             )),

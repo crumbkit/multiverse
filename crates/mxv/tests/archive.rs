@@ -2517,7 +2517,7 @@ fn set_groups(value: &mut Value, group: u64) {
             }
         }
         Value::Array(items) => items.iter_mut().for_each(|item| set_groups(item, group)),
-        _ => {}
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => {}
     }
 }
 

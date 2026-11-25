@@ -214,7 +214,16 @@ fn host_row(
 ) -> Result<StatusRow, PhaseError> {
     let state = match host_state(keeper, entry, sources.processes)? {
         ProcessState::Running if entry.is_some_and(observed_ready) => ProcessState::Ready,
-        state => state,
+        state @ (ProcessState::Starting
+        | ProcessState::Ready
+        | ProcessState::Running
+        | ProcessState::Restarting
+        | ProcessState::Paused
+        | ProcessState::Stopping
+        | ProcessState::Stopped
+        | ProcessState::Completed
+        | ProcessState::Exited { .. }
+        | ProcessState::Unknown { .. }) => state,
     };
     let mut row = StatusRow::new(app.clone(), process.clone(), RunnerKind::Host, None, state);
     if let Some(entry) = entry {

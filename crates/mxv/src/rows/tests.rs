@@ -169,7 +169,16 @@ fn the_readme_problem_table_has_a_row_for_every_problem() {
                         repair_text(&Repair::MoveAside(PathBuf::from("PATH")))
                     ),
                 ),
-                problem => (0, text_of_problem(problem, "NAME")),
+                problem @ (Problem::ArchiveUnfinished
+                | Problem::ArchiveNotStarted
+                | Problem::ArchiveWorkspaceRemoved
+                | Problem::ArchivePinsGone
+                | Problem::ArchiveBesideNewerWorkspace
+                | Problem::RenameUnfinished
+                | Problem::RestoreUnfinished
+                | Problem::RestoreStopped
+                | Problem::CheckoutsGone
+                | Problem::CreateUnfinished) => (0, text_of_problem(problem, "NAME")),
             };
             let found = cells
                 .iter()

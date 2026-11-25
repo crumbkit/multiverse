@@ -440,10 +440,11 @@ fn container_problem(body: &str) -> (Option<usize>, ManifestProblem) {
 }
 
 fn invalid_message(body: &str) -> String {
-    match container_problem(body).1 {
-        ManifestProblem::Invalid { message } => message,
-        other => panic!("expected an invalid manifest, got {other:?}"),
-    }
+    let problem = container_problem(body).1;
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("expected an invalid manifest, got {problem:?}");
+    };
+    message
 }
 
 #[test]
@@ -550,26 +551,22 @@ fn a_container_that_publishes_an_undeclared_port_fails_with_its_line() {
 
 #[test]
 fn a_port_that_a_container_publishes_and_a_process_listens_on_fails_as_two_listeners() {
-    let message = match problem(
+    let (_, problem) = problem(
         "ports = [\"db\"]\n\n[containers.db]\nimage = \"busybox:1.37.0\"\nports = { 80 = \"db\" }\n\n[processes.api]\nargv = [\"true\"]\nports = { PORT = \"db\" }\nlisten = \"db\"\n",
-    )
-    .1
-    {
-        ManifestProblem::Invalid { message } => message,
-        other => panic!("{other:?}"),
+    );
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
     };
     assert!(message.contains("at most one listener"), "{message}");
 }
 
 #[test]
 fn a_container_and_a_process_with_one_name_fail_as_invalid() {
-    let message = match problem(
+    let (_, problem) = problem(
         "[containers.db]\nimage = \"busybox:1.37.0\"\n\n[processes.db]\nargv = [\"true\"]\n",
-    )
-    .1
-    {
-        ManifestProblem::Invalid { message } => message,
-        other => panic!("{other:?}"),
+    );
+    let ManifestProblem::Invalid { message } = problem else {
+        panic!("{problem:?}");
     };
     assert!(
         message.contains("both a process and a container"),
@@ -881,14 +878,12 @@ fn a_readiness_check_on_a_log_pattern_needs_no_port() {
     .unwrap();
     let ready = manifest.processes["worker"].ready.as_ref().unwrap();
     assert_eq!(ready.timeout, Duration::from_secs(300));
-    match &ready.check {
-        ReadyCheck::Log(pattern) => {
-            assert_eq!(pattern.as_str(), "^worker ready");
-            assert!(pattern.is_match("worker ready on queue jobs"));
-            assert!(!pattern.is_match("compiling worker ready"));
-        }
-        other => panic!("{other:?}"),
-    }
+    let ReadyCheck::Log(pattern) = &ready.check else {
+        panic!("{:?}", ready.check);
+    };
+    assert_eq!(pattern.as_str(), "^worker ready");
+    assert!(pattern.is_match("worker ready on queue jobs"));
+    assert!(!pattern.is_match("compiling worker ready"));
 }
 
 #[test]
@@ -1371,10 +1366,10 @@ fn workspace_write_message(write: &str) -> String {
     )
     .unwrap_err();
     assert_eq!(error.line, Some(4), "{write}");
-    match error.problem {
-        ManifestProblem::Invalid { message } => message,
-        other => panic!("{write}: {other:?}"),
-    }
+    let ManifestProblem::Invalid { message } = error.problem else {
+        panic!("{write}: {:?}", error.problem);
+    };
+    message
 }
 
 #[test]

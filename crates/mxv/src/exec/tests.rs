@@ -18,10 +18,10 @@ use crate::failures::rendered;
 /// Parses `words` after `mxv` and returns the arguments of `exec`.
 fn parsed(words: &[&str]) -> Result<ExecArgs, clap::Error> {
     let cli = Cli::try_parse_from(std::iter::once("mxv").chain(words.iter().copied()))?;
-    match cli.verb {
-        Verb::Exec(args) => Ok(args),
-        other => panic!("parsed {other:?}"),
-    }
+    let Verb::Exec(args) = cli.verb else {
+        panic!("parsed {:?}", cli.verb);
+    };
+    Ok(args)
 }
 
 #[test]

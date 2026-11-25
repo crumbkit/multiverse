@@ -305,11 +305,19 @@ fn escaped(labels: Value) -> Value {
                 .into_iter()
                 .map(|(key, value)| match value {
                     Value::String(text) => (key, Value::String(literal(&text))),
-                    other => (key, other),
+                    other @ (Value::Null
+                    | Value::Bool(_)
+                    | Value::Number(_)
+                    | Value::Array(_)
+                    | Value::Object(_)) => (key, other),
                 })
                 .collect(),
         ),
-        other => other,
+        other @ (Value::Null
+        | Value::Bool(_)
+        | Value::Number(_)
+        | Value::String(_)
+        | Value::Array(_)) => other,
     }
 }
 
@@ -633,6 +641,8 @@ pub(super) fn keys_sorted(value: &Value) -> Value {
             )
         }
         Value::Array(items) => Value::Array(items.iter().map(keys_sorted).collect()),
-        other => other.clone(),
+        other @ (Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_)) => {
+            other.clone()
+        }
     }
 }

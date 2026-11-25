@@ -544,6 +544,7 @@ impl From<DisposableSource> for SourceRow {
             DisposableSource::Workspace => Self::Workspace,
             // A source that a later library adds counts as the least
             // trusted one.
+            DisposableSource::Manifest => Self::Manifest,
             _ => Self::Manifest,
         }
     }

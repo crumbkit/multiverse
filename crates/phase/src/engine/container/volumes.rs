@@ -81,7 +81,11 @@ pub fn app_volume_labels(phase: &Phase, id: &WorkspaceId, volume: &VolumeKey) ->
             .into_iter()
             .map(|(label, value)| format!("{label}={}", value.as_str().unwrap_or_default()))
             .collect(),
-        _ => Vec::new(),
+        serde_json::Value::Null
+        | serde_json::Value::Bool(_)
+        | serde_json::Value::Number(_)
+        | serde_json::Value::String(_)
+        | serde_json::Value::Array(_) => Vec::new(),
     }
 }
 

@@ -134,7 +134,53 @@ pub fn find(dir: &Path, url: &str, repository: &Path, root: &Path) -> Result<Fou
                     "mxv skipped the template {}, which it cannot use: {message}",
                     path.display()
                 ),
-                other => format!("mxv skipped a template: {other}"),
+                other @ (Error::RepositoryNotFound { .. }
+                | Error::NoOrigin { .. }
+                | Error::EmptyOrigin { .. }
+                | Error::NoDefaultBranch { .. }
+                | Error::ProgramMissing { .. }
+                | Error::CommandFailed { .. }
+                | Error::TimedOut { .. }
+                | Error::StateUnreadable { .. }
+                | Error::Unwritable { .. }
+                | Error::CorruptRecord { .. }
+                | Error::Inaccessible { .. }
+                | Error::MismatchedRecord { .. }
+                | Error::RecordMissing { .. }
+                | Error::StateChanged { .. }
+                | Error::TransitionRefused { .. }
+                | Error::MismatchedCheckout { .. }
+                | Error::WrongLock { .. }
+                | Error::HostMismatch { .. }
+                | Error::OtherHost { .. }
+                | Error::HostDataTooLarge { .. }
+                | Error::HostHookFailed { .. }
+                | Error::HostFileUnkeepable { .. }
+                | Error::HostFilesTooMany { .. }
+                | Error::HostFileTooLarge { .. }
+                | Error::HostFilesTooLarge { .. }
+                | Error::ArchiveUnfinished { .. }
+                | Error::NewerRecord { .. }
+                | Error::ProcessUnstartable { .. }
+                | Error::ProcessTable { .. }
+                | Error::UnsupportedOs { .. }
+                | Error::Busy { .. }
+                | Error::GrantsBusy { .. }
+                | Error::DatedNamesTaken { .. }
+                | Error::StoppedRestoreHoldsOtherFiles { .. }
+                | Error::MirrorBusy { .. }
+                | Error::MirrorFetchFailed { .. }
+                | Error::SshRefused { .. }
+                | Error::TemplateAmbiguous { .. }
+                | Error::ManifestUntrusted { .. }
+                | Error::NoFreePort { .. }
+                | Error::DockerMissing { .. }
+                | Error::DockerComposeMissing { .. }
+                | Error::DockerNoAddressPool { .. }
+                | Error::DockerUnavailable { .. }
+                | Error::DockerFailed { .. }
+                | Error::DockerForeign { .. }
+                | Error::Phase { .. }) => format!("mxv skipped a template: {other}"),
             }),
         }
     }
@@ -328,7 +374,13 @@ fn origins(path: &Path, text: &str) -> Result<Vec<String>, Error> {
             toml::Value::String(origin) if !origin.trim().is_empty() => {
                 origins.push(origin.trim().to_owned());
             }
-            _ => return Err(invalid(path, shape)),
+            toml::Value::String(_)
+            | toml::Value::Integer(_)
+            | toml::Value::Float(_)
+            | toml::Value::Boolean(_)
+            | toml::Value::Datetime(_)
+            | toml::Value::Array(_)
+            | toml::Value::Table(_) => return Err(invalid(path, shape)),
         }
     }
     if origins.is_empty() {

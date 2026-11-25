@@ -54,14 +54,14 @@ fn name() -> WorkspaceName {
 
 impl Hosted {
     fn create(&self, fixture: &Fixture) -> Workspace {
-        match self
+        let outcome = self
             .workspaces
             .create(&self.root, &name(), &fixture.clone, Mode::Change)
-            .unwrap()
-        {
-            NewOutcome::Created(workspace) => workspace,
-            other => panic!("{other:?}"),
-        }
+            .unwrap();
+        let NewOutcome::Created(workspace) = outcome else {
+            panic!("{outcome:?}");
+        };
+        workspace
     }
 
     fn checkout(&self) -> PathBuf {
@@ -69,7 +69,7 @@ impl Hosted {
     }
 
     fn archive(&self) -> Archive {
-        let plan = match self
+        let planned = self
             .workspaces
             .plan_archive(
                 &self.archives,
@@ -77,11 +77,11 @@ impl Hosted {
                 ArchiveOptions::default(),
                 Mode::Change,
             )
-            .unwrap()
-        {
-            ArchivePlanned::Ready(plan) => *plan,
-            other => panic!("{other:?}"),
+            .unwrap();
+        let ArchivePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
         };
+        let plan = *plan;
         match self.workspaces.archive(&self.archives, plan).unwrap() {
             ArchiveOutcome::Retired { mut archive, .. } => {
                 self.workspaces
@@ -94,14 +94,14 @@ impl Hosted {
     }
 
     fn restore(&self) {
-        let plan = match self
+        let planned = self
             .workspaces
             .plan_restore(&self.archives, &name(), RestoreOptions::default())
-            .unwrap()
-        {
-            RestorePlanned::Ready(plan) => *plan,
-            planned => panic!("{planned:?}"),
+            .unwrap();
+        let RestorePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
         };
+        let plan = *plan;
         match self
             .workspaces
             .restore(&self.archives, plan, &self.runs)
@@ -429,12 +429,12 @@ fn set_host_data_refuses_a_workspace_that_another_profile_owns() {
     // mxv's profile reads the same state directory.
     let mxv = hosted(&base, &base.join("mirrors"), &Host::mxv());
 
-    let owner = |error: crate::error::Error| match error {
-        crate::error::Error::OtherHost { workspace, owner } => {
-            assert_eq!(workspace, name());
-            owner.to_string()
-        }
-        other => panic!("{other:?}"),
+    let owner = |error: crate::error::Error| {
+        let crate::error::Error::OtherHost { workspace, owner } = error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(workspace, name());
+        owner.to_string()
     };
     let mxv_data = crate::record::HostData::new(Host::mxv().name().clone(), Default::default());
     let refused = mxv.workspaces.set_host_data(&name(), mxv_data).unwrap_err();
