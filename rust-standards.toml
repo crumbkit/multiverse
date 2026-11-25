@@ -104,10 +104,3 @@ paths = ["crates/mxv/tests/"]
 owner = "the owner"
 reason = "mxv has no test that runs each prompting command without a terminal on standard input and expects a failure code that names the answering flag."
 correction = "Add that test, with `check_effects` in the convention tests, and delete this exception."
-
-[[exception]]
-rule = "CLI-14"
-paths = ["crates/mxv/tests/"]
-owner = "the owner"
-reason = "mxv has no test that runs a command that prints colour at a pseudo-terminal with `NO_COLOR=1` and finds no escape codes."
-correction = "Add that test and delete this exception."
