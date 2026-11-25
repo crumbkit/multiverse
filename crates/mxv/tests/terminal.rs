@@ -16,6 +16,12 @@
 //! any table of the fixture. It also turns off the terminal's output
 //! processing, so a newline reaches the test as one byte, as a pipe passes
 //! it.
+//!
+//! Each run appends `caddy = "/nonexistent/caddy"` to its copy of the XDG
+//! fixture's `config/mxv/config.toml`, so `proxy install`, `proxy check` and
+//! `proxy trust` never find a Caddy on the machine that runs the test, and
+//! never start one. `proxy install` therefore exits with
+//! `mxv::proxy::caddy_missing` in both runs.
 
 #![cfg(test)]
 #![expect(
@@ -46,11 +52,10 @@ mod support;
 
 use crate::fixture::{ENV, Repositories, repositories};
 
-/// The leaves whose examples the test does not run, each with the reason.
-const SKIPPED: &[(&str, &str)] = &[(
-    "proxy install",
-    "Without a terminal the command still starts Caddy where Caddy is installed, and a test must not start a server on the machine that runs it.",
-)];
+/// The line that each run appends to its copy of the fixture's mxv config
+/// file, so no example finds or starts a Caddy on the machine that runs the
+/// test.
+const NO_CADDY: &str = "caddy = \"/nonexistent/caddy\"\n";
 
 /// The variables of every run beside [`ENV`] and the XDG directories: a
 /// `TERM` that names a colour terminal, and a deadband socket that does not
@@ -98,10 +103,6 @@ fn each_example_prints_the_same_bytes_at_a_terminal_as_in_a_pipe() {
     let mut problems = Vec::new();
     let mut ran = 0;
     for leaf in mxv::TOOL.get_help().get_leaves() {
-        let path = leaf.path().join(" ");
-        if SKIPPED.iter().any(|(skipped, _)| *skipped == path) {
-            continue;
-        }
         for example in leaf.get_examples() {
             let words: Vec<&str> = leaf.path().iter().chain(example.words()).copied().collect();
             let line = format!("mxv {}", words.join(" "));
@@ -136,19 +137,6 @@ fn each_example_prints_the_same_bytes_at_a_terminal_as_in_a_pipe() {
     );
 }
 
-#[test]
-fn each_skipped_leaf_names_a_leaf_with_examples() {
-    let leaves = mxv::TOOL.get_help().get_leaves();
-    for (skipped, reason) in SKIPPED {
-        assert!(
-            leaves
-                .iter()
-                .any(|leaf| leaf.path().join(" ") == *skipped && !leaf.get_examples().is_empty()),
-            "the skipped leaf `{skipped}` names no leaf with examples, so its skip, whose reason is \"{reason}\", should go"
-        );
-    }
-}
-
 /// Where a run's standard output and standard error go.
 #[derive(Debug, Clone, Copy)]
 enum Streams {
@@ -169,7 +157,8 @@ enum Stream {
 
 /// Runs mxv with `words` in a fresh copy of `repositories` and of the XDG
 /// fixture, both under `run`, which the run empties first, so two runs of
-/// one example see the same paths.
+/// one example see the same paths. The copy of the mxv config file ends with
+/// [`NO_CADDY`].
 fn run_once(repositories: &Repositories, run: &Path, words: &[&str], streams: Streams) -> Ran {
     for entry in std::fs::read_dir(run).unwrap() {
         std::fs::remove_dir_all(entry.unwrap().path()).unwrap();
@@ -185,6 +174,10 @@ fn run_once(repositories: &Repositories, run: &Path, words: &[&str], streams: St
             std::fs::create_dir_all(xdg.join(name)).unwrap();
         }
     }
+    let config = xdg.join("config/mxv/config.toml");
+    let mut text = std::fs::read_to_string(&config).unwrap();
+    text.push_str(NO_CADDY);
+    std::fs::write(&config, text).unwrap();
     #[expect(
         clippy::disallowed_methods,
         reason = "the test runs the built binary with its streams on pseudo-terminals, which the snapshot harness cannot make"
@@ -244,16 +237,13 @@ fn run_once(repositories: &Repositories, run: &Path, words: &[&str], streams: St
         match receiver.recv_timeout(left) {
             Ok((Stream::Out, bytes)) => stdout = Some(bytes),
             Ok((Stream::Err, bytes)) => stderr = Some(bytes),
-            Err(RecvTimeoutError::Timeout) => stop(child, words),
+            Err(RecvTimeoutError::Timeout) => {
+                fail(child, words, &format!("ran longer than {TIMEOUT:?}"))
+            }
             // A reader thread drops its sender without sending only when
             // it panics on a read error, which its panic names.
             Err(RecvTimeoutError::Disconnected) => {
-                let killed =
-                    rustix::process::kill_process_group(Pid::from_child(&child), Signal::KILL);
-                panic!(
-                    "the test could not read a stream of mxv {}, and stopped its process group: {killed:?}",
-                    words.join(" ")
-                );
+                fail(child, words, "has a stream that the test could not read")
             }
         }
     }
@@ -353,7 +343,7 @@ fn wait(mut child: std::process::Child, deadline: Instant, words: &[&str]) -> Ex
             return status;
         }
         if Instant::now() >= deadline {
-            stop(child, words);
+            fail(child, words, &format!("ran longer than {TIMEOUT:?}"));
         }
         #[expect(
             clippy::disallowed_methods,
@@ -363,18 +353,19 @@ fn wait(mut child: std::process::Child, deadline: Instant, words: &[&str]) -> Ex
     }
 }
 
-/// Stops the process group that `child` leads, which ran longer than
-/// [`TIMEOUT`], and fails the test naming the example. The test has not yet
-/// reaped `child`, so its process id still names its group.
+/// Stops the process group that `child` leads, reaps `child`, and fails the
+/// test naming the example and `why` it failed, such as that it ran longer
+/// than [`TIMEOUT`]. The test has not yet reaped `child`, so its process id
+/// still names its group.
 #[expect(
     clippy::disallowed_types,
     reason = "the test holds the child that it ran on pseudo-terminals, which the library's process module cannot make"
 )]
-fn stop(mut child: std::process::Child, words: &[&str]) -> ! {
+fn fail(mut child: std::process::Child, words: &[&str], why: &str) -> ! {
     let killed = rustix::process::kill_process_group(Pid::from_child(&child), Signal::KILL);
     let reaped = child.wait();
     panic!(
-        "mxv {} ran longer than {TIMEOUT:?}, and the test stopped its process group: {killed:?}, {reaped:?}",
+        "mxv {} {why}, and the test stopped its process group: {killed:?}, {reaped:?}",
         words.join(" ")
     );
 }
