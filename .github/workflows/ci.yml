@@ -1,8 +1,13 @@
 # The pull-request lane and the scheduled advisory check of the Rust
-# standards (BASE-25, BASE-29), from their templates/ci.yml. The map's
-# `lanes` decision in rust-standards.toml records both lanes. The step names
-# are the standards' step names, so a failure reads the same in CI and in
-# AGENTS.md.
+# standards (BASE-25, BASE-29), from their templates/ci.yml. The `lane` job
+# calls the standards' shared lane, so a pull request shows its check as
+# `lane / lane`. The `multiverse` job runs the steps that the shared lane does
+# not: the MSRV check (LIB-4), the container tests of phase and mxv, and the
+# tests of mxv-phase without its sandbox feature. The map's `lanes` decision
+# in rust-standards.toml records every lane, and its `lane-commit` decision
+# records why the `uses:` commit is ahead of `standards.commit`. The step
+# names are the standards' step names, so a failure reads the same in CI and
+# in AGENTS.md.
 name: CI
 
 on:
@@ -30,8 +35,22 @@ env:
 jobs:
   lane:
     if: github.event_name != 'schedule'
-    runs-on: ubuntu-latest
-    # The pull-request lane's time budget (BASE-25).
+    permissions:
+      contents: read # actions/checkout reads the repository.
+    uses: crumbkit/rust-standards/.github/workflows/rust-lane.yml@5ba71ff31c5f5d8e69b34d04bb65bd0177f7ebeb
+    with:
+      # multiverse adopts the library profile, so the lane adds the `rustdoc`
+      # and `features` steps (LIB-2, LIB-5).
+      library: true
+      # The pull-request lane's time budget (BASE-25).
+      timeout-minutes: 15
+
+  # The steps that the shared lane does not run. The tests run again here
+  # with the container test image present, because the shared lane has no
+  # step that pulls it.
+  multiverse:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read # actions/checkout reads the repository.
@@ -47,29 +66,20 @@ jobs:
       - run: rustup toolchain install 1.95.0 --profile minimal
       # install-action runs before rust-cache, so the cache leaves out the
       # tool binaries that install-action downloads on every run.
-      - uses: taiki-e/install-action@3a3daafd3b7f23b8f65d9f5ba2db203fb59b79e2 # v2.90.2
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
         with:
-          tool: cargo-nextest@0.9.140,cargo-deny@0.20.2,cargo-shear@1.14.0,zizmor@1.30.1,cargo-hack@0.6.45
+          tool: cargo-nextest@0.9.140
           fallback: none
-      # The steps that read only the source run first, so a pull request
-      # that fails one of them fails in seconds.
-      - name: format
-        run: cargo fmt --check
-      - name: workflows
-        run: zizmor .
       # Only a run on main saves the cache. A pull request restores the cache
       # that main saved and saves none of its own.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: deny
-        run: cargo deny --locked check bans licenses sources
-      - name: shear
-        run: cargo shear
-      - name: clippy
-        run: cargo clippy --locked --workspace --all-targets --all-features
+      # LIB-4: every target builds on the MSRV with every feature.
+      - name: msrv
+        run: cargo +1.95.0 check --locked --workspace --all-targets --all-features
       # The container tests of phase and mxv run against this runner's
-      # docker daemon and skip when their image is missing, so the lane
+      # docker daemon and skip when their image is missing, so the job
       # pulls it, pinned by digest, and tags it as the tests name it. The
       # digest is the RepoDigest of busybox:1.37.0 on Docker Hub, as
       # `docker image inspect` printed it on 2026-11-05.
@@ -92,19 +102,6 @@ jobs:
         run: >-
           cargo nextest run --locked -p mxv-phase --no-default-features
           -E 'not test(/^engine::container::(runner|exec)::/)'
-      - name: doctests
-        run: cargo test --locked --doc --workspace --all-features
-      - name: rustdoc
-        run: cargo doc --locked --workspace --no-deps
-        env:
-          RUSTDOCFLAGS: -D warnings
-      # LIB-5: every library builds without warnings with no features, with
-      # each feature alone and with all features.
-      - name: features
-        run: cargo hack clippy --locked --workspace --each-feature --all-targets
-      # LIB-4: every target builds on the MSRV with every feature.
-      - name: msrv
-        run: cargo +1.95.0 check --locked --workspace --all-targets --all-features
 
   # Reports whether a pull request changes phase's sandbox, whose Seatbelt
   # tests run only on macOS.
