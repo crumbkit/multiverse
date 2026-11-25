@@ -17,7 +17,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::io::{self, Read as _, Write as _};
-use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,7 @@ use serde_json::{Value, json};
 
 use crate::clock;
 use crate::manifest::Manifest;
+use crate::ports;
 use crate::service::{KeyAttribute, Queue, REGION, ServiceKind, Table};
 
 #[cfg(test)]
@@ -46,7 +47,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 ///
 /// Returns a timed-out error once `deadline` has passed.
 fn wait_until(deadline: Instant) -> io::Result<Duration> {
-    let left = deadline.saturating_duration_since(Instant::now());
+    let left = deadline.saturating_duration_since(clock::now());
     if left.is_zero() {
         return Err(io::Error::new(
             io::ErrorKind::TimedOut,
@@ -302,7 +303,7 @@ impl Request<'_> {
     /// connection, and its body is never chunked.
     fn send_once(&self, deadline: Instant) -> io::Result<Response> {
         let address = SocketAddr::from((Ipv4Addr::LOCALHOST, self.port));
-        let mut stream = TcpStream::connect_timeout(&address, wait_until(deadline)?)?;
+        let mut stream = ports::connect(&address, wait_until(deadline)?)?;
         stream.set_write_timeout(Some(wait_until(deadline)?))?;
         let mut head = format!(
             "{} {} HTTP/1.0\r\nHost: 127.0.0.1:{}\r\nContent-Length: {}\r\n",
@@ -359,7 +360,7 @@ impl Request<'_> {
                 Ok(response) => format!("HTTP status {}: {}", response.status, response.code()),
                 Err(error) => error.to_string(),
             };
-            if Instant::now() + RETRY_INTERVAL >= deadline {
+            if clock::now() + RETRY_INTERVAL >= deadline {
                 return Err(ProvisionError::Unreachable {
                     resource: resource.to_owned(),
                     message: last,

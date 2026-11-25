@@ -9,6 +9,7 @@ use crate::archive::{Archive, ArchiveId, ArchiveRecords, ArchivedRemoval, Archiv
 use crate::backend::Backend;
 use crate::error::Error;
 use crate::name::{MOST_NAME_BYTES, WorkspaceName};
+use crate::store;
 use crate::store::Records;
 use crate::workspaces::{Mode, Workspaces};
 
@@ -186,7 +187,7 @@ impl<B: Backend> Workspaces<B> {
                     .restoring
                     .as_ref()
                     .is_some_and(RestoreMark::made_directory)
-                    || std::fs::read_dir(&archive.path)
+                    || store::read_dir(&archive.path)
                         .is_ok_and(|mut entries| entries.next().is_none());
                 // A dry run refuses as the repair would, before the
                 // repair deletes anything.

@@ -9,13 +9,14 @@
 
 use std::fmt;
 use std::process::ExitStatus;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use phase::{
     AppName, Cancel, ExecIo, ExecRequest, PhaseError, ProcessName, StatusRow, WorkspaceId,
 };
 
 use super::{app, main_process, state_of};
+use crate::clock;
 use crate::error::Error;
 use crate::manifest::Manifest;
 use crate::phase_plan::{self, Built, Unrunnable};
@@ -236,7 +237,7 @@ impl Exec<'_> {
             command,
             ExecIo::Inherit { terminal },
         );
-        let deadline = Instant::now() + EXEC_WAIT;
+        let deadline = clock::now() + EXEC_WAIT;
         match self.runs.phase.exec(
             &self.built.plan,
             request,

@@ -1801,7 +1801,7 @@ impl<B: Backend> Workspaces<B> {
         // undo of a failed `add` keeps it, because the workspace stays.
         crate::marker::ensure(&workspace.path)?;
         let path = workspace.manifest_file();
-        let previous = manifest.map(|_| fs::read(&path).ok());
+        let previous = manifest.map(|_| store::read(&path).ok());
         if let Some(text) = manifest {
             store::replace_file(&path, text.as_bytes())?;
         }
@@ -1917,7 +1917,7 @@ impl<B: Backend> Workspaces<B> {
             }
             Entry::Present => {}
         }
-        let Ok(entries) = fs::read_dir(path) else {
+        let Ok(entries) = store::read_dir(path) else {
             return Ok(Leftover::Kept(
                 "something other than a directory that mxv can read is at the checkout's path"
                     .to_owned(),
@@ -2123,7 +2123,7 @@ impl<B: Backend> Workspaces<B> {
             return Ok(());
         }
         let from = self.backend.exclude_file(&checkout.source)?;
-        let rules = match fs::read(&from) {
+        let rules = match store::read(&from) {
             Ok(rules) => rules,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(source) => return Err(Error::StateUnreadable { path: from, source }),

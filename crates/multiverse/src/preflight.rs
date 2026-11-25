@@ -21,6 +21,7 @@ use std::time::Duration;
 use crate::error::Error;
 use crate::manifest::Secret;
 use crate::process::{Ran, run_command};
+use crate::store;
 use crate::store::write_file_with;
 
 #[cfg(test)]
@@ -86,7 +87,7 @@ impl Approvals {
         let Some(path) = &self.path else {
             return Ok(Vec::new());
         };
-        match std::fs::read_to_string(path) {
+        match store::read_to_string(path) {
             Ok(text) => Ok(text.lines().map(str::to_owned).collect()),
             Err(source) if source.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(source) => Err(Error::StateUnreadable {

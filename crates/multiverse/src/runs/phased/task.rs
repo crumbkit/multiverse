@@ -41,13 +41,14 @@ use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crumbkit_process::{Capture, OverLimit, RunError, RunOptions, Scope};
 use phase::{AppName, Cancel, ExecIo, ExecRequest, PhaseError, ProcessName, WorkspaceId};
 use serde::Deserialize;
 
 use super::exec::EXEC_WAIT;
+use crate::clock;
 use crate::error::Error;
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
@@ -332,7 +333,7 @@ impl PreparedTask<'_> {
             &self.built.plan,
             request,
             &self.built.environment,
-            Instant::now() + EXEC_WAIT,
+            clock::now() + EXEC_WAIT,
             &cancel,
         );
         match ended {

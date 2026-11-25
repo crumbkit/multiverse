@@ -62,6 +62,7 @@ use crate::error::Error;
 use crate::host::Host;
 use crate::mirror::redacted;
 use crate::process::{deadline_in, ran_to_its_end};
+use crate::store;
 
 mod archive;
 mod concealed;
@@ -148,7 +149,7 @@ fn lines(text: &str) -> Vec<String> {
 /// alternates file, or `None` when it shares none.
 fn shared_mirror(checkout: &Path) -> Option<PathBuf> {
     let objects = checkout.join(".git").join("objects");
-    let alternates = fs::read_to_string(objects.join("info").join("alternates")).ok()?;
+    let alternates = store::read_to_string(objects.join("info").join("alternates")).ok()?;
     alternates
         .lines()
         .map(|line| objects.join(line))
@@ -218,7 +219,7 @@ fn module_dirs(modules: &Path) -> Result<Vec<PathBuf>, Error> {
     let mut dirs = Vec::new();
     let mut pending = vec![modules.to_path_buf()];
     while let Some(dir) = pending.pop() {
-        let entries = match fs::read_dir(&dir) {
+        let entries = match store::read_dir(&dir) {
             Ok(entries) => entries,
             Err(error)
                 if matches!(

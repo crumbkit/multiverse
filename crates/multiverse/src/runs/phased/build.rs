@@ -54,6 +54,7 @@ use phase::{Cancel, ExecIo, ExecRequest, PhaseError, VariableName, WorkspaceId};
 
 use super::exec::EXEC_WAIT;
 use super::{app, main_process};
+use crate::clock;
 use crate::error::Error;
 use crate::manifest::{Command, Manifest};
 use crate::name::WorkspaceName;
@@ -363,7 +364,7 @@ impl Builds<'_> {
             &self.built.plan,
             request,
             &self.built.environment,
-            Instant::now() + EXEC_WAIT,
+            clock::now() + EXEC_WAIT,
             self.cancel,
         );
         copier.finish();
@@ -512,7 +513,7 @@ impl Runs {
             admission,
             cancel: &cancel,
             timer: &timer,
-            started: Instant::now(),
+            started: clock::now(),
         };
         for step in &steps {
             match builds.run(step) {

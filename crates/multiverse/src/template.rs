@@ -48,6 +48,7 @@ use std::path::{Path, PathBuf};
 use crate::error::Error;
 use crate::manifest::{MOST_MANIFEST_BYTES, Manifest};
 use crate::mirror::{Origin, redacted};
+use crate::store;
 
 #[cfg(test)]
 mod tests;
@@ -202,7 +203,7 @@ pub fn find(dir: &Path, url: &str, repository: &Path, root: &Path) -> Result<Fou
 /// Returns the `*.toml` files in `dir`, in name order, or none when `dir`
 /// does not exist.
 fn files(dir: &Path) -> Result<Vec<PathBuf>, Error> {
-    let entries = match fs::read_dir(dir) {
+    let entries = match store::read_dir(dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => {
@@ -306,7 +307,7 @@ fn text(path: &Path) -> Result<String, Error> {
             format!("the template is larger than {MOST_MANIFEST_BYTES} bytes"),
         ));
     }
-    fs::read_to_string(path).map_err(|error| invalid(path, error.to_string()))
+    store::read_to_string(path).map_err(|error| invalid(path, error.to_string()))
 }
 
 /// Returns the normalised origins that the `[template]` table of `text`

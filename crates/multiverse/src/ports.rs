@@ -1,6 +1,6 @@
 //! The host ports of a workspace: allocating a free port for each named
-//! port, and checking whether a port is taken or accepts connections. It is
-//! the one module that opens sockets.
+//! port, checking whether a port is taken or accepts connections, and
+//! connecting to a port. It is the one module that opens sockets.
 
 use std::collections::BTreeSet;
 use std::hash::{BuildHasher as _, RandomState};
@@ -80,7 +80,7 @@ pub(crate) fn is_taken(port: u16) -> bool {
 /// holds the address and `PermissionDenied` when the system keeps the port
 /// for privileged programs.
 pub(crate) fn can_bind(address: SocketAddr) -> std::io::Result<()> {
-    if TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).is_ok() {
+    if connect(&address, CONNECT_TIMEOUT).is_ok() {
         return Err(std::io::ErrorKind::AddrInUse.into());
     }
     TcpListener::bind(address).map(drop)
@@ -94,5 +94,16 @@ pub(crate) fn accepts(port: u16) -> bool {
         SocketAddr::from((Ipv6Addr::LOCALHOST, port)),
     ]
     .iter()
-    .any(|address| TcpStream::connect_timeout(address, CONNECT_TIMEOUT).is_ok())
+    .any(|address| connect(address, CONNECT_TIMEOUT).is_ok())
+}
+
+/// Opens a TCP connection to `address`, waiting at most `timeout` for it,
+/// as [`TcpStream::connect_timeout`] does.
+///
+/// # Errors
+///
+/// Returns the error of the connection, such as `ConnectionRefused` when
+/// nothing listens on `address` and `TimedOut` when `timeout` passes.
+pub(crate) fn connect(address: &SocketAddr, timeout: Duration) -> std::io::Result<TcpStream> {
+    TcpStream::connect_timeout(address, timeout)
 }

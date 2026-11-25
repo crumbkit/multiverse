@@ -235,7 +235,7 @@ impl Walk {
             path: dir.to_path_buf(),
             source,
         };
-        for entry in fs::read_dir(dir).map_err(unreadable)? {
+        for entry in store::read_dir(dir).map_err(unreadable)? {
             let entry = entry.map_err(unreadable)?;
             let path = entry.path();
             let shown = format!("{prefix}{}", entry.file_name().to_string_lossy());
@@ -296,7 +296,7 @@ impl Walk {
 /// Syncs the file at `path`, so its bytes survive a power loss before the
 /// record lists it.
 fn sync_file(path: &Path) -> Result<(), Error> {
-    fs::File::open(path)
+    store::open(path)
         .and_then(|file| file.sync_all())
         .map_err(|source| Error::Unwritable {
             path: path.to_path_buf(),

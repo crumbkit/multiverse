@@ -29,6 +29,7 @@ use phase::{
     WorkspaceName as PhaseWorkspace,
 };
 
+use crate::clock;
 use crate::clock::{POLL_INTERVAL, pause};
 use crate::error::Error;
 use crate::host::Host;
@@ -854,7 +855,7 @@ impl Proxy {
         app_plan.processes = vec![process_plan];
         let plan = Plan::new(workspace, id, vec![app_plan])
             .map_err(|error| start_failed(error.to_string()))?;
-        let now = Instant::now();
+        let now = clock::now();
         let report = self
             .phase
             .up(
@@ -889,9 +890,9 @@ impl Proxy {
                 _ => {}
             }
         }
-        let deadline = Instant::now() + START_WAIT;
+        let deadline = clock::now() + START_WAIT;
         while UnixStream::connect(&socket).is_err() {
-            if Instant::now() >= deadline {
+            if clock::now() >= deadline {
                 return Err(start_failed(format!(
                     "the admin socket {} did not appear within {} seconds",
                     socket.display(),
@@ -911,7 +912,7 @@ impl Proxy {
             }
         })?;
         self.phase
-            .down(&id, &Selection::All, Instant::now() + STOP_WAIT)
+            .down(&id, &Selection::All, clock::now() + STOP_WAIT)
             .map_err(|error| ProxyError::StartFailed {
                 message: error.to_string(),
             })?;

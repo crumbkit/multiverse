@@ -22,6 +22,7 @@ use crate::health::{ArchiveCase, archive_case, pins_gone};
 use crate::mirror::recorded_origin;
 use crate::name::WorkspaceName;
 use crate::record::{Made, Workspace, WorkspaceKind, WorkspaceState};
+use crate::store;
 use crate::store::MOST_RECORD_BYTES;
 use crate::workspaces::{Allow, CheckoutRemoval, Fate, Mode, Removal, RemovalPlan, Workspaces};
 
@@ -579,7 +580,7 @@ fn walk_ignored(
         }
     } else if kind.is_dir() {
         let mut names = Vec::new();
-        for entry in fs::read_dir(&on_disk).map_err(unreadable)? {
+        for entry in store::read_dir(&on_disk).map_err(unreadable)? {
             names.push(entry.map_err(unreadable)?.file_name());
         }
         names.sort();

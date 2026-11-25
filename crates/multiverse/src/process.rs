@@ -12,6 +12,7 @@ use crumbkit_process::{
 };
 use phase::host::ProcessError;
 
+use crate::clock;
 use crate::error::Error;
 
 /// Returns every process that has not ended, with its parent, its group,
@@ -154,7 +155,7 @@ pub(crate) fn exit_status(status: Status) -> ExitStatus {
 /// Returns the deadline `wait` from now, or a century from now when `wait`
 /// is too long for an [`Instant`] to hold.
 pub(crate) fn deadline_in(wait: Duration) -> Instant {
-    let start = Instant::now();
+    let start = clock::now();
     start
         .checked_add(wait)
         .or_else(|| start.checked_add(Duration::from_secs(100 * 365 * 24 * 60 * 60)))

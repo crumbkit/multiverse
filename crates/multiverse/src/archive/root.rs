@@ -106,7 +106,8 @@ fn is_own(
     if name == AGENTS_FILE {
         // Opening a FIFO blocks until something writes to it, so only a
         // regular file is read.
-        return is_regular(path) && fs::read(path).is_ok_and(|text| text == generated.as_bytes());
+        return is_regular(path)
+            && store::read(path).is_ok_and(|text| text == generated.as_bytes());
     }
     // `mxv restore` writes the marker again. One that holds bytes, a
     // directory or a link of its name is the person's, and is copied.
@@ -181,7 +182,7 @@ pub(super) fn scan(
 
 /// Reports whether mxv can read the file at `path`.
 fn readable(path: &Path) -> bool {
-    fs::File::open(path).is_ok()
+    store::open(path).is_ok()
 }
 
 /// Adds the entries below `dir`, whose path relative to the workspace's
@@ -199,7 +200,7 @@ fn walk(
         source,
     };
     let mut found = Vec::new();
-    for entry in fs::read_dir(dir).map_err(unreadable)? {
+    for entry in store::read_dir(dir).map_err(unreadable)? {
         found.push(entry.map_err(unreadable)?);
     }
     found.sort_by_key(fs::DirEntry::file_name);

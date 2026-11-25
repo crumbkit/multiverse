@@ -17,6 +17,7 @@ use crate::backend::{
 };
 use crate::error::Error;
 use crate::host::Host;
+use crate::store;
 
 /// The most levels of nested submodules that mxv reads.
 const MOST_SUBMODULE_DEPTH: usize = 8;
@@ -239,7 +240,7 @@ fn walk(
         path: dir.to_path_buf(),
         source,
     };
-    for entry in fs::read_dir(dir).map_err(unreadable)? {
+    for entry in store::read_dir(dir).map_err(unreadable)? {
         let entry = entry.map_err(unreadable)?;
         let path = entry.path();
         let relative = path
@@ -595,7 +596,7 @@ fn rebuilt_key(key: &str) -> bool {
 /// with `.sample` and do nothing.
 fn hooks(dir: &Path) -> Result<Vec<String>, Error> {
     let hooks = dir.join("hooks");
-    let entries = match fs::read_dir(&hooks) {
+    let entries = match store::read_dir(&hooks) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => {
@@ -622,7 +623,7 @@ fn hooks(dir: &Path) -> Result<Vec<String>, Error> {
 
 /// Returns the rules of the exclude file at `path`, without its comments.
 fn exclude_rules(path: &Path) -> Result<Vec<String>, Error> {
-    let text = match fs::read(path) {
+    let text = match store::read(path) {
         Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(source) => {

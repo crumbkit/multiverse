@@ -38,6 +38,7 @@ use crate::backend::Backend;
 use crate::disposable::DisposableSource;
 use crate::error::Error;
 use crate::record::{Checkout, Workspace};
+use crate::store;
 use crate::workspaces::{Entry, Workspaces};
 
 #[cfg(test)]
@@ -282,7 +283,7 @@ fn walk(root: &Path, marks: &BTreeMap<PathBuf, usize>, git: &HashSet<PathBuf>, t
         if !totals.add(&metadata, mark, in_git) {
             continue;
         }
-        let Ok(entries) = fs::read_dir(&path) else {
+        let Ok(entries) = store::read_dir(&path) else {
             continue;
         };
         for entry in entries.flatten() {
@@ -299,7 +300,7 @@ fn git_dir(checkout: &Path) -> Option<PathBuf> {
     if metadata.is_dir() {
         return Some(dot_git);
     }
-    let text = fs::read_to_string(&dot_git).ok()?;
+    let text = store::read_to_string(&dot_git).ok()?;
     let named = text.lines().next()?.strip_prefix("gitdir:")?.trim();
     Some(checkout.join(named))
 }
@@ -324,7 +325,7 @@ pub(crate) fn freeable(root: &Path) -> u64 {
         };
         if metadata.is_dir() {
             total = total.saturating_add(on_disk(&metadata));
-            if let Ok(entries) = fs::read_dir(&path) {
+            if let Ok(entries) = store::read_dir(&path) {
                 stack.extend(entries.flatten().map(|entry| entry.path()));
             }
             continue;

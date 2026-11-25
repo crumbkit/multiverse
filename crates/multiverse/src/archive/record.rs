@@ -2,10 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Read as _};
 use std::path::{Component, Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 use phase::WorkspaceId;
 use phase::random::RANDOM_DEVICE;
@@ -18,6 +18,7 @@ use crate::archive::{
     NO_HOST_ARCHIVE_VERSION, RECORD_FILE, WIP_INDEX,
 };
 use crate::backend::RefHolder;
+use crate::clock;
 use crate::error::Error;
 use crate::host::{Host, HostName};
 use crate::name::WorkspaceName;
@@ -721,7 +722,7 @@ impl Archives {
             archives: Vec::new(),
             problems: Vec::new(),
         };
-        let entries = match fs::read_dir(&self.dir) {
+        let entries = match store::read_dir(&self.dir) {
             Ok(entries) => entries,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(records),
             Err(error) => return Err(unreadable(error)),
@@ -843,7 +844,7 @@ impl Archives {
             path: old.clone(),
             source,
         };
-        for entry in fs::read_dir(&old).map_err(unreadable)? {
+        for entry in store::read_dir(&old).map_err(unreadable)? {
             let name = entry.map_err(unreadable)?.file_name();
             // The record was written new, and the temporary index of the
             // uncommitted work is only read while a checkout retires.
@@ -970,7 +971,7 @@ fn read_record(path: &Path) -> Result<Option<Archive>, Error> {
         path: path.to_path_buf(),
         source,
     };
-    let file = match File::open(path) {
+    let file = match store::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(unreadable(error)),
@@ -1184,7 +1185,7 @@ fn stays_inside(path: &str) -> bool {
 
 /// Returns the seconds since the Unix epoch.
 pub(super) fn now() -> u64 {
-    SystemTime::now()
+    clock::wall_now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |elapsed| elapsed.as_secs())
 }
