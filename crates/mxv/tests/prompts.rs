@@ -5,28 +5,33 @@
 //! [`ANSWERED`] lists each command that takes `--yes`, with the state that
 //! makes it ask, and [`every_command_with_yes_is_listed`] checks the list
 //! against the command tree, so a new command with `--yes` fails here
-//! until it gets a row. Each row's test runs the command twice: with its
-//! standard input from a pipe, as a script or an agent runs it, and with
+//! until it gets a row. One test runs every row twice: with its standard
+//! input from a pipe, as a script or an agent runs it, and with
 //! `--no-input` at a pseudo-terminal that the `script` program opens. Both
 //! runs must fail with `mxv::confirmation::needs_yes`, name `--yes` in the
 //! recovery and change nothing.
 //!
-//! Two questions have no flag that answers them, because only a person may
-//! answer them: the grant of wider permissions that `up` and `restart` ask
-//! for, and the trust of the proxy's certificate authority, which also
-//! raises the system's password prompt. Their tests expect each to fail in
-//! both runs with its own code and a recovery that a person runs at a
-//! terminal. `mxv preflight` asks only at a terminal and never fails for
+//! The comparison with the command tree finds only the prompts that `--yes`
+//! answers. Two questions have no flag that answers them, because only a
+//! person may answer them, so this file lists them by hand: the grant of
+//! wider permissions that `up` and `restart` ask for, and the trust of the
+//! proxy's certificate authority, which also raises the system's password
+//! prompt. Their tests expect each to fail with its own code and a
+//! recovery that a person runs at a terminal. A new prompt without `--yes`
+//! needs a test here that the tree comparison does not ask for. `mxv preflight` asks only at a terminal and never fails for
 //! want of an answer, so it has no test here.
 
 #![cfg(test)]
 
 #[path = "support/git.rs"]
 mod support;
+#[path = "support/terminal.rs"]
+mod terminal;
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use clap::CommandFactory as _;
 use serde_json::Value;
@@ -34,6 +39,11 @@ use snapbox::cmd::Command;
 use tempfile::TempDir;
 
 use crate::support::{GIT_ENV, PATH, git, repository};
+use crate::terminal::{document, script};
+
+/// How long a run may take before the test fails, so a command that blocks
+/// on a question fails the test that runs it instead of the whole job.
+const DEADLINE: Duration = Duration::from_secs(60);
 
 /// Writes `text` to the file at `path`, and creates its directory.
 fn write(path: &Path, text: &str) {
@@ -107,8 +117,9 @@ impl Setup {
             .with_variables(Command::new(env!("CARGO_BIN_EXE_mxv")))
             .args(args)
             .arg("--json")
+            .timeout(DEADLINE)
             .output()
-            .unwrap();
+            .unwrap_or_else(|error| panic!("{args:?}: {error}"));
         let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!(
                 "{args:?}: {error}: {} {}",
@@ -127,49 +138,15 @@ impl Setup {
         let mut words = vec![env!("CARGO_BIN_EXE_mxv").to_owned()];
         words.extend(args.iter().map(|&arg| arg.to_owned()));
         words.extend(["--no-input".to_owned(), "--json".to_owned()]);
-        let output = self.with_variables(script(&words)).output().unwrap();
-        // The terminal joins standard output and standard error, ends lines
-        // with a carriage return, and echoes the end of input that `script`
-        // passes on, so the document is the text between the first brace and
-        // the last.
+        let output = self
+            .with_variables(script(&words))
+            .timeout(DEADLINE)
+            .output()
+            .unwrap_or_else(|error| panic!("{args:?} at a terminal: {error}"));
         let text = String::from_utf8_lossy(&output.stdout);
-        let start = text.find('{');
-        let end = text.rfind('}');
-        let document = match (start, end) {
-            (Some(start), Some(end)) if start < end => serde_json::from_str(&text[start..=end]),
-            _ => serde_json::from_str(""),
-        }
-        .unwrap_or_else(|error| {
-            panic!(
-                "{args:?} at a terminal: {error}: {text} {}",
-                String::from_utf8_lossy(&output.stderr)
-            )
-        });
+        let document = document(&format!("{args:?}"), &text);
         (output.status.code().unwrap(), document)
     }
-}
-
-/// Returns a `script` command that runs `words` at a pseudo-terminal,
-/// prints nothing of its own and exits with the code of the command.
-#[cfg(target_os = "macos")]
-fn script(words: &[String]) -> Command {
-    Command::new("script")
-        .args(["-q", "-e", "/dev/null"])
-        .args(words)
-}
-
-/// Returns a `script` command that runs `words` at a pseudo-terminal,
-/// prints nothing of its own and exits with the code of the command.
-/// util-linux's `script` takes the command as one line of shell, so each
-/// word is quoted.
-#[cfg(not(target_os = "macos"))]
-fn script(words: &[String]) -> Command {
-    let line = words
-        .iter()
-        .map(|word| format!("'{}'", word.replace('\'', r"'\''")))
-        .collect::<Vec<_>>()
-        .join(" ");
-    Command::new("script").args(["-q", "-e", "-c", &line, "/dev/null"])
 }
 
 /// A command that asks before it changes anything and that `--yes`
@@ -296,8 +273,9 @@ const ANSWERED: &[Answered] = &[
 ];
 
 /// Returns the path of each command below `command` that takes `--yes`,
-/// with its names below the root joined by spaces.
-fn with_yes(command: &clap::Command, above: &str, found: &mut BTreeSet<String>) {
+/// with its names below the root joined by spaces, such as `repair`.
+fn with_yes(command: &clap::Command, above: &str) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
     for sub in command.get_subcommands() {
         let path = if above.is_empty() {
             sub.get_name().to_owned()
@@ -307,112 +285,63 @@ fn with_yes(command: &clap::Command, above: &str, found: &mut BTreeSet<String>) 
         if sub.get_arguments().any(|arg| arg.get_long() == Some("yes")) {
             found.insert(path.clone());
         }
-        with_yes(sub, &path, found);
+        found.extend(with_yes(sub, &path));
     }
+    found
 }
 
 #[test]
 fn every_command_with_yes_is_listed() {
     let mut command = mxv::Cli::command();
     command.build();
-    let mut found = BTreeSet::new();
-    with_yes(&command, "", &mut found);
     let listed: BTreeSet<String> = ANSWERED
         .iter()
         .map(|answered| answered.command.to_owned())
         .collect();
-    assert_eq!(found, listed);
+    assert_eq!(with_yes(&command, ""), listed);
 }
 
-/// Runs the row of [`ANSWERED`] whose words are `args` from a pipe and with
-/// `--no-input` at a terminal, and expects each run to ask for `--yes` and
-/// change nothing.
-fn asks_for_yes(args: &[&str]) {
-    let answered = ANSWERED
-        .iter()
-        .find(|answered| answered.args == args)
-        .unwrap_or_else(|| panic!("no row runs {args:?}"));
-    let setup = Setup::new();
-    (answered.prepare)(&setup);
-    let kept = (answered.kept)(&setup);
-    assert!(kept.exists(), "{args:?}: {} is missing", kept.display());
-    for (how, (exit, document)) in [
-        ("from a pipe", setup.piped(args)),
-        ("with --no-input at a terminal", setup.at_terminal(args)),
-    ] {
-        assert_eq!(exit, 1, "{args:?} {how}: {document}");
-        assert_eq!(
-            document["code"], "mxv::confirmation::needs_yes",
-            "{args:?} {how}: {document}"
-        );
-        assert_eq!(
-            document["recovery"]["kind"], "run",
-            "{args:?} {how}: {document}"
-        );
-        let call = document["recovery"]["call"].as_str().unwrap();
-        assert!(
-            call.split(' ').any(|word| word == "--yes"),
-            "{args:?} {how}: {document}"
-        );
-        assert!(kept.exists(), "{args:?} {how}: {} is gone", kept.display());
+#[test]
+fn every_command_with_yes_asks_for_it_without_a_terminal() {
+    for answered in ANSWERED {
+        let args = answered.args;
+        let setup = Setup::new();
+        (answered.prepare)(&setup);
+        let kept = (answered.kept)(&setup);
+        assert!(kept.exists(), "{args:?}: {} is missing", kept.display());
+        for (how, (exit, document)) in [
+            ("from a pipe", setup.piped(args)),
+            ("with --no-input at a terminal", setup.at_terminal(args)),
+        ] {
+            assert_eq!(exit, 1, "{args:?} {how}: {document}");
+            assert_eq!(
+                document["code"], "mxv::confirmation::needs_yes",
+                "{args:?} {how}: {document}"
+            );
+            assert_eq!(
+                document["recovery"]["kind"], "run",
+                "{args:?} {how}: {document}"
+            );
+            let call = document["recovery"]["call"].as_str().unwrap();
+            assert!(
+                call.split(' ').any(|word| word == "--yes"),
+                "{args:?} {how}: {document}"
+            );
+            assert!(kept.exists(), "{args:?} {how}: {} is gone", kept.display());
+        }
     }
 }
 
-#[test]
-fn remove_asks_for_yes_without_a_terminal() {
-    asks_for_yes(&["remove", "triage"]);
-}
-
-#[test]
-fn remove_of_an_archive_asks_for_yes_without_a_terminal() {
-    asks_for_yes(&["remove", "--archived", "triage"]);
-}
-
-#[test]
-fn archive_asks_for_yes_without_a_terminal() {
-    asks_for_yes(&["archive", "-w", "triage"]);
-}
-
-#[test]
-fn restore_asks_for_yes_without_a_terminal() {
-    asks_for_yes(&["restore", "triage"]);
-}
-
-#[test]
-fn sweep_asks_for_yes_without_a_terminal() {
-    asks_for_yes(&["sweep"]);
-}
-
-#[test]
-fn clean_asks_for_yes_without_a_terminal() {
-    asks_for_yes(&["clean", "--all", "--idle", "0s"]);
-}
-
-#[test]
-fn repair_of_a_name_asks_for_yes_without_a_terminal() {
-    asks_for_yes(&["repair", "triage"]);
-}
-
-#[test]
-fn repair_of_orphans_asks_for_yes_without_a_terminal() {
-    asks_for_yes(&["repair", "--orphans"]);
-}
-
-/// Runs `args` from a pipe and with `--no-input` at a terminal, and expects
-/// each run to fail with `code` and a recovery that a person runs at a
-/// terminal, because no flag answers the question.
-fn refuses_for_a_person(setup: &Setup, args: &[&str], code: &str) {
-    for (how, (exit, document)) in [
-        ("from a pipe", setup.piped(args)),
-        ("with --no-input at a terminal", setup.at_terminal(args)),
-    ] {
-        assert_eq!(exit, 1, "{args:?} {how}: {document}");
-        assert_eq!(document["code"], code, "{args:?} {how}: {document}");
-        assert_eq!(
-            document["recovery"]["kind"], "terminal",
-            "{args:?} {how}: {document}"
-        );
-    }
+/// Expects the run of `args`, made `how`, which exited with `exit` and
+/// printed `document`, to fail with `code` and a recovery that a person
+/// runs at a terminal, because no flag answers the question.
+fn refused_for_a_person(args: &[&str], how: &str, (exit, document): (i32, Value), code: &str) {
+    assert_eq!(exit, 1, "{args:?} {how}: {document}");
+    assert_eq!(document["code"], code, "{args:?} {how}: {document}");
+    assert_eq!(
+        document["recovery"]["kind"], "terminal",
+        "{args:?} {how}: {document}"
+    );
 }
 
 #[test]
@@ -423,20 +352,28 @@ fn up_and_restart_refuse_an_ungranted_unit_without_a_terminal() {
         "[processes.idle]\nargv = [\"sleep\", \"60\"]\n",
     );
     for verb in ["up", "restart"] {
-        refuses_for_a_person(
-            &setup,
-            &[verb, "-w", "triage"],
-            "mxv::permissions::not_granted",
+        let args = [verb, "-w", "triage"];
+        let code = "mxv::permissions::not_granted";
+        refused_for_a_person(&args, "from a pipe", setup.piped(&args), code);
+        refused_for_a_person(
+            &args,
+            "with --no-input at a terminal",
+            setup.at_terminal(&args),
+            code,
         );
     }
 }
 
+/// tests/proxy.rs runs `mxv proxy trust` from a pipe, and its real-Caddy
+/// tests run `mxv proxy install` with `--no-input` at a terminal.
 #[test]
-fn proxy_trust_refuses_without_a_terminal() {
+fn proxy_trust_with_no_input_refuses_at_a_terminal() {
     let setup = Setup::new();
-    refuses_for_a_person(
-        &setup,
-        &["proxy", "trust"],
+    let args = ["proxy", "trust"];
+    refused_for_a_person(
+        &args,
+        "with --no-input at a terminal",
+        setup.at_terminal(&args),
         "mxv::proxy::trust_needs_terminal",
     );
 }

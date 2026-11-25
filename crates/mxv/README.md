@@ -1222,14 +1222,14 @@ first and lists the other as not served, with a note that names both.
 
 HTTPS uses Caddy's own certificate authority. Until `mxv proxy trust` or
 `mxv proxy install` runs, a browser warns about the certificate. Both ask
-first, need a terminal and raise the system's own password prompt, so an
-agent never runs them and a person runs one of them once. No flag answers
-their question. Without a terminal, or with `--no-input`, `mxv proxy trust`
-refuses with `mxv::proxy::trust_needs_terminal`, and `mxv proxy install`
-still starts Caddy and then refuses with the same code. A machine with no workspace that declares
-a route gets a Caddy that holds only its certificate authority, so a person
-can trust it before the first route exists. `mxv proxy install` never stops a
-Caddy that runs. The HTTP names work without trust.
+first, need a terminal and raise the system's own password prompt, so an agent
+never runs them and a person runs one of them once. No flag answers their
+question. Without a terminal, or with `--no-input`, `mxv proxy trust` refuses
+with `mxv::proxy::trust_needs_terminal`, and `mxv proxy install` still starts
+Caddy and then refuses with the same code. A machine with no workspace that
+declares a route gets a Caddy that holds only its certificate authority, so a
+person can trust it before the first route exists. `mxv proxy install` never
+stops a Caddy that runs. The HTTP names work without trust.
 
 ### Extra host names
 
