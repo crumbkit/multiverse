@@ -92,13 +92,6 @@ reason = "Cargo.toml sets `wildcard_enum_match_arm` to allow. With the lint at w
 correction = "Name the variants in each arm, or keep an arm with `#[expect]` as adoption.md describes, then set the lint to deny and delete this exception. The task /repos/notes-personal/tasks/multiverse-names-the-variants-in-its-wildcard-enum-match-arm.md in the owner's board tracks it."
 
 [[exception]]
-rule = "CLI-11"
-paths = ["crates/mxv/tests/"]
-owner = "the owner"
-reason = "mxv has no test that runs each example at a pseudo-terminal and in a pipe and compares the bytes."
-correction = "Add that test and delete this exception."
-
-[[exception]]
 rule = "CLI-12"
 paths = ["crates/mxv/tests/"]
 owner = "the owner"
