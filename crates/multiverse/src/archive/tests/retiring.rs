@@ -21,14 +21,13 @@ fn stopped_at(setup: &Setup, step: &'static str) {
 /// Plans and runs the archive of the setup's workspace again, and returns
 /// its record once the workspace is gone, before it is marked archived.
 fn resumed(setup: &Setup) -> Archive {
-    match setup.planned(ArchiveOptions::default()) {
-        ArchivePlanned::Ready(plan) => {
-            match setup.workspaces.archive(&setup.archives, *plan).unwrap() {
-                ArchiveOutcome::Retired { archive, .. } => *archive,
-                ArchiveOutcome::Refused(refusal) => panic!("{refusal:?}"),
-            }
-        }
-        other => panic!("{other:?}"),
+    let planned = setup.planned(ArchiveOptions::default());
+    let ArchivePlanned::Ready(plan) = planned else {
+        panic!("{planned:?}");
+    };
+    match setup.workspaces.archive(&setup.archives, *plan).unwrap() {
+        ArchiveOutcome::Retired { archive, .. } => *archive,
+        ArchiveOutcome::Refused(refusal) => panic!("{refusal:?}"),
     }
 }
 

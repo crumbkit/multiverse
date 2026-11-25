@@ -125,7 +125,7 @@ impl Hosted {
     /// Creates the workspace with the host's data.
     fn create(&self) -> Workspace {
         let setup = &self.setup;
-        match setup
+        let outcome = setup
             .workspaces
             .create_with(
                 &setup.root,
@@ -134,11 +134,11 @@ impl Hosted {
                 Mode::Change,
                 CreateOptions::new(None, Some(data())),
             )
-            .unwrap()
-        {
-            NewOutcome::Created(workspace) => workspace,
-            other => panic!("{other:?}"),
-        }
+            .unwrap();
+        let NewOutcome::Created(workspace) = outcome else {
+            panic!("{outcome:?}");
+        };
+        workspace
     }
 
     fn host_dir(&self) -> PathBuf {
@@ -225,12 +225,10 @@ fn a_restore_with_a_damaged_host_file_refuses_and_keeps_the_archive() {
 
     let outcome = hosted.setup.restore_outcome(false);
 
-    match outcome {
-        RestoreOutcome::Refused(RestoreRefusal::HostFilesDamaged { paths }) => {
-            assert_eq!(paths, ["run.log"]);
-        }
-        other => panic!("{other:?}"),
-    }
+    let RestoreOutcome::Refused(RestoreRefusal::HostFilesDamaged { paths }) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(paths, ["run.log"]);
     assert_eq!(hosted.setup.record().as_ref(), Some(&archive));
     assert!(!hosted.setup.root.join("triage").exists());
     assert!(hosted.setup.workspaces.find(&name()).unwrap().is_none());
@@ -246,12 +244,10 @@ fn a_restore_whose_hook_check_fails_is_undone_and_keeps_the_archive() {
 
     let outcome = hosted.setup.restore_outcome(false);
 
-    match outcome {
-        RestoreOutcome::Refused(RestoreRefusal::HostCheckFailed { message }) => {
-            assert_eq!(message, "the evidence names another commit");
-        }
-        other => panic!("{other:?}"),
-    }
+    let RestoreOutcome::Refused(RestoreRefusal::HostCheckFailed { message }) = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(message, "the evidence names another commit");
     assert_eq!(hosted.setup.record().as_ref(), Some(&archive));
     assert!(!hosted.setup.root.join("triage").exists());
     assert!(hosted.setup.workspaces.find(&name()).unwrap().is_none());
@@ -273,12 +269,10 @@ fn a_restore_without_a_hook_refuses_an_archive_with_host_files_before_writing() 
         .plan_restore(&unhooked, &name(), RestoreOptions::default())
         .unwrap();
 
-    match planned {
-        RestorePlanned::Refused(RestoreRefusal::HostHookMissing { owner }) => {
-            assert_eq!(owner.as_ref(), Some(example().name()));
-        }
-        other => panic!("{other:?}"),
-    }
+    let RestorePlanned::Refused(RestoreRefusal::HostHookMissing { owner }) = planned else {
+        panic!("{planned:?}");
+    };
+    assert_eq!(owner.as_ref(), Some(example().name()));
     assert_eq!(unhooked.read(&name()).unwrap().as_ref(), Some(&archive));
     assert!(!hosted.setup.root.join("triage").exists());
 }
@@ -292,16 +286,15 @@ fn an_archive_whose_save_fails_leaves_the_workspace_whole_and_the_rerun_finishes
 
     let error = hosted.archive_error();
 
-    match &error {
-        Error::HostHookFailed {
-            name: failed,
-            message,
-        } => {
-            assert_eq!(*failed, name());
-            assert_eq!(message, "the evidence store is offline");
-        }
-        other => panic!("{other:?}"),
-    }
+    let Error::HostHookFailed {
+        name: failed,
+        message,
+    } = &error
+    else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*failed, name());
+    assert_eq!(message, "the evidence store is offline");
     assert!(error.to_string().contains("before it moved any checkout"));
     assert_eq!(status(&hosted.setup.checkout()), before);
     let stopped = hosted.setup.record().unwrap();
@@ -332,10 +325,11 @@ fn an_archive_refuses_a_host_symlink_and_more_than_1000_host_files_before_quaran
     let link = hosted.evidence.source.join("latest");
     std::os::unix::fs::symlink("run.log", &link).unwrap();
 
-    match hosted.archive_error() {
-        Error::HostFileUnkeepable { path, .. } => assert_eq!(path, "latest"),
-        other => panic!("{other:?}"),
-    }
+    let error = hosted.archive_error();
+    let Error::HostFileUnkeepable { path, .. } = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(path, "latest");
     assert!(hosted.setup.checkout().join(".git").exists());
 
     fs::remove_file(&link).unwrap();
@@ -347,10 +341,11 @@ fn an_archive_refuses_a_host_symlink_and_more_than_1000_host_files_before_quaran
         );
     }
 
-    match hosted.archive_error() {
-        Error::HostFilesTooMany { count, .. } => assert_eq!(count, MOST_HOST_FILES + 1),
-        other => panic!("{other:?}"),
-    }
+    let error = hosted.archive_error();
+    let Error::HostFilesTooMany { count, .. } = error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(count, MOST_HOST_FILES + 1);
     assert!(hosted.setup.checkout().join(".git").exists());
     let held = quarantine(&hosted.setup.checkout(), &example()).unwrap();
     assert!(!held.exists());

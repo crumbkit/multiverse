@@ -83,7 +83,7 @@ fn name() -> WorkspaceName {
 
 impl Setup {
     fn create(&self) -> Workspace {
-        match self
+        let outcome = self
             .workspaces
             .create(
                 &self.base.join("mxv"),
@@ -91,22 +91,22 @@ impl Setup {
                 &self.fixture.clone,
                 Mode::Change,
             )
-            .unwrap()
-        {
-            NewOutcome::Created(workspace) => workspace,
-            other => panic!("{other:?}"),
-        }
+            .unwrap();
+        let NewOutcome::Created(workspace) = outcome else {
+            panic!("{outcome:?}");
+        };
+        workspace
     }
 
     fn removal(&self) -> Removal {
-        match self
+        let plan = self
             .workspaces
             .plan_removal(&name(), Allow::default())
-            .unwrap()
-        {
-            RemovalPlan::Ready(removal) => removal,
-            other => panic!("{other:?}"),
-        }
+            .unwrap();
+        let RemovalPlan::Ready(removal) = plan else {
+            panic!("{plan:?}");
+        };
+        removal
     }
 
     fn lifecycle(&self) -> Lifecycle<'_, Git> {
@@ -124,7 +124,7 @@ impl Setup {
 
     /// Archives the workspace and finishes the archive.
     fn archive(&self) -> Archive {
-        let plan = match self
+        let planned = self
             .workspaces
             .plan_archive(
                 &self.archives,
@@ -132,11 +132,11 @@ impl Setup {
                 ArchiveOptions::default(),
                 Mode::Change,
             )
-            .unwrap()
-        {
-            ArchivePlanned::Ready(plan) => *plan,
-            other => panic!("{other:?}"),
+            .unwrap();
+        let ArchivePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
         };
+        let plan = *plan;
         match self.workspaces.archive(&self.archives, plan).unwrap() {
             ArchiveOutcome::Retired { mut archive, .. } => {
                 self.workspaces
@@ -151,14 +151,14 @@ impl Setup {
     /// Restores the archive, which rebuilds the workspace and deletes the
     /// archive.
     fn restore(&self) {
-        let plan = match self
+        let planned = self
             .workspaces
             .plan_restore(&self.archives, &name(), RestoreOptions::default())
-            .unwrap()
-        {
-            RestorePlanned::Ready(plan) => *plan,
-            other => panic!("{other:?}"),
+            .unwrap();
+        let RestorePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
         };
+        let plan = *plan;
         match self
             .workspaces
             .restore(&self.archives, plan, &self.runs)
@@ -525,14 +525,14 @@ impl Setup {
     /// Returns the plan of an archive of the workspace, as the person
     /// confirms it.
     fn archive_plan(&self) -> ArchivePlan {
-        match self
+        let planned = self
             .lifecycle()
             .plan_archive(&name(), ArchiveOptions::default())
-            .unwrap()
-        {
-            ArchivePlanned::Ready(plan) => *plan,
-            other => panic!("{other:?}"),
-        }
+            .unwrap();
+        let ArchivePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
+        };
+        *plan
     }
 
     /// Runs the archive of `plan` until the run stops at `step`, as a
@@ -813,14 +813,14 @@ impl Setup {
     /// Returns the plan of a restore of the archive, as the person confirms
     /// it.
     fn restore_plan(&self) -> RestorePlan {
-        match self
+        let planned = self
             .workspaces
             .plan_restore(&self.archives, &name(), RestoreOptions::default())
-            .unwrap()
-        {
-            RestorePlanned::Ready(plan) => *plan,
-            other => panic!("{other:?}"),
-        }
+            .unwrap();
+        let RestorePlanned::Ready(plan) = planned else {
+            panic!("{planned:?}");
+        };
+        *plan
     }
 
     /// Returns what the repair of the name plans, as the person confirms

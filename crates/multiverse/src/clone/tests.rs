@@ -47,14 +47,14 @@ fn setup() -> Setup {
 
 fn created(setup: &Setup, mode: Mode) -> Workspace {
     let name: WorkspaceName = "reading-list".parse().unwrap();
-    match setup
+    let outcome = setup
         .workspaces
         .create(&setup.root, &name, &setup.fixture.clone, mode)
-        .unwrap()
-    {
-        NewOutcome::Created(workspace) | NewOutcome::Planned(workspace) => workspace,
-        other => panic!("{other:?}"),
-    }
+        .unwrap();
+    let (NewOutcome::Created(workspace) | NewOutcome::Planned(workspace)) = outcome else {
+        panic!("{outcome:?}");
+    };
+    workspace
 }
 
 fn globs(texts: &[&str]) -> Vec<PathGlob> {

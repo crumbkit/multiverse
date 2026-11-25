@@ -85,13 +85,6 @@ reason = "clippy.toml leaves out the base entries that 5ba71ff added for the clo
 correction = "Give each effect one owning module per crate, route the production sites through it, put `#[expect]` on each test or test module that uses an effect, add the left-out entries to clippy.toml and delete this exception. The task /repos/notes-personal/tasks/multiverse-gives-the-clock-file-system-network-and-print-mac.md in the owner's board tracks it."
 
 [[exception]]
-rule = "BASE-56"
-items = ["lint:clippy::wildcard_enum_match_arm"]
-owner = "the owner"
-reason = "Cargo.toml sets `wildcard_enum_match_arm` to allow. With the lint at warn on main 11edce18, clippy reported 159 wildcard arms on enums: 82 in production code and 77 in tests. `match_wildcard_for_single_variants` is at deny, and its one firing, in a test, names its variant."
-correction = "Name the variants in each arm, or keep an arm with `#[expect]` as adoption.md describes, then set the lint to deny and delete this exception. The task /repos/notes-personal/tasks/multiverse-names-the-variants-in-its-wildcard-enum-match-arm.md in the owner's board tracks it."
-
-[[exception]]
 rule = "CLI-11"
 paths = ["crates/mxv/tests/"]
 owner = "the owner"

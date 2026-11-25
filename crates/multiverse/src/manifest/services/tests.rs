@@ -11,10 +11,10 @@ fn parse(text: &str) -> Result<Manifest, ManifestError> {
 /// Returns the line and the message of an invalid manifest.
 fn invalid(text: &str) -> (Option<usize>, String) {
     let error = parse(text).unwrap_err();
-    match error.problem {
-        ManifestProblem::Invalid { message } => (error.line, message),
-        other => panic!("expected an invalid manifest, got {other:?}"),
-    }
+    let ManifestProblem::Invalid { message } = error.problem else {
+        panic!("expected an invalid manifest, got {:?}", error.problem);
+    };
+    (error.line, message)
 }
 
 const SERVICES: &str = r#"

@@ -460,7 +460,53 @@ impl Error {
     pub fn ssh_host(&self) -> Option<&str> {
         match self {
             Self::SshRefused { login, .. } => Some(ssh_host(login)),
-            _ => None,
+            Self::RepositoryNotFound { .. }
+            | Self::NoOrigin { .. }
+            | Self::EmptyOrigin { .. }
+            | Self::NoDefaultBranch { .. }
+            | Self::ProgramMissing { .. }
+            | Self::CommandFailed { .. }
+            | Self::TimedOut { .. }
+            | Self::StateUnreadable { .. }
+            | Self::Unwritable { .. }
+            | Self::CorruptRecord { .. }
+            | Self::Inaccessible { .. }
+            | Self::MismatchedRecord { .. }
+            | Self::RecordMissing { .. }
+            | Self::StateChanged { .. }
+            | Self::TransitionRefused { .. }
+            | Self::MismatchedCheckout { .. }
+            | Self::WrongLock { .. }
+            | Self::HostMismatch { .. }
+            | Self::OtherHost { .. }
+            | Self::HostDataTooLarge { .. }
+            | Self::HostHookFailed { .. }
+            | Self::HostFileUnkeepable { .. }
+            | Self::HostFilesTooMany { .. }
+            | Self::HostFileTooLarge { .. }
+            | Self::HostFilesTooLarge { .. }
+            | Self::ArchiveUnfinished { .. }
+            | Self::NewerRecord { .. }
+            | Self::ProcessUnstartable { .. }
+            | Self::ProcessTable { .. }
+            | Self::UnsupportedOs { .. }
+            | Self::Busy { .. }
+            | Self::GrantsBusy { .. }
+            | Self::DatedNamesTaken { .. }
+            | Self::StoppedRestoreHoldsOtherFiles { .. }
+            | Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. }
+            | Self::NoFreePort { .. }
+            | Self::DockerMissing { .. }
+            | Self::DockerComposeMissing { .. }
+            | Self::DockerNoAddressPool { .. }
+            | Self::DockerUnavailable { .. }
+            | Self::DockerFailed { .. }
+            | Self::DockerForeign { .. }
+            | Self::Phase { .. } => None,
         }
     }
 }
@@ -533,7 +579,51 @@ impl Error {
                     detail(message)
                 )
             }
-            _ => Ok(()),
+            Self::RepositoryNotFound { .. }
+            | Self::NoOrigin { .. }
+            | Self::EmptyOrigin { .. }
+            | Self::NoDefaultBranch { .. }
+            | Self::ProgramMissing { .. }
+            | Self::CommandFailed { .. }
+            | Self::TimedOut { .. }
+            | Self::StateUnreadable { .. }
+            | Self::Unwritable { .. }
+            | Self::CorruptRecord { .. }
+            | Self::Inaccessible { .. }
+            | Self::MismatchedRecord { .. }
+            | Self::RecordMissing { .. }
+            | Self::StateChanged { .. }
+            | Self::TransitionRefused { .. }
+            | Self::MismatchedCheckout { .. }
+            | Self::WrongLock { .. }
+            | Self::HostMismatch { .. }
+            | Self::OtherHost { .. }
+            | Self::HostDataTooLarge { .. }
+            | Self::HostHookFailed { .. }
+            | Self::HostFileUnkeepable { .. }
+            | Self::HostFilesTooMany { .. }
+            | Self::HostFileTooLarge { .. }
+            | Self::HostFilesTooLarge { .. }
+            | Self::ArchiveUnfinished { .. }
+            | Self::NewerRecord { .. }
+            | Self::ProcessUnstartable { .. }
+            | Self::ProcessTable { .. }
+            | Self::UnsupportedOs { .. }
+            | Self::Busy { .. }
+            | Self::GrantsBusy { .. }
+            | Self::DatedNamesTaken { .. }
+            | Self::StoppedRestoreHoldsOtherFiles { .. }
+            | Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. }
+            | Self::NoFreePort { .. }
+            | Self::DockerMissing { .. }
+            | Self::DockerComposeMissing { .. }
+            | Self::DockerNoAddressPool { .. }
+            | Self::DockerUnavailable { .. }
+            | Self::DockerFailed { .. }
+            | Self::DockerForeign { .. }
+            | Self::Phase { .. } => Ok(()),
         }
     }
 }
@@ -607,7 +697,48 @@ impl Error {
                 formatter,
                 "the docker {kind} {name} has a name of mxv's, and its labels name another mxv state directory or none, so mxv leaves it alone"
             ),
-            _ => Ok(()),
+            Self::RepositoryNotFound { .. }
+            | Self::NoOrigin { .. }
+            | Self::EmptyOrigin { .. }
+            | Self::NoDefaultBranch { .. }
+            | Self::ProgramMissing { .. }
+            | Self::CommandFailed { .. }
+            | Self::TimedOut { .. }
+            | Self::StateUnreadable { .. }
+            | Self::Unwritable { .. }
+            | Self::CorruptRecord { .. }
+            | Self::Inaccessible { .. }
+            | Self::MismatchedRecord { .. }
+            | Self::RecordMissing { .. }
+            | Self::StateChanged { .. }
+            | Self::TransitionRefused { .. }
+            | Self::MismatchedCheckout { .. }
+            | Self::WrongLock { .. }
+            | Self::HostMismatch { .. }
+            | Self::OtherHost { .. }
+            | Self::HostDataTooLarge { .. }
+            | Self::HostHookFailed { .. }
+            | Self::HostFileUnkeepable { .. }
+            | Self::HostFilesTooMany { .. }
+            | Self::HostFileTooLarge { .. }
+            | Self::HostFilesTooLarge { .. }
+            | Self::ArchiveUnfinished { .. }
+            | Self::NewerRecord { .. }
+            | Self::ProcessUnstartable { .. }
+            | Self::ProcessTable { .. }
+            | Self::UnsupportedOs { .. }
+            | Self::Busy { .. }
+            | Self::GrantsBusy { .. }
+            | Self::DatedNamesTaken { .. }
+            | Self::StoppedRestoreHoldsOtherFiles { .. }
+            | Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::SshRefused { .. }
+            | Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. }
+            | Self::NoFreePort { .. }
+            | Self::Phase { .. } => Ok(()),
         }
     }
 }
@@ -627,7 +758,52 @@ impl Error {
                 path.display(),
                 paths.join(", ")
             ),
-            _ => Ok(()),
+            Self::RepositoryNotFound { .. }
+            | Self::NoOrigin { .. }
+            | Self::EmptyOrigin { .. }
+            | Self::NoDefaultBranch { .. }
+            | Self::ProgramMissing { .. }
+            | Self::CommandFailed { .. }
+            | Self::TimedOut { .. }
+            | Self::StateUnreadable { .. }
+            | Self::Unwritable { .. }
+            | Self::CorruptRecord { .. }
+            | Self::Inaccessible { .. }
+            | Self::MismatchedRecord { .. }
+            | Self::RecordMissing { .. }
+            | Self::StateChanged { .. }
+            | Self::TransitionRefused { .. }
+            | Self::MismatchedCheckout { .. }
+            | Self::WrongLock { .. }
+            | Self::HostMismatch { .. }
+            | Self::OtherHost { .. }
+            | Self::HostDataTooLarge { .. }
+            | Self::HostHookFailed { .. }
+            | Self::HostFileUnkeepable { .. }
+            | Self::HostFilesTooMany { .. }
+            | Self::HostFileTooLarge { .. }
+            | Self::HostFilesTooLarge { .. }
+            | Self::ArchiveUnfinished { .. }
+            | Self::NewerRecord { .. }
+            | Self::ProcessUnstartable { .. }
+            | Self::ProcessTable { .. }
+            | Self::UnsupportedOs { .. }
+            | Self::Busy { .. }
+            | Self::GrantsBusy { .. }
+            | Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::SshRefused { .. }
+            | Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. }
+            | Self::NoFreePort { .. }
+            | Self::DockerMissing { .. }
+            | Self::DockerComposeMissing { .. }
+            | Self::DockerNoAddressPool { .. }
+            | Self::DockerUnavailable { .. }
+            | Self::DockerFailed { .. }
+            | Self::DockerForeign { .. }
+            | Self::Phase { .. } => Ok(()),
         }
     }
 
@@ -654,7 +830,51 @@ impl Error {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
-            _ => Ok(()),
+            Self::RepositoryNotFound { .. }
+            | Self::NoOrigin { .. }
+            | Self::EmptyOrigin { .. }
+            | Self::NoDefaultBranch { .. }
+            | Self::ProgramMissing { .. }
+            | Self::CommandFailed { .. }
+            | Self::TimedOut { .. }
+            | Self::StateUnreadable { .. }
+            | Self::Unwritable { .. }
+            | Self::CorruptRecord { .. }
+            | Self::Inaccessible { .. }
+            | Self::MismatchedRecord { .. }
+            | Self::RecordMissing { .. }
+            | Self::StateChanged { .. }
+            | Self::TransitionRefused { .. }
+            | Self::MismatchedCheckout { .. }
+            | Self::WrongLock { .. }
+            | Self::HostMismatch { .. }
+            | Self::OtherHost { .. }
+            | Self::HostDataTooLarge { .. }
+            | Self::HostHookFailed { .. }
+            | Self::HostFileUnkeepable { .. }
+            | Self::HostFilesTooMany { .. }
+            | Self::HostFileTooLarge { .. }
+            | Self::HostFilesTooLarge { .. }
+            | Self::ArchiveUnfinished { .. }
+            | Self::NewerRecord { .. }
+            | Self::ProcessUnstartable { .. }
+            | Self::ProcessTable { .. }
+            | Self::UnsupportedOs { .. }
+            | Self::Busy { .. }
+            | Self::GrantsBusy { .. }
+            | Self::DatedNamesTaken { .. }
+            | Self::StoppedRestoreHoldsOtherFiles { .. }
+            | Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::SshRefused { .. }
+            | Self::NoFreePort { .. }
+            | Self::DockerMissing { .. }
+            | Self::DockerComposeMissing { .. }
+            | Self::DockerNoAddressPool { .. }
+            | Self::DockerUnavailable { .. }
+            | Self::DockerFailed { .. }
+            | Self::DockerForeign { .. }
+            | Self::Phase { .. } => Ok(()),
         }
     }
 }
@@ -701,7 +921,47 @@ impl Error {
                 "the host's archive hook wrote at least {bytes} bytes for the workspace {name}, more than the {} bytes an archive keeps of a host's files, {what_to_do}",
                 crate::archive::MOST_HOST_FILE_BYTES
             ),
-            _ => Ok(()),
+            Self::RepositoryNotFound { .. }
+            | Self::NoOrigin { .. }
+            | Self::EmptyOrigin { .. }
+            | Self::NoDefaultBranch { .. }
+            | Self::ProgramMissing { .. }
+            | Self::CommandFailed { .. }
+            | Self::TimedOut { .. }
+            | Self::StateUnreadable { .. }
+            | Self::Unwritable { .. }
+            | Self::CorruptRecord { .. }
+            | Self::Inaccessible { .. }
+            | Self::MismatchedRecord { .. }
+            | Self::RecordMissing { .. }
+            | Self::StateChanged { .. }
+            | Self::TransitionRefused { .. }
+            | Self::MismatchedCheckout { .. }
+            | Self::WrongLock { .. }
+            | Self::HostMismatch { .. }
+            | Self::ArchiveUnfinished { .. }
+            | Self::NewerRecord { .. }
+            | Self::ProcessUnstartable { .. }
+            | Self::ProcessTable { .. }
+            | Self::UnsupportedOs { .. }
+            | Self::Busy { .. }
+            | Self::GrantsBusy { .. }
+            | Self::DatedNamesTaken { .. }
+            | Self::StoppedRestoreHoldsOtherFiles { .. }
+            | Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::SshRefused { .. }
+            | Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. }
+            | Self::NoFreePort { .. }
+            | Self::DockerMissing { .. }
+            | Self::DockerComposeMissing { .. }
+            | Self::DockerNoAddressPool { .. }
+            | Self::DockerUnavailable { .. }
+            | Self::DockerFailed { .. }
+            | Self::DockerForeign { .. }
+            | Self::Phase { .. } => Ok(()),
         }
     }
 }
@@ -925,7 +1185,7 @@ impl From<phase::container::ContainerError> for Error {
             },
             Container::Foreign { kind, name, .. } => Self::DockerForeign { kind, name },
             Container::Unreadable { path, source, .. } => Self::StateUnreadable { path, source },
-            other => Self::engine_failed(&other),
+            other @ (Container::Cancelled { .. } | _) => Self::engine_failed(&other),
         }
     }
 }
@@ -969,7 +1229,21 @@ impl Error {
                 process: app.to_string(),
                 source: io::Error::other(reason),
             },
-            other => Self::Phase {
+            other @ (P::NotBuilt { .. }
+            | P::Environment { .. }
+            | P::NewerRecord { .. }
+            | P::GrantsUnreadable { .. }
+            | P::NewerGrants { .. }
+            | P::KeeperUnstartable { .. }
+            | P::SecretOwnerUnknown { .. }
+            | P::VolumeOwner { .. }
+            | P::NotRunnable { .. }
+            | P::UnknownTarget { .. }
+            | P::NotRunning { .. }
+            | P::ExecUnstartable { .. }
+            | P::ExecNeedsTerminal { .. }
+            | P::Unplanned { .. }
+            | _) => Self::Phase {
                 code: other.code(),
                 message: other.to_string(),
             },
@@ -994,7 +1268,54 @@ impl Error {
                 message,
                 docker_line,
             },
-            other => other,
+            other @ (Self::RepositoryNotFound { .. }
+            | Self::NoOrigin { .. }
+            | Self::EmptyOrigin { .. }
+            | Self::NoDefaultBranch { .. }
+            | Self::ProgramMissing { .. }
+            | Self::CommandFailed { .. }
+            | Self::TimedOut { .. }
+            | Self::StateUnreadable { .. }
+            | Self::Unwritable { .. }
+            | Self::CorruptRecord { .. }
+            | Self::Inaccessible { .. }
+            | Self::MismatchedRecord { .. }
+            | Self::RecordMissing { .. }
+            | Self::StateChanged { .. }
+            | Self::TransitionRefused { .. }
+            | Self::MismatchedCheckout { .. }
+            | Self::WrongLock { .. }
+            | Self::HostMismatch { .. }
+            | Self::OtherHost { .. }
+            | Self::HostDataTooLarge { .. }
+            | Self::HostHookFailed { .. }
+            | Self::HostFileUnkeepable { .. }
+            | Self::HostFilesTooMany { .. }
+            | Self::HostFileTooLarge { .. }
+            | Self::HostFilesTooLarge { .. }
+            | Self::ArchiveUnfinished { .. }
+            | Self::NewerRecord { .. }
+            | Self::ProcessUnstartable { .. }
+            | Self::ProcessTable { .. }
+            | Self::UnsupportedOs { .. }
+            | Self::Busy { .. }
+            | Self::GrantsBusy { .. }
+            | Self::DatedNamesTaken { .. }
+            | Self::StoppedRestoreHoldsOtherFiles { .. }
+            | Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::SshRefused { .. }
+            | Self::TemplateInvalid { .. }
+            | Self::TemplateAmbiguous { .. }
+            | Self::ManifestUntrusted { .. }
+            | Self::NoFreePort { .. }
+            | Self::DockerMissing { .. }
+            | Self::DockerComposeMissing { .. }
+            | Self::DockerNoAddressPool { .. }
+            | Self::DockerUnavailable { .. }
+            | Self::DockerFailed { .. }
+            | Self::DockerForeign { .. }
+            | Self::Phase { .. }) => other,
         }
     }
 
@@ -1059,7 +1380,7 @@ impl Error {
                 message,
                 docker_line,
             },
-            _ => Self::Phase { code, message },
+            C::Cancelled | C::Unknown | _ => Self::Phase { code, message },
         }
     }
 }
@@ -1076,7 +1397,7 @@ fn docker_kind(kind: phase::DockerKind) -> &'static str {
         phase::DockerKind::Container => "container",
         phase::DockerKind::Volume => "volume",
         phase::DockerKind::Network => "network",
-        _ => "object",
+        phase::DockerKind::Unknown | _ => "object",
     }
 }
 

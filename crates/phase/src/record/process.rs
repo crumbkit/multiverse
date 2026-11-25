@@ -264,7 +264,7 @@ pub(crate) fn bsd_info_start(info: &[u8]) -> Option<u64> {
             seconds,
             microseconds,
         } => seconds.checked_mul(1_000_000)?.checked_add(microseconds),
-        _ => None,
+        RawStart::Absent | RawStart::Unreadable | RawStart::Ticks(_) => None,
     }
 }
 

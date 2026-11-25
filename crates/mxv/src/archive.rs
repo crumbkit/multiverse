@@ -1822,7 +1822,16 @@ pub(crate) fn row(archive: &Archive) -> WorkspaceRow {
 fn broken_row(broken: &Broken, found: &[Archive]) -> WorkspaceRow {
     let archive = match broken.problem {
         Problem::Unreadable { .. } => None,
-        _ => found
+        Problem::ArchiveUnfinished
+        | Problem::ArchiveNotStarted
+        | Problem::ArchiveWorkspaceRemoved
+        | Problem::ArchivePinsGone
+        | Problem::ArchiveBesideNewerWorkspace
+        | Problem::RenameUnfinished
+        | Problem::RestoreUnfinished
+        | Problem::RestoreStopped
+        | Problem::CheckoutsGone
+        | Problem::CreateUnfinished => found
             .iter()
             .find(|archive| archive.name.as_str() == broken.name),
     };

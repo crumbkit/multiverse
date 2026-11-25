@@ -1601,12 +1601,11 @@ fn up_rewrites_the_secret_files_of_a_container_that_still_runs_and_leaves_it_run
         notes(&report, "db"),
         [Note::secrets_rewritten(&name("db"), name("server"), 2, 0)]
     );
-    match &notes(&report, "db")[0] {
-        Note::SecretsRewritten { message, .. } => {
-            assert_eq!(message, "rewrote 2 secret files of db/server");
-        }
-        other => panic!("{other:?}"),
-    }
+    let note = &notes(&report, "db")[0];
+    let Note::SecretsRewritten { message, .. } = note else {
+        panic!("{note:?}");
+    };
+    assert_eq!(message, "rewrote 2 secret files of db/server");
     assert_eq!(world.containers.starts.borrow().len(), 1);
     assert_eq!(
         *world.containers.rewrites.borrow(),
@@ -1641,13 +1640,12 @@ fn a_secret_rewrite_that_cannot_reach_docker_fails_the_app_without_a_note_for_it
 
     let report = world.up(&plan, &Selection::All, &Env::default()).unwrap();
 
-    match outcome(&report, "db") {
-        AppOutcome::Errored { code, cause, .. } => {
-            assert_eq!(code, "phase::docker::unavailable");
-            assert_eq!(*cause, Some(crate::record::DockerCause::DaemonUnavailable));
-        }
-        other => panic!("{other:?}"),
-    }
+    let reported = outcome(&report, "db");
+    let AppOutcome::Errored { code, cause, .. } = reported else {
+        panic!("{reported:?}");
+    };
+    assert_eq!(code, "phase::docker::unavailable");
+    assert_eq!(*cause, Some(crate::record::DockerCause::DaemonUnavailable));
     assert!(notes(&report, "db").is_empty());
     assert_ne!(outcome(&report, "api"), &AppOutcome::AlreadyRunning);
     assert_eq!(world.containers.starts.borrow().len(), 1);
@@ -1719,11 +1717,12 @@ fn a_secret_rewrite_that_fails_keeps_the_container_running_with_a_note_and_rewri
     );
     let messages: Vec<&str> = notes(&report, "db")
         .iter()
-        .map(|note| match note {
-            Note::SecretsKept { message, .. } | Note::SecretsRewritten { message, .. } => {
-                message.as_str()
-            }
-            other => panic!("{other:?}"),
+        .map(|note| {
+            let (Note::SecretsKept { message, .. } | Note::SecretsRewritten { message, .. }) = note
+            else {
+                panic!("{note:?}");
+            };
+            message.as_str()
         })
         .collect();
     assert_eq!(

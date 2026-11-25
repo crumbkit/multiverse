@@ -283,7 +283,9 @@ impl Op<'_, '_> {
             }
             // `watch` returns ready when its deadline passes first.
             _ if own_deadline > deadline => Step::Uncertain,
-            _ => Step::Failed(StartProblem::not_ready(now() - began)),
+            Outcome::Ready | Outcome::Failing { .. } | Outcome::NotReady { .. } => {
+                Step::Failed(StartProblem::not_ready(now() - began))
+            }
         }
     }
 

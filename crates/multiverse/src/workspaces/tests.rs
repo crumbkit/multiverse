@@ -61,21 +61,22 @@ fn name(text: &str) -> WorkspaceName {
 }
 
 fn created(setup: &Setup, text: &str) -> Workspace {
-    match setup
+    let outcome = setup
         .workspaces
         .create(&setup.root, &name(text), &setup.fixture.clone, Mode::Change)
-        .unwrap()
-    {
-        NewOutcome::Created(workspace) => workspace,
-        other => panic!("{other:?}"),
-    }
+        .unwrap();
+    let NewOutcome::Created(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    workspace
 }
 
 fn ready(setup: &Setup, text: &str, allow: Allow) -> Removal {
-    match setup.workspaces.plan_removal(&name(text), allow).unwrap() {
-        RemovalPlan::Ready(removal) => removal,
-        other => panic!("{other:?}"),
-    }
+    let plan = setup.workspaces.plan_removal(&name(text), allow).unwrap();
+    let RemovalPlan::Ready(removal) = plan else {
+        panic!("{plan:?}");
+    };
+    removal
 }
 
 /// Returns the removal that [`Workspaces::remove`] carried out, and fails

@@ -1115,7 +1115,11 @@ fn check_top_level(errors: &Errors<'_>, text: &str) -> Result<Vec<String>, Manif
                         .iter()
                         .all(|item| matches!(item.get_ref(), toml::de::DeValue::Table(_)))
             }
-            _ => false,
+            toml::de::DeValue::String(_)
+            | toml::de::DeValue::Integer(_)
+            | toml::de::DeValue::Float(_)
+            | toml::de::DeValue::Boolean(_)
+            | toml::de::DeValue::Datetime(_) => false,
         };
         if !tables {
             return Err(errors.at(

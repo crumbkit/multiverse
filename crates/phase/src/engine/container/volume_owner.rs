@@ -268,7 +268,14 @@ fn refused_line(error: &ContainerError) -> Option<&str> {
             message,
             ..
         } => Some(message),
-        _ => None,
+        ContainerError::Missing { .. }
+        | ContainerError::ComposeMissing { .. }
+        | ContainerError::NoAddressPool { .. }
+        | ContainerError::Unavailable { .. }
+        | ContainerError::Failed { .. }
+        | ContainerError::Cancelled { .. }
+        | ContainerError::Foreign { .. }
+        | ContainerError::Unreadable { .. } => None,
     }
 }
 

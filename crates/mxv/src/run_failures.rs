@@ -402,7 +402,7 @@ impl Failure for RunFailure {
                 // The library marks the problem non-exhaustive, so a
                 // problem that a later version adds reads as invalid until
                 // mxv gives it a code of its own.
-                _ => MANIFEST_INVALID,
+                ManifestProblem::Invalid { .. } | _ => MANIFEST_INVALID,
             },
             Self::UnknownProcess { .. } => PROCESS_NOT_FOUND,
             Self::Exited { .. } => PROCESS_EXITED,
@@ -710,7 +710,24 @@ impl RunFailure {
                 }
                 fields
             }
-            _ => Vec::new(),
+            Self::NotCurrent
+            | Self::ManifestMissing { .. }
+            | Self::Manifest(_)
+            | Self::UnknownProcess { .. }
+            | Self::BuildFailed { .. }
+            | Self::BuildUnstartable { .. }
+            | Self::BuildTimedOut { .. }
+            | Self::PortTaken { .. }
+            | Self::UnknownPort { .. }
+            | Self::Exited { .. }
+            | Self::NotReady { .. }
+            | Self::ForeignListener { .. }
+            | Self::DetachedListener { .. }
+            | Self::Unstoppable { .. }
+            | Self::Running { .. }
+            | Self::VolumeRenamed { .. }
+            | Self::Unrunnable { .. }
+            | Self::Volumes { .. } => Vec::new(),
         }
     }
 }
@@ -758,10 +775,9 @@ fn manifest_recovery(error: &ManifestError) -> Recovery {
             "fix the line of {} that the message names",
             shown(&error.path)
         )),
-        _ => Recovery::hint(format!(
-            "fix what the message names in {}",
-            shown(&error.path)
-        )),
+        ManifestProblem::Invalid { .. } | ManifestProblem::Unrunnable { .. } | _ => Recovery::hint(
+            format!("fix what the message names in {}", shown(&error.path)),
+        ),
     }
 }
 
@@ -1097,7 +1113,21 @@ impl RunFailure {
                 Field::new("process", process),
                 Field::new("seconds", *seconds),
             ],
-            _ => Vec::new(),
+            Self::NotCurrent
+            | Self::ManifestMissing { .. }
+            | Self::Manifest(_)
+            | Self::UnknownProcess { .. }
+            | Self::PortTaken { .. }
+            | Self::UnknownPort { .. }
+            | Self::Exited { .. }
+            | Self::NotReady { .. }
+            | Self::ForeignListener { .. }
+            | Self::DetachedListener { .. }
+            | Self::Unstoppable { .. }
+            | Self::Running { .. }
+            | Self::PermissionsNotGranted { .. }
+            | Self::StillNeeded { .. }
+            | Self::Volumes { .. } => Vec::new(),
         }
     }
 
@@ -1158,7 +1188,21 @@ impl RunFailure {
                 formatter,
                 "the build of {process} was still running after {seconds} seconds, so mxv ended it and stopped and started nothing"
             ),
-            _ => Ok(()),
+            Self::NotCurrent
+            | Self::ManifestMissing { .. }
+            | Self::Manifest(_)
+            | Self::UnknownProcess { .. }
+            | Self::PortTaken { .. }
+            | Self::UnknownPort { .. }
+            | Self::Exited { .. }
+            | Self::NotReady { .. }
+            | Self::ForeignListener { .. }
+            | Self::DetachedListener { .. }
+            | Self::Unstoppable { .. }
+            | Self::Running { .. }
+            | Self::PermissionsNotGranted { .. }
+            | Self::StillNeeded { .. }
+            | Self::Volumes { .. } => Ok(()),
         }
     }
 }

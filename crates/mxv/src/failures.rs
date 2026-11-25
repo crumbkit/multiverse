@@ -542,7 +542,54 @@ impl From<Error> for MxvFailure {
             Error::RecordMissing { name } => Self::NotFound {
                 name: name.to_string(),
             },
-            error => Self::Library(error),
+            error @ (Error::RepositoryNotFound { .. }
+            | Error::NoOrigin { .. }
+            | Error::EmptyOrigin { .. }
+            | Error::NoDefaultBranch { .. }
+            | Error::ProgramMissing { .. }
+            | Error::CommandFailed { .. }
+            | Error::TimedOut { .. }
+            | Error::StateUnreadable { .. }
+            | Error::Unwritable { .. }
+            | Error::CorruptRecord { .. }
+            | Error::Inaccessible { .. }
+            | Error::MismatchedRecord { .. }
+            | Error::StateChanged { .. }
+            | Error::TransitionRefused { .. }
+            | Error::MismatchedCheckout { .. }
+            | Error::WrongLock { .. }
+            | Error::HostMismatch { .. }
+            | Error::OtherHost { .. }
+            | Error::HostDataTooLarge { .. }
+            | Error::HostHookFailed { .. }
+            | Error::HostFileUnkeepable { .. }
+            | Error::HostFilesTooMany { .. }
+            | Error::HostFileTooLarge { .. }
+            | Error::HostFilesTooLarge { .. }
+            | Error::ArchiveUnfinished { .. }
+            | Error::NewerRecord { .. }
+            | Error::ProcessUnstartable { .. }
+            | Error::ProcessTable { .. }
+            | Error::UnsupportedOs { .. }
+            | Error::Busy { .. }
+            | Error::GrantsBusy { .. }
+            | Error::DatedNamesTaken { .. }
+            | Error::StoppedRestoreHoldsOtherFiles { .. }
+            | Error::MirrorBusy { .. }
+            | Error::MirrorFetchFailed { .. }
+            | Error::SshRefused { .. }
+            | Error::TemplateInvalid { .. }
+            | Error::TemplateAmbiguous { .. }
+            | Error::ManifestUntrusted { .. }
+            | Error::NoFreePort { .. }
+            | Error::DockerMissing { .. }
+            | Error::DockerComposeMissing { .. }
+            | Error::DockerNoAddressPool { .. }
+            | Error::DockerUnavailable { .. }
+            | Error::DockerFailed { .. }
+            | Error::DockerForeign { .. }
+            | Error::Phase { .. }
+            | _) => Self::Library(error),
         }
     }
 }
@@ -785,7 +832,15 @@ impl Failure for MxvFailure {
                 // The library marks its error non-exhaustive, so a variant
                 // that a later version adds reads as a failed write until
                 // mxv gives it a code of its own.
-                _ => FILE_UNWRITABLE,
+                Error::Unwritable { .. }
+                | Error::RecordMissing { .. }
+                | Error::HostDataTooLarge { .. }
+                | Error::HostHookFailed { .. }
+                | Error::HostFileUnkeepable { .. }
+                | Error::HostFilesTooMany { .. }
+                | Error::HostFileTooLarge { .. }
+                | Error::HostFilesTooLarge { .. }
+                | _ => FILE_UNWRITABLE,
             },
         }
     }
@@ -950,7 +1005,34 @@ impl Failure for MxvFailure {
                 vec![run_removal(name, unmerged(*allow))]
             }
             Self::Stashed { name, allow, .. } => vec![run_removal(name, forced(*allow))],
-            _ => Vec::new(),
+            Self::NotFound { .. }
+            | Self::Replaced { .. }
+            | Self::Creating { .. }
+            | Self::Exists { .. }
+            | Self::BadName { .. }
+            | Self::Changed { .. }
+            | Self::RemoveInUse { .. }
+            | Self::RepairChanged { .. }
+            | Self::RestoreChanged { .. }
+            | Self::Locked { .. }
+            | Self::DirectoryTaken { .. }
+            | Self::Unowned { .. }
+            | Self::BranchExists { .. }
+            | Self::FolderTaken { .. }
+            | Self::BadFolder { .. }
+            | Self::CheckoutNotFound { .. }
+            | Self::Worktrees { .. }
+            | Self::ManifestNeeded { .. }
+            | Self::Incomplete { .. }
+            | Self::ExistingFolderInvalid { .. }
+            | Self::ResumeBlocked { .. }
+            | Self::NoHome
+            | Self::RelativeRoot { .. }
+            | Self::BadConfig { .. }
+            | Self::ConfigUnreadable { .. }
+            | Self::NoLimit { .. }
+            | Self::PartlyCleaned { .. }
+            | Self::Library(_) => Vec::new(),
         }
     }
 
@@ -1240,7 +1322,14 @@ fn library_recovery(error: &Error) -> Recovery {
         } => Recovery::hint(format!(
             "read why the archive record of {name} cannot be read in `mxv list --archived`, then move it aside by hand or run `mxv remove {name}`"
         )),
-        _ => Recovery::Retry,
+        Error::RecordMissing { .. }
+        | Error::HostDataTooLarge { .. }
+        | Error::HostHookFailed { .. }
+        | Error::HostFileUnkeepable { .. }
+        | Error::HostFilesTooMany { .. }
+        | Error::HostFileTooLarge { .. }
+        | Error::HostFilesTooLarge { .. }
+        | _ => Recovery::Retry,
     }
 }
 
@@ -1381,7 +1470,19 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
             Field::new("phase_code", *code),
             Field::new("message", message),
         ],
-        _ => Vec::new(),
+        Error::ProgramMissing { .. }
+        | Error::RecordMissing { .. }
+        | Error::HostDataTooLarge { .. }
+        | Error::HostHookFailed { .. }
+        | Error::HostFileUnkeepable { .. }
+        | Error::HostFilesTooMany { .. }
+        | Error::HostFileTooLarge { .. }
+        | Error::HostFilesTooLarge { .. }
+        | Error::ProcessTable { .. }
+        | Error::UnsupportedOs { .. }
+        | Error::NoFreePort { .. }
+        | Error::DockerMissing { .. }
+        | _ => Vec::new(),
     }
 }
 
@@ -1422,7 +1523,36 @@ fn add_fields(failure: &MxvFailure) -> Vec<Field<'_>> {
             Field::new("path", shown(path)),
             Field::new("reason", reason),
         ],
-        _ => Vec::new(),
+        MxvFailure::NotFound { .. }
+        | MxvFailure::Replaced { .. }
+        | MxvFailure::Creating { .. }
+        | MxvFailure::Exists { .. }
+        | MxvFailure::BadName { .. }
+        | MxvFailure::Dirty { .. }
+        | MxvFailure::IgnoredFiles { .. }
+        | MxvFailure::ManifestDisposable { .. }
+        | MxvFailure::Changed { .. }
+        | MxvFailure::RemoveInUse { .. }
+        | MxvFailure::RepairChanged { .. }
+        | MxvFailure::RestoreChanged { .. }
+        | MxvFailure::StrayCommits { .. }
+        | MxvFailure::Unpushed { .. }
+        | MxvFailure::Stashed { .. }
+        | MxvFailure::Locked { .. }
+        | MxvFailure::DirectoryTaken { .. }
+        | MxvFailure::Unowned { .. }
+        | MxvFailure::BranchExists { .. }
+        | MxvFailure::FolderTaken { .. }
+        | MxvFailure::BadFolder { .. }
+        | MxvFailure::CheckoutNotFound { .. }
+        | MxvFailure::Worktrees { .. }
+        | MxvFailure::NoHome
+        | MxvFailure::RelativeRoot { .. }
+        | MxvFailure::BadConfig { .. }
+        | MxvFailure::ConfigUnreadable { .. }
+        | MxvFailure::NoLimit { .. }
+        | MxvFailure::PartlyCleaned { .. }
+        | MxvFailure::Library(_) => Vec::new(),
     }
 }
 
@@ -1458,7 +1588,36 @@ fn add_message(failure: &MxvFailure) -> String {
             "mxv cannot resume the unfinished checkout {} of the workspace {name}, because {reason}",
             shown(path)
         ),
-        _ => String::new(),
+        MxvFailure::NotFound { .. }
+        | MxvFailure::Replaced { .. }
+        | MxvFailure::Creating { .. }
+        | MxvFailure::Exists { .. }
+        | MxvFailure::BadName { .. }
+        | MxvFailure::Dirty { .. }
+        | MxvFailure::IgnoredFiles { .. }
+        | MxvFailure::ManifestDisposable { .. }
+        | MxvFailure::Changed { .. }
+        | MxvFailure::RemoveInUse { .. }
+        | MxvFailure::RepairChanged { .. }
+        | MxvFailure::RestoreChanged { .. }
+        | MxvFailure::StrayCommits { .. }
+        | MxvFailure::Unpushed { .. }
+        | MxvFailure::Stashed { .. }
+        | MxvFailure::Locked { .. }
+        | MxvFailure::DirectoryTaken { .. }
+        | MxvFailure::Unowned { .. }
+        | MxvFailure::BranchExists { .. }
+        | MxvFailure::FolderTaken { .. }
+        | MxvFailure::BadFolder { .. }
+        | MxvFailure::CheckoutNotFound { .. }
+        | MxvFailure::Worktrees { .. }
+        | MxvFailure::NoHome
+        | MxvFailure::RelativeRoot { .. }
+        | MxvFailure::BadConfig { .. }
+        | MxvFailure::ConfigUnreadable { .. }
+        | MxvFailure::NoLimit { .. }
+        | MxvFailure::PartlyCleaned { .. }
+        | MxvFailure::Library(_) => String::new(),
     }
 }
 

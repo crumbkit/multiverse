@@ -828,7 +828,7 @@ fn caddy_pid(setup: &Setup) -> u64 {
                 .and_then(Value::as_u64)
                 .or_else(|| map.values().find_map(find)),
             Value::Array(items) => items.iter().find_map(find),
-            _ => None,
+            Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => None,
         }
     }
     let (_, status) = setup.json(&["proxy", "status"]);

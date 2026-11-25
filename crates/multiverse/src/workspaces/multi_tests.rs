@@ -46,14 +46,14 @@ fn name(text: &str) -> WorkspaceName {
 }
 
 fn created(setup: &Setup, text: &str, repos: &[Repo]) -> Workspace {
-    match setup
+    let outcome = setup
         .workspaces
         .create_repos(&setup.root, &name(text), repos, Mode::Change, None)
-        .unwrap()
-    {
-        NewOutcome::Created(workspace) => workspace,
-        other => panic!("{other:?}"),
-    }
+        .unwrap();
+    let NewOutcome::Created(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    workspace
 }
 
 fn both(setup: &Setup) -> Vec<Repo> {
@@ -101,13 +101,11 @@ fn two_repositories_with_the_same_name_are_refused_unless_one_gets_another_folde
         .workspaces
         .create_repos(&setup.root, &name("triage"), &repos, Mode::Change, None)
         .unwrap();
-    match outcome {
-        NewOutcome::FolderTaken { folder, repository } => {
-            assert_eq!(folder, "api");
-            assert_eq!(repository, other.clone);
-        }
-        other => panic!("{other:?}"),
-    }
+    let NewOutcome::FolderTaken { folder, repository } = outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(folder, "api");
+    assert_eq!(repository, other.clone);
     assert!(!setup.root.join("triage").exists());
     let renamed = [
         Repo::new(&setup.api.clone),
@@ -322,15 +320,14 @@ fn add_refuses_a_workspace_of_one_checkout_with_a_workspace_manifest_unless_give
             None,
         )
         .unwrap();
-    match outcome {
-        AddOutcome::ManifestNeeded {
-            folder, manifest, ..
-        } => {
-            assert_eq!(folder, "api");
-            assert_eq!(manifest, workspace.manifest_file());
-        }
-        other => panic!("{other:?}"),
-    }
+    let AddOutcome::ManifestNeeded {
+        folder, manifest, ..
+    } = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(folder, "api");
+    assert_eq!(manifest, workspace.manifest_file());
     assert!(!setup.root.join("triage/web").exists());
     assert_eq!(fs::read_to_string(workspace.manifest_file()).unwrap(), text);
 }
@@ -894,15 +891,14 @@ fn another_add_refuses_while_a_checkout_is_unfinished_and_names_it() {
             None,
         )
         .unwrap();
-    match outcome {
-        AddOutcome::Incomplete {
-            folder, repository, ..
-        } => {
-            assert_eq!(folder, "web");
-            assert_eq!(repository, setup.web.clone);
-        }
-        other => panic!("{other:?}"),
-    }
+    let AddOutcome::Incomplete {
+        folder, repository, ..
+    } = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(folder, "web");
+    assert_eq!(repository, setup.web.clone);
     assert!(!setup.root.join("triage/docs").exists());
 }
 
@@ -962,15 +958,14 @@ fn a_removal_refuses_unpushed_work_in_the_second_checkout_and_names_it() {
         .workspaces
         .plan_removal(&name("triage"), Allow::default())
         .unwrap();
-    match plan {
-        RemovalPlan::Unpushed {
-            checkout, commits, ..
-        } => {
-            assert_eq!(checkout, web);
-            assert_eq!(commits, 1);
-        }
-        other => panic!("{other:?}"),
-    }
+    let RemovalPlan::Unpushed {
+        checkout, commits, ..
+    } = plan
+    else {
+        panic!("{plan:?}");
+    };
+    assert_eq!(checkout, web);
+    assert_eq!(commits, 1);
     assert!(workspace.checkouts[0].path.exists());
 }
 

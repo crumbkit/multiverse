@@ -40,7 +40,7 @@ pub(crate) fn process_error(error: ProcessError) -> Error {
                 "{call} for the process {pid} wrote {written} bytes, and mxv reads a struct of {expected}"
             ),
         },
-        other => Error::ProcessTable {
+        other @ (ProcessError::Table { .. } | _) => Error::ProcessTable {
             message: other.to_string(),
         },
     }
@@ -130,7 +130,7 @@ pub(crate) fn run_command(
 pub(crate) fn ran_to_its_end(finished: &ChildFinished) -> Option<ExitStatus> {
     match finished.outcome() {
         Outcome::Ended(status) => Some(exit_status(status)),
-        _ => None,
+        Outcome::TimedOut | Outcome::Stopped(_) | _ => None,
     }
 }
 
