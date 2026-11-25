@@ -97,10 +97,3 @@ paths = ["crates/mxv/tests/"]
 owner = "the owner"
 reason = "mxv has no test that runs each example at a pseudo-terminal and in a pipe and compares the bytes."
 correction = "Add that test and delete this exception."
-
-[[exception]]
-rule = "CLI-14"
-paths = ["crates/mxv/tests/"]
-owner = "the owner"
-reason = "mxv has no test that runs a command that prints colour at a pseudo-terminal with `NO_COLOR=1` and finds no escape codes."
-correction = "Add that test and delete this exception."
