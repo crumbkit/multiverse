@@ -2,7 +2,9 @@
 //! standard input and standard output on one pseudo-terminal and standard
 //! error on another, so mxv sees a terminal as it does in a person's shell.
 //! Help on standard output carries clap's styles at a terminal, and with
-//! `NO_COLOR=1` neither standard stream carries an escape code.
+//! `NO_COLOR=1` it carries no escape code. Help writes nothing to standard
+//! error, so the check there only guards against a future warning that
+//! carries colour.
 //!
 //! The test opens the pseudo-terminals with rustix's safe functions, so it
 //! runs on macOS and Linux and needs no `script` command. Each terminal is
@@ -32,8 +34,13 @@ const TERM: &str = "xterm-256color";
 /// The byte that starts every ANSI escape code.
 const ESCAPE: u8 = 0x1b;
 
-/// A command line whose help mxv prints on standard output.
-const HELP: [&str; 1] = ["--help"];
+/// The most times [`pty`] calls `openpt` before it gives up. On a busy Mac
+/// `openpt` sometimes fails with the unknown error -6 when many processes
+/// open pseudo-terminals at once: 21 of 1,000 runs with 24 at once failed
+/// that way, and none of 300 runs one after another did. The test retries
+/// that one call, which allocates a shared resource, and never the test
+/// itself (BASE-20).
+const OPENPT_ATTEMPTS: usize = 5;
 
 /// One pseudo-terminal: the side the test reads and the side mxv writes to.
 struct Pty {
@@ -46,7 +53,7 @@ struct Pty {
 /// Opens a pseudo-terminal in raw mode, 80 columns wide, with both sides
 /// closed in any program that the test starts.
 fn pty() -> io::Result<Pty> {
-    let main = openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY)?;
+    let main = open_main()?;
     fcntl_setfd(&main, FdFlags::CLOEXEC)?;
     grantpt(&main)?;
     unlockpt(&main)?;
@@ -67,6 +74,22 @@ fn pty() -> io::Result<Pty> {
     };
     tcsetwinsize(&terminal, size)?;
     Ok(Pty { main, terminal })
+}
+
+/// Opens the main side of a new pseudo-terminal, calling `openpt` up to
+/// [`OPENPT_ATTEMPTS`] times and returning the last failure.
+fn open_main() -> io::Result<OwnedFd> {
+    let mut failure = None;
+    for _ in 0..OPENPT_ATTEMPTS {
+        match openpt(OpenptFlags::RDWR | OpenptFlags::NOCTTY) {
+            Ok(main) => return Ok(main),
+            Err(error) => failure = Some(error),
+        }
+    }
+    Err(failure.map_or_else(
+        || io::Error::other("openpt was never called"),
+        io::Error::from,
+    ))
 }
 
 /// Reads everything mxv writes to `main` on a thread of its own, so a run
@@ -138,13 +161,11 @@ fn mxv(args: &[&str], env: &[(&str, &str)]) -> io::Result<Run> {
         .stderr(Stdio::from(err.terminal));
     let stdout = drain(out.main);
     let stderr = drain(err.main);
-    // `output` keeps the standard streams set above, so the bytes go to the
-    // terminals and the threads of `drain` read them.
     #[expect(
         clippy::disallowed_methods,
         reason = "the test waits for the built binary, which prints help and reads no input"
     )]
-    let status = command.output()?.status;
+    let status = command.status()?;
     // The command holds the test's copies of the terminal sides, and
     // dropping it closes them, so reading ends now that mxv has exited.
     drop(command);
@@ -162,7 +183,7 @@ fn has_escape(bytes: &[u8]) -> bool {
 
 #[test]
 fn help_at_a_terminal_carries_colour_so_the_test_reaches_a_real_terminal() {
-    let help = mxv(&HELP, &[]).unwrap();
+    let help = mxv(&["--help"], &[]).unwrap();
 
     assert!(
         help.status.success(),
@@ -178,7 +199,7 @@ fn help_at_a_terminal_carries_colour_so_the_test_reaches_a_real_terminal() {
 
 #[test]
 fn help_at_a_terminal_under_no_color_carries_no_escape_code() {
-    let help = mxv(&HELP, &[("NO_COLOR", "1")]).unwrap();
+    let help = mxv(&["--help"], &[("NO_COLOR", "1")]).unwrap();
 
     assert!(
         help.status.success(),
