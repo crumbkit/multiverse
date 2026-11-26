@@ -3186,6 +3186,21 @@ fn state_of(setup: &Setup, unit: &str) -> String {
         .unwrap_or_else(|| panic!("no unit {unit}"))
 }
 
+/// Polls `mxv status` until the unit `unit` is `exited`, and panics with the
+/// last state it saw once [`MOST_WAIT`] has passed. A unit whose process has
+/// ended shows `stopping` until its keeper records the end, and `down` still
+/// counts a `stopping` unit as running.
+fn wait_until_exited(setup: &Setup, unit: &str) {
+    let mut last = String::new();
+    for () in waiting() {
+        last = state_of(setup, unit);
+        if last == "exited" {
+            return;
+        }
+    }
+    panic!("{unit} was still {last} after {MOST_WAIT:?}");
+}
+
 #[test]
 fn down_keeps_a_named_unit_that_a_running_unit_needs_and_stops_one_that_nothing_needs() {
     let setup = Setup::new();
@@ -3231,12 +3246,7 @@ fn down_stops_a_unit_whose_only_dependant_has_exited() {
     setup.workspace("triage", &store_and_api("echo ready; sleep 1; exit 0"));
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
-    for () in waiting() {
-        if state_of(&setup, "api") != "running" {
-            break;
-        }
-    }
-    assert_ne!(state_of(&setup, "api"), "running");
+    wait_until_exited(&setup, "api");
 
     let (exit, document) = setup.json(&["down", "-w", "triage", "store"]);
 
@@ -3253,12 +3263,7 @@ fn down_of_a_unit_that_exited_while_a_unit_that_needs_it_runs_succeeds_and_repor
     );
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_eq!(exit, 0, "{document}");
-    for () in waiting() {
-        if state_of(&setup, "store") != "running" {
-            break;
-        }
-    }
-    assert_ne!(state_of(&setup, "store"), "running");
+    wait_until_exited(&setup, "store");
     let api = pid_of(&setup, "triage", "api");
 
     let (exit, document) = setup.json(&["down", "-w", "triage", "store"]);
