@@ -55,7 +55,7 @@ use crate::name::WorkspaceName;
 use crate::phase_plan::{self, Built, BuiltTask, TaskEntry, Unrunnable};
 use crate::process::{deadline_in, ran_to_its_end};
 use crate::record::Workspace;
-use crate::runs::{Admission, Asked, Runs, WorkspaceLock};
+use crate::runs::{Admission, Asked, ProcessNote, Runs, WorkspaceLock};
 use crate::service::Service;
 use crate::store::Store;
 
@@ -289,6 +289,9 @@ pub struct PreparedTask<'a> {
     /// The workspace's name, which the limiter shows for the job as its
     /// label and as its workspace.
     workspace: WorkspaceName,
+    /// What the plan found about each unit, by unit name, such as the
+    /// provided variables it left unset.
+    notes: BTreeMap<String, Vec<ProcessNote>>,
 }
 
 impl std::fmt::Debug for PreparedTask<'_> {
@@ -303,6 +306,14 @@ impl std::fmt::Debug for PreparedTask<'_> {
 }
 
 impl PreparedTask<'_> {
+    /// Returns what the plan found about each unit of the workspace, by
+    /// unit name, such as the provided variables it left unset. The caller
+    /// shows them before it runs the task.
+    #[must_use]
+    pub const fn notes(&self) -> &BTreeMap<String, Vec<ProcessNote>> {
+        &self.notes
+    }
+
     /// Waits for a place from `admission`, runs the task with the caller's
     /// standard streams and the place's variables, ends the place once, and
     /// returns how the task ended. `terminal` is what `mxv exec` passes for
@@ -422,9 +433,11 @@ impl Runs {
             Ok(built) => built,
             Err(unrunnable) => return Ok(Err(unrunnable)),
         };
+        let notes = built.notes.clone();
         Ok(Ok(PreparedTask {
             runs: self,
             id,
+            notes,
             built,
             app,
             process,

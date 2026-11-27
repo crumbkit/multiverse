@@ -469,6 +469,20 @@ pub(crate) fn run_start(
         unit: unrunnable.unit,
         message: unrunnable.message,
     })?;
+    // The plan's notes, such as each provided variable that it left unset,
+    // go on standard error before the task starts, so they come before
+    // anything the task prints.
+    crate::say(
+        &prepared
+            .notes()
+            .iter()
+            .flat_map(|(unit, notes)| {
+                notes
+                    .iter()
+                    .map(move |note| format!("info: {unit}: {}", note.message()))
+            })
+            .collect::<Vec<_>>(),
+    );
     // A person who runs a task in a workspace is using it, so mxv touches
     // it while the task runs.
     let _toucher = runs.keep_touched(&record.name, processes::TOUCH_EVERY);
