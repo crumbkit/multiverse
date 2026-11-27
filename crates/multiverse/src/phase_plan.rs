@@ -696,43 +696,92 @@ fn assemble(
 ///
 /// # Errors
 ///
-/// Returns [`Unrunnable`] as [`build`] does for a unit whose name, `cwd` or
-/// permissions phase cannot run, and for a starmap file that cannot be read
-/// or does not parse. Once every unit's file is read, it returns one
+/// Returns [`Unrunnable`] of [`UnrunnableKind::StarmapInvalid`] for the
+/// first starmap file that cannot be read or does not parse, alone. Once
+/// every unit's file is read, it returns one
 /// [`UnrunnableKind::ProvidedUnknown`] that lists the wrong binds of every
-/// unit.
+/// unit. Only when no bind is wrong does it return [`Unrunnable`] as
+/// [`build`] does for the first unit whose name, `cwd` or permissions
+/// phase cannot run, so a wrong bind is reported first, as it was when the
+/// check stopped at the first unit with one.
 pub(crate) fn permissions(
     inputs: &Inputs<'_>,
     units: &[String],
 ) -> Result<BTreeMap<AppName, phase::Grant>, Unrunnable> {
     let mut requested = BTreeMap::new();
     let mut refused = Vec::new();
+    let mut unrunnable = None;
     for name in units {
         let Some(process) = inputs.manifest.processes.get(name) else {
             continue;
         };
-        let (source, _) = placed(inputs, name, process)?;
-        // A wrong bind in the process's starmap file fails below, before
-        // any build runs or any port is given, together with the wrong
-        // binds of every other process.
-        refused.extend(provided::check(inputs, name, process)?);
-        let permissions = process
-            .permissions
-            .as_ref()
-            .map(|permissions| {
-                let mut granted = app_permissions(name, permissions, &source)?;
-                granted
-                    .connect
-                    .extend(service_connects(inputs.manifest, process));
-                Ok(granted)
-            })
-            .transpose()?;
-        requested.insert(app_name(name)?, phase::Grant::of(permissions.as_ref()));
+        // A wrong bind in the process's starmap file fails after the
+        // loop, before any build runs or any port is given, together with
+        // the wrong binds of every other process.
+        match permission(inputs, name, process, &mut refused) {
+            Ok((app, grant)) => {
+                requested.insert(app, grant);
+            }
+            Err(Held::Invalid(failure)) => return Err(failure),
+            Err(Held::Unrunnable(failure)) => {
+                unrunnable.get_or_insert(failure);
+            }
+        }
     }
-    if let Some(failure) = provided::refusal(refused) {
+    if let Some(failure) = provided::refusal(refused).or(unrunnable) {
         return Err(failure);
     }
     Ok(requested)
+}
+
+/// A failure of one unit in [`permissions`]: a starmap file that cannot be
+/// read or does not parse, which the check returns at once, or another
+/// problem, which waits until the check has read every unit's binds.
+enum Held {
+    /// A starmap file that cannot be read or does not parse.
+    Invalid(Unrunnable),
+    /// A unit whose name, `cwd` or permissions phase cannot run.
+    Unrunnable(Unrunnable),
+}
+
+/// Returns the app name and grant of the process `name`, after adding the
+/// wrong binds of its starmap file to `refused`.
+///
+/// # Errors
+///
+/// Returns [`Held::Invalid`] for a starmap file that cannot be read or
+/// does not parse, and [`Held::Unrunnable`] for a name, `cwd` or
+/// permissions that phase cannot run.
+fn permission(
+    inputs: &Inputs<'_>,
+    name: &str,
+    process: &Process,
+    refused: &mut Vec<RefusedBind>,
+) -> Result<(AppName, phase::Grant), Held> {
+    let (source, _) = placed(inputs, name, process).map_err(Held::Unrunnable)?;
+    refused.extend(provided::check(inputs, name, process).map_err(|failure| {
+        if matches!(failure.kind, UnrunnableKind::StarmapInvalid { .. }) {
+            Held::Invalid(failure)
+        } else {
+            Held::Unrunnable(failure)
+        }
+    })?);
+    let permissions = process
+        .permissions
+        .as_ref()
+        .map(|permissions| {
+            let mut granted = app_permissions(name, permissions, &source)?;
+            granted
+                .connect
+                .extend(service_connects(inputs.manifest, process));
+            Ok(granted)
+        })
+        .transpose()
+        .map_err(Held::Unrunnable)?;
+    Ok((
+        app_name(name).map_err(Held::Unrunnable)?,
+        phase::Grant::of(permissions.as_ref()),
+    ))
 }
 
 /// Returns the app name of the unit `name`.

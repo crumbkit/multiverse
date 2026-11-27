@@ -959,11 +959,110 @@ fn an_optional_bind_to_a_unit_that_a_present_checkout_lacks_is_listed_beside_a_r
     );
 }
 
+/// Returns the result of the permissions check of `units`, with no host
+/// ports given, in a workspace whose merged manifest is `manifest` and whose files
+/// below the shelf's checkout are `files`, each a relative path and its
+/// text.
+fn permissions_of(
+    manifest: &Manifest,
+    files: &[(&str, &str)],
+    units: &[&str],
+) -> Result<BTreeMap<AppName, phase::Grant>, Unrunnable> {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("shelf/catalogue")).unwrap();
+    for (path, body) in files {
+        write(dir.path().join("shelf").join(path), body);
+    }
+    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let none = BTreeMap::new();
+    let shelf = dir.path().join("shelf");
+    let inputs = Inputs {
+        manifest,
+        workspace: &workspace,
+        id: &id,
+        checkout: &shelf,
+        roots: roots_of(dir.path()),
+        ports: &none,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &CallerEnvironment::default(),
+        own_command: None,
+        urls: ProxyUrls::default(),
+        read_starmaps: true,
+    };
+    let units: Vec<String> = units.iter().map(|unit| (*unit).to_owned()).collect();
+    permissions(&inputs, &units)
+}
+
+/// A starmap file that binds the required `LEDGER_URL` to the checkout
+/// `ledger`, which the workspace does not have.
+fn ledger_bind() -> String {
+    variable(
+        "LEDGER_URL",
+        r#"{ provided = "multiverse/url", app = "ledger/api" }"#,
+        false,
+    )
+}
+
 #[test]
-fn the_permissions_check_reports_an_invalid_starmap_file_alone() {
-    let failure = permissions_failure("[variables.BROKEN]\npurpose = 3\n");
-    assert!(
-        matches!(&failure.kind, UnrunnableKind::StarmapInvalid { file } if file.ends_with("shelf/starmap.toml")),
+fn the_permissions_check_reports_an_invalid_starmap_file_alone_beside_another_units_wrong_bind() {
+    let manifest = merged();
+    let bind = ledger_bind();
+    let files = [
+        ("catalogue/starmap.toml", bind.as_str()),
+        ("starmap.toml", "[variables.BROKEN]\npurpose = 3\n"),
+    ];
+    for units in [
+        ["catalogue-api", "shelf-web"],
+        ["shelf-web", "catalogue-api"],
+    ] {
+        let failure = permissions_of(&manifest, &files, &units).unwrap_err();
+        assert!(
+            matches!(&failure.kind, UnrunnableKind::StarmapInvalid { file } if file.ends_with("starmap.toml") && !file.to_string_lossy().contains("catalogue")),
+            "{units:?}: {failure:?}"
+        );
+        assert_eq!(failure.unit.as_deref(), Some("shelf-web"), "{failure:?}");
+    }
+    let failure =
+        permissions_of(&manifest, &files[..1], &["catalogue-api", "shelf-web"]).unwrap_err();
+    assert_eq!(
+        bind_names(&failure),
+        [("LEDGER_URL", "ledger/api", "listen")],
         "{failure:?}"
     );
+}
+
+/// Returns [`MERGED`], parsed.
+fn merged() -> Manifest {
+    Manifest::parse(MERGED, Path::new("/repo/mxv.toml")).unwrap()
+}
+
+/// Returns [`MERGED`] with a process `stray` that runs in a directory
+/// outside every checkout of the workspace, which the plan cannot place.
+/// A workspace manifest gives each process an absolute `cwd`, which a
+/// checkout's own manifest cannot, so the test sets it after parsing.
+fn with_stray() -> Manifest {
+    let text = format!("{MERGED}\n[processes.stray]\nargv = [\"stray\"]\ncwd = \"stray\"\n");
+    let mut manifest = Manifest::parse(&text, Path::new("/repo/mxv.toml")).unwrap();
+    manifest.processes.get_mut("stray").unwrap().cwd = std::path::PathBuf::from("/nowhere/stray");
+    manifest
+}
+
+#[test]
+fn a_wrong_bind_is_reported_ahead_of_another_units_plan_failure_in_either_order() {
+    let manifest = with_stray();
+    let bind = ledger_bind();
+    let files = [("starmap.toml", bind.as_str())];
+    for units in [["shelf-web", "stray"], ["stray", "shelf-web"]] {
+        let failure = permissions_of(&manifest, &files, &units).unwrap_err();
+        assert_eq!(
+            bind_names(&failure),
+            [("LEDGER_URL", "ledger/api", "listen")],
+            "{units:?}: {failure:?}"
+        );
+    }
+    let failure = permissions_of(&manifest, &[], &["shelf-web", "stray"]).unwrap_err();
+    assert_eq!(failure.kind, UnrunnableKind::Plan, "{failure:?}");
+    assert_eq!(failure.unit.as_deref(), Some("stray"), "{failure:?}");
 }

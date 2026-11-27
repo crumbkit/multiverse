@@ -17,7 +17,8 @@ workspace may need to act on.
   there are several. The fields `unit`, `variable`, `app` and `port` still
   give the first bind. An optional bind to a missing checkout stays unset
   and is not listed, and `mxv::manifest::starmap_invalid` is still reported
-  alone.
+  alone. A process whose `cwd`, name or permissions phase cannot run is
+  reported only when no bind is wrong.
 - In the multiverse library, which is 0.x, so this is a minor-version
   change, `UnrunnableKind::ProvidedUnknown` holds `RefusedBinds`, a
   non-empty list of `RefusedBind`, in place of one variable, unit and port.

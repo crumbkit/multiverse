@@ -7,11 +7,14 @@ use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
 use multiverse::{
-    Allow, MANIFEST_FILE, ManifestError, ManifestProblem, ProvidedBind, RefusedBind, RefusedBinds,
+    Allow, MANIFEST_FILE, ManifestError, ManifestProblem, ProvidedBind, RefusedBind,
     UnrunnableKind, Waited,
 };
 
 use crate::failures::{remove_volumes_line, shown};
+
+#[cfg(test)]
+mod tests;
 
 /// The code of a process verb that names no workspace, run outside every
 /// workspace.
@@ -847,20 +850,24 @@ fn unrunnable_causes(kind: &UnrunnableKind) -> Vec<String> {
     }
 }
 
-/// Returns the start of the recovery of `binds`: `change the bind of <variable>
-/// in the starmap file` for one bind, and `change the binds of <variables>
-/// in their starmap files` for several.
-fn change_binds(binds: &RefusedBinds) -> String {
-    let variables: Vec<&str> = binds.iter().map(|bind| bind.variable.as_str()).collect();
-    if binds.len() == 1 {
-        format!(
-            "change the bind of {} in the starmap file",
-            joined(&variables)
-        )
+/// Returns the start of the recovery of binds whose variables are
+/// `variables`, one per bind: `change the bind of <variable> in the
+/// starmap file` for one bind, and `change the binds of <variables> in
+/// their starmap files` for several, naming each variable once, because
+/// several processes can bind a variable of the same name.
+fn change_binds(variables: &[&str]) -> String {
+    let mut named: Vec<&str> = Vec::new();
+    for variable in variables {
+        if !named.contains(variable) {
+            named.push(variable);
+        }
+    }
+    if variables.len() == 1 {
+        format!("change the bind of {} in the starmap file", joined(&named))
     } else {
         format!(
             "change the binds of {} in their starmap files",
-            joined(&variables)
+            joined(&named)
         )
     }
 }
@@ -881,7 +888,12 @@ fn unrunnable_recovery(kind: &UnrunnableKind, workspace: &str) -> Recovery {
     match kind {
         UnrunnableKind::ProvidedUnknown(binds) => Recovery::hint(format!(
             "{} to name a unit as `<unit>` for the process's own checkout or `<checkout>/<unit>` for another checkout, and one of its ports by its own manifest's name, or leave out `port` to name the port the unit listens on; `mxv status -w {workspace}` lists the units and `mxv show {workspace}` lists the checkouts and ports",
-            change_binds(binds)
+            change_binds(
+                &binds
+                    .iter()
+                    .map(|bind| bind.variable.as_str())
+                    .collect::<Vec<_>>()
+            )
         )),
         UnrunnableKind::ProvidedUnassigned(_) => Recovery::hint(format!(
             "run `mxv up -w {workspace}`, which gives each port of the workspace a host port, and the bind then resolves"
