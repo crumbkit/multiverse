@@ -232,6 +232,18 @@ pub struct Unrunnable {
     pub message: String,
 }
 
+/// A provided variable's bind: the variable, the unit it names and the
+/// port it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvidedBind {
+    /// The variable.
+    pub variable: String,
+    /// The unit that the bind names.
+    pub app: String,
+    /// The port that the bind names.
+    pub port: String,
+}
+
 /// The kind of problem that stops phase from running a manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -252,8 +264,14 @@ pub enum UnrunnableKind {
         /// The port that the bind names, or `listen` when it names none.
         port: String,
     },
-    /// A process's starmap file does not parse as a starmap file, or
-    /// cannot be read.
+    /// A required variable of a process's starmap file whose bind is
+    /// `multiverse/port` or `multiverse/url` names a unit and port of the
+    /// workspace's manifest that the workspace holds no host port for yet,
+    /// such as before its first `mxv up`.
+    ProvidedUnassigned(Box<ProvidedBind>),
+    /// A process's starmap file does not parse as a starmap file, cannot
+    /// be read, or is a default `<cwd>/starmap.toml` that is a symbolic
+    /// link, is not a regular file or reaches outside its checkout.
     StarmapInvalid {
         /// The file.
         file: PathBuf,
@@ -732,6 +750,18 @@ fn host_app(
     // passed-through and proxy variables, and the manifest's own variables
     // below replace them.
     let provided = provided::values(inputs, name, process)?;
+    if let Some(variable) = provided
+        .keys()
+        .find(|variable| PHASE_SETS.contains(&variable.as_str()))
+    {
+        return Err(Unrunnable {
+            kind: UnrunnableKind::Plan,
+            unit: Some(name.to_owned()),
+            message: format!(
+                "the starmap file of the process `{name}` provides {variable}, which phase gives every process from mxv's own environment"
+            ),
+        });
+    }
     for (variable, value) in &provided {
         vars.insert(variable.clone(), Redacted::new(value.clone()));
     }

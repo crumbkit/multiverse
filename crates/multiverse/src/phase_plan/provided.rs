@@ -2,10 +2,16 @@
 //! whose source is `provided` and whose bind's kind is `multiverse/port` or
 //! `multiverse/url`.
 //!
-//! A bind names a unit of the workspace's merged manifest with `process` or
-//! `app`, such as `{ provided = "multiverse/url", app = "catalogue-api" }`,
-//! and may name one of that unit's ports with `port`. Without `port` it
-//! names the port the unit listens on. [`PortProvider`] gives the host port
+//! A bind names a unit with `process` or `app`: a unit of the process's own
+//! checkout by its bare name, such as `app = "web"`, and a unit of another
+//! checkout of the workspace as `<checkout>/<unit>`, such as
+//! `{ provided = "multiverse/url", app = "catalogue/api" }`, where the
+//! checkout is its folder in the workspace. A bare name that the own
+//! checkout does not declare names a unit of the workspace's own manifest.
+//! `port` may name one of that unit's ports by the name its own manifest
+//! gives it. Without `port` it names the port the unit listens on. The
+//! names stay the same whatever the workspace's other checkouts, because
+//! [`Place`] turns them into the merged manifest's prefixed names. [`PortProvider`] gives the host port
 //! that the workspace holds for that port. [`UrlProvider`] gives the URL of
 //! the proxy's route of that port, or `http://127.0.0.1:<port>` when the
 //! proxy serves no route of it.
@@ -16,7 +22,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -25,8 +30,8 @@ use starmap_resolve::{
     Context, Places, Provider, ProviderError, ResolveProblem, check_binds, resolve,
 };
 
-use super::{Inputs, ProxyUrls, Unrunnable, UnrunnableKind, placed};
-use crate::manifest::{Manifest, Process, ReadyCheck, Unit};
+use super::{Inputs, ProvidedBind, ProxyUrls, Unrunnable, UnrunnableKind, placed};
+use crate::manifest::{Manifest, Process, ReadyCheck, StarmapFound, Unit};
 
 #[cfg(test)]
 mod tests;
@@ -62,31 +67,108 @@ pub(crate) struct Neighbours<'a> {
     ports: &'a BTreeMap<String, u16>,
     /// The proxy's routes of the workspace.
     urls: &'a ProxyUrls,
+    /// The checkouts of the workspace and the one that holds the process.
+    place: &'a Place,
 }
 
 impl<'a> Neighbours<'a> {
-    /// Returns what the providers read from `manifest`, `ports` and `urls`.
-    pub(crate) fn new(
-        manifest: &'a Manifest,
-        ports: &'a BTreeMap<String, u16>,
-        urls: &'a ProxyUrls,
-    ) -> Self {
+    /// Returns what the providers of the process at `place` read from
+    /// `inputs`.
+    pub(crate) fn new(inputs: &'a Inputs<'a>, place: &'a Place) -> Self {
         Self {
-            manifest,
-            ports,
-            urls,
+            manifest: inputs.manifest,
+            ports: inputs.ports,
+            urls: &inputs.urls,
+            place,
         }
+    }
+
+    /// Returns the unit and port that `reference` names.
+    fn target(&self, reference: &ProvidedRef) -> Result<Target, Unknown> {
+        target(self.manifest, self.place, reference)
     }
 
     /// Returns the host port that `reference` names.
     fn number(&self, reference: &ProvidedRef) -> Result<u16, ProviderError> {
-        let target = target(self.manifest, reference).map_err(|unknown| unknown.error())?;
+        let target = self.target(reference).map_err(|unknown| unknown.error())?;
         self.ports.get(&target.port).copied().ok_or_else(|| {
             ProviderError::new(format!(
-                "the workspace holds no host port yet for the port `{}` of `{}`; `mxv up` gives it one",
-                target.port, target.unit
+                "the workspace holds no host port yet for {}; `mxv up` gives it one",
+                port_phrase(&target.app, &target.shown)
             ))
         })
+    }
+}
+
+/// The checkouts of a workspace, by name, and the one that holds a
+/// process. A bind names a unit of the process's own checkout by its bare
+/// name, and a unit of another checkout as `<checkout>/<unit>`. In a
+/// workspace of several checkouts the merged manifest prefixes each
+/// checkout's names, and the place turns a bind's names into merged ones.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Place {
+    /// The names of the workspace's checkouts, their folders. It is empty
+    /// when the plan does not know them.
+    checkouts: Vec<String>,
+    /// The checkout that holds the process, or `None` when the process
+    /// runs from the workspace's own directory or the checkouts are not
+    /// known.
+    own: Option<String>,
+}
+
+impl Place {
+    /// Returns the place of the process `name` of `inputs`. The checkouts
+    /// are every root but the last, which is the workspace's own
+    /// directory, as [`super::roots`] lists them.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`placed`].
+    fn of(inputs: &Inputs<'_>, name: &str, process: &Process) -> Result<Self, Unrunnable> {
+        let (source, _) = placed(inputs, name, process)?;
+        let roots = inputs.roots.split_last().map_or(&[][..], |(_, rest)| rest);
+        let folder = |path: &Path| {
+            path.file_name()
+                .map(|folder| folder.to_string_lossy().into_owned())
+        };
+        let checkouts: Vec<String> = roots.iter().filter_map(|root| folder(root)).collect();
+        let own = roots
+            .iter()
+            .find(|root| super::lexical(root) == super::lexical(&source))
+            .and_then(|root| folder(root));
+        Ok(Self { checkouts, own })
+    }
+
+    /// Returns the merged name of `name`, which the manifest of `checkout`
+    /// declares.
+    fn merged(&self, checkout: Option<&str>, name: &str) -> String {
+        match checkout {
+            Some(checkout) if self.checkouts.len() > 1 => {
+                crate::lookup::prefixed(&crate::lookup::checkout_prefix(checkout), name)
+            }
+            Some(_) | None => name.to_owned(),
+        }
+    }
+
+    /// Reports whether `name` starts with the prefix of one of several
+    /// checkouts, so it is a merged name of a checkout's unit, which a bind
+    /// never names.
+    fn is_prefixed(&self, name: &str) -> bool {
+        self.checkouts.len() > 1
+            && self.checkouts.iter().any(|checkout| {
+                name.starts_with(&format!("{}-", crate::lookup::checkout_prefix(checkout)))
+            })
+    }
+
+    /// Returns the name that the manifest of `checkout` gives the merged
+    /// name `merged`.
+    fn own_name<'n>(&self, checkout: Option<&str>, merged: &'n str) -> &'n str {
+        match checkout {
+            Some(checkout) if self.checkouts.len() > 1 => merged
+                .strip_prefix(&format!("{}-", crate::lookup::checkout_prefix(checkout)))
+                .unwrap_or(merged),
+            Some(_) | None => merged,
+        }
     }
 }
 
@@ -155,7 +237,8 @@ impl Provider for PortProvider<'_> {
     }
 
     fn check(&self, _name: &Name, reference: &ProvidedRef) -> Result<(), ProviderError> {
-        target(self.neighbours.manifest, reference)
+        self.neighbours
+            .target(reference)
             .map(drop)
             .map_err(|unknown| unknown.error())
     }
@@ -173,8 +256,10 @@ impl Provider for UrlProvider<'_> {
         _deadline: Instant,
     ) -> Result<OsString, ProviderError> {
         let number = self.neighbours.number(reference)?;
-        let target =
-            target(self.neighbours.manifest, reference).map_err(|unknown| unknown.error())?;
+        let target = self
+            .neighbours
+            .target(reference)
+            .map_err(|unknown| unknown.error())?;
         Ok(OsString::from(
             self.neighbours
                 .urls
@@ -184,7 +269,8 @@ impl Provider for UrlProvider<'_> {
     }
 
     fn check(&self, _name: &Name, reference: &ProvidedRef) -> Result<(), ProviderError> {
-        target(self.neighbours.manifest, reference)
+        self.neighbours
+            .target(reference)
             .map(drop)
             .map_err(|unknown| unknown.error())
     }
@@ -193,10 +279,14 @@ impl Provider for UrlProvider<'_> {
 /// The unit and port that a bind names.
 #[derive(Debug, PartialEq, Eq)]
 struct Target {
-    /// The unit.
+    /// The unit, by its name in the merged manifest.
     unit: String,
     /// The port, by its name in the merged manifest.
     port: String,
+    /// The unit as the bind writes it.
+    app: String,
+    /// The port by its name in the unit's own manifest.
+    shown: String,
 }
 
 /// A bind that names no port of the workspace: the unit and the port it
@@ -226,7 +316,7 @@ impl Unknown {
 /// `app` and `port`, names both `process` and `app` or neither, names a
 /// unit the manifest does not have, names a port the unit does not have,
 /// or names no port and the unit listens on none.
-fn target(manifest: &Manifest, reference: &ProvidedRef) -> Result<Target, Unknown> {
+fn target(manifest: &Manifest, place: &Place, reference: &ProvidedRef) -> Result<Target, Unknown> {
     let process = reference.qualifier("process");
     let app = reference.qualifier("app");
     let named = process.or(app).unwrap_or_default().to_owned();
@@ -255,18 +345,51 @@ fn target(manifest: &Manifest, reference: &ProvidedRef) -> Result<Target, Unknow
             "the bind names no unit, and names one with `process` or `app`".to_owned(),
         ));
     }
-    let Some(unit) = manifest.unit(&named) else {
+    // `<checkout>/<unit>` names a unit of another checkout. A bare name is
+    // a unit of the process's own checkout, or else of the workspace's own
+    // manifest, whose names are not prefixed.
+    let candidates: Vec<(Option<&str>, String)> = match named.split_once('/') {
+        Some((checkout, bare)) => {
+            if !place.checkouts.iter().any(|known| known == checkout) {
+                return Err(unknown(format!(
+                    "the workspace has no checkout `{checkout}`; its checkouts are {}",
+                    listed(&place.checkouts.iter().map(String::as_str).collect())
+                )));
+            }
+            vec![(Some(checkout), place.merged(Some(checkout), bare))]
+        }
+        None => {
+            let mut candidates = vec![(
+                place.own.as_deref(),
+                place.merged(place.own.as_deref(), &named),
+            )];
+            if !place.is_prefixed(&named) {
+                candidates.push((None, named.clone()));
+            }
+            candidates
+        }
+    };
+    let Some((checkout, merged, unit)) = candidates
+        .into_iter()
+        .find_map(|(checkout, merged)| manifest.unit(&merged).map(|unit| (checkout, merged, unit)))
+    else {
         return Err(unknown(format!(
-            "the workspace's manifest has no unit `{named}`, so it has no port `{asked}` of `{named}`"
+            "the workspace's manifest has no unit `{named}`"
         )));
     };
     let ports = unit_ports(unit);
+    let own_ports: BTreeSet<&str> = ports
+        .iter()
+        .map(|port| place.own_name(checkout, port))
+        .collect();
     let port = match port {
-        Some(port) if ports.contains(port) => port.to_owned(),
+        Some(port) if ports.contains(place.merged(checkout, port).as_str()) => {
+            place.merged(checkout, port)
+        }
         Some(port) => {
             return Err(unknown(format!(
                 "`{named}` has no port `{port}`; its ports are {}",
-                listed(&ports)
+                listed(&own_ports)
             )));
         }
         None => match unit {
@@ -277,14 +400,16 @@ fn target(manifest: &Manifest, reference: &ProvidedRef) -> Result<Target, Unknow
             Unit::Process(_) | Unit::Container(_) => {
                 return Err(unknown(format!(
                     "`{named}` listens on no port, so the bind names one of its ports with `port`; its ports are {}",
-                    listed(&ports)
+                    listed(&own_ports)
                 )));
             }
         },
     };
     Ok(Target {
-        unit: named.clone(),
+        shown: place.own_name(checkout, &port).to_owned(),
+        unit: merged,
         port,
+        app: named.clone(),
     })
 }
 
@@ -352,13 +477,33 @@ fn spec_of(
         unit: Some(name.to_owned()),
         message: format!("the starmap file {} of `{name}` {reason}", file.display()),
     };
-    let text = match crate::store::read_to_string(&file) {
-        Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !named => return Ok(None),
-        Err(error) => return Err(invalid(format!("cannot be read: {error}"))),
-    };
+    if !named {
+        // The default file gets the checks that the manifest gives a file
+        // its `starmap` key names: a regular file inside the process's
+        // checkout, and no symbolic link.
+        let (source, _) = placed(inputs, name, process)?;
+        match crate::manifest::starmap_file_found(&file, &source) {
+            Ok(()) => {}
+            Err(StarmapFound::Missing) => return Ok(None),
+            Err(found) => return Err(invalid(found_reason(found).to_owned())),
+        }
+    }
+    let text = crate::store::read_to_string(&file)
+        .map_err(|error| invalid(format!("cannot be read: {error}")))?;
     let spec = Spec::parse(&text).map_err(|error| invalid(format!("does not parse: {error}")))?;
     Ok(Some((spec, file)))
+}
+
+/// Returns why a default starmap file that `found` describes is refused.
+fn found_reason(found: StarmapFound) -> &'static str {
+    match found {
+        StarmapFound::Link => {
+            "is a symbolic link or reaches outside the checkout through a linked directory, and a starmap file is a regular file inside the checkout"
+        }
+        StarmapFound::NotAFile => "is not a regular file",
+        StarmapFound::Missing => "does not exist",
+        StarmapFound::Unreadable => "cannot be checked, because its file type cannot be read",
+    }
 }
 
 /// Returns the provided variables of `spec` whose kind is one of the two
@@ -375,16 +520,46 @@ fn provided_variables(spec: &Spec) -> impl Iterator<Item = (&Name, &ProvidedRef)
     })
 }
 
+/// Returns how a refusal names the port `port` of `app`: `the listen port
+/// of` a unit when the bind names no port, and `the port` otherwise.
+fn port_phrase(app: &str, port: &str) -> String {
+    if port == LISTEN {
+        format!("the listen port of `{app}`")
+    } else {
+        format!("the port `{port}` of `{app}`")
+    }
+}
+
+/// Returns the failure of the required variable `variable` of the starmap
+/// file `file` of `name`, whose bind names `found`, a unit and port of the
+/// manifest that the workspace holds no host port for yet, as `reason`
+/// says.
+fn unassigned(name: &str, file: &Path, variable: &Name, found: Target, reason: &str) -> Unrunnable {
+    Unrunnable {
+        message: format!(
+            "the starmap file {} of `{name}` binds {} to {}, and {reason}",
+            file.display(),
+            variable.as_str(),
+            port_phrase(&found.app, &found.shown),
+        ),
+        kind: UnrunnableKind::ProvidedUnassigned(Box::new(ProvidedBind {
+            variable: variable.as_str().to_owned(),
+            app: found.app,
+            port: found.shown,
+        })),
+        unit: Some(name.to_owned()),
+    }
+}
+
 /// Returns the failure of the variable `variable` of the starmap file
 /// `file` of `name`, whose bind `unknown` refuses.
 fn refused(name: &str, file: &Path, variable: &Name, unknown: Unknown) -> Unrunnable {
     Unrunnable {
         message: format!(
-            "the starmap file {} of `{name}` binds {} to the port `{}` of `{}`, and {}",
+            "the starmap file {} of `{name}` binds {} to {}, and {}",
             file.display(),
             variable.as_str(),
-            unknown.port,
-            unknown.app,
+            port_phrase(&unknown.app, &unknown.port),
             unknown.reason
         ),
         kind: UnrunnableKind::ProvidedUnknown {
@@ -411,20 +586,28 @@ pub(super) fn check(inputs: &Inputs<'_>, name: &str, process: &Process) -> Resul
     let Some((spec, file)) = spec_of(inputs, name, process)? else {
         return Ok(());
     };
-    check_spec(inputs, name, &spec, &file)
+    check_spec(inputs, name, process, &spec, &file)
 }
 
-/// Checks the binds of `spec`, the starmap file `file` of `name`, through
+/// Checks the binds of `spec`, the starmap file `file` of `process`,
+/// named `name`, through
 /// [`check_binds`].
-fn check_spec(inputs: &Inputs<'_>, name: &str, spec: &Spec, file: &Path) -> Result<(), Unrunnable> {
-    let neighbours = Neighbours::new(inputs.manifest, inputs.ports, &inputs.urls);
+fn check_spec(
+    inputs: &Inputs<'_>,
+    name: &str,
+    process: &Process,
+    spec: &Spec,
+    file: &Path,
+) -> Result<(), Unrunnable> {
+    let place = Place::of(inputs, name, process)?;
+    let neighbours = Neighbours::new(inputs, &place);
     let (port, url) = providers(neighbours)?;
     let Some(failure) = check_binds(spec, &[&port, &url]).into_iter().next() else {
         return Ok(());
     };
     let unknown = provided_variables(spec)
         .find(|(variable, _)| **variable == failure.name)
-        .and_then(|(_, reference)| target(inputs.manifest, reference).err())
+        .and_then(|(_, reference)| neighbours.target(reference).err())
         .unwrap_or_else(|| Unknown {
             app: String::new(),
             port: LISTEN.to_owned(),
@@ -450,13 +633,14 @@ pub(super) fn values(
     let Some((spec, file)) = spec_of(inputs, name, process)? else {
         return Ok(BTreeMap::new());
     };
-    check_spec(inputs, name, &spec, &file)?;
+    check_spec(inputs, name, process, &spec, &file)?;
     let wanted: BTreeMap<&Name, &ProvidedRef> = provided_variables(&spec).collect();
     if wanted.is_empty() {
         return Ok(BTreeMap::new());
     }
     let (source, _) = placed(inputs, name, process)?;
-    let neighbours = Neighbours::new(inputs.manifest, inputs.ports, &inputs.urls);
+    let place = Place::of(inputs, name, process)?;
+    let neighbours = Neighbours::new(inputs, &place);
     let (port, url) = providers(neighbours)?;
     // No caller value is passed, because a provider of each kind is
     // registered and a provided variable never takes the caller's value
@@ -481,22 +665,17 @@ pub(super) fn values(
         if !required {
             continue;
         }
-        let unknown = target(inputs.manifest, reference)
-            .err()
-            .unwrap_or_else(|| Unknown {
-                app: reference
-                    .qualifier("process")
-                    .or_else(|| reference.qualifier("app"))
-                    .unwrap_or_default()
-                    .to_owned(),
-                port: reference.qualifier("port").unwrap_or(LISTEN).to_owned(),
-                reason: if let ResolveProblem::Provider(error) = &failure.problem {
-                    error.to_string()
-                } else {
-                    "starmap could not resolve it".to_owned()
-                },
-            });
-        return Err(refused(name, &file, &failure.name, unknown));
+        let reason = if let ResolveProblem::Provider(error) = &failure.problem {
+            error.to_string()
+        } else {
+            "starmap could not resolve it".to_owned()
+        };
+        return Err(match neighbours.target(reference) {
+            Err(unknown) => refused(name, &file, &failure.name, unknown),
+            // The bind names a unit and a port of the manifest, and the
+            // workspace holds no host port for that port yet.
+            Ok(found) => unassigned(name, &file, &failure.name, found, &reason),
+        });
     }
     Ok(resolution
         .bindings

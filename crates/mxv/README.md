@@ -757,8 +757,8 @@ A host process also receives each variable of its starmap file whose
 `source` is `provided` and whose bind's kind is `multiverse/port` or
 `multiverse/url`. Its starmap file is the one its `starmap` key names, or
 `<cwd>/starmap.toml` when it has no key and that file exists. The bind names
-a unit of the workspace's manifest with `process` or `app`, and may name one
-of that unit's ports with `port`:
+a unit with `process` or `app`, and may name one of that unit's ports with
+`port`:
 
 ```toml
 [variables.CATALOGUE_URL]
@@ -767,7 +767,7 @@ type = "url"
 unset = "required"
 show = "shown"
 source = "provided"
-bind = { provided = "multiverse/url", app = "catalogue-api" }
+bind = { provided = "multiverse/url", app = "catalogue/api" }
 
 [variables.CATALOGUE_ADMIN_PORT]
 purpose = "The admin port of the catalogue's api."
@@ -775,13 +775,29 @@ type = "port"
 unset = "required"
 show = "shown"
 source = "provided"
-bind = { provided = "multiverse/port", process = "catalogue-api", port = "catalogue-admin" }
+bind = { provided = "multiverse/port", process = "catalogue/api", port = "admin" }
+
+[variables.OWN_PORT]
+purpose = "The port this checkout's web process listens on."
+type = "port"
+unset = "required"
+show = "shown"
+source = "provided"
+bind = { provided = "multiverse/port", process = "web" }
 ```
 
-The unit's name is its name in the workspace's manifest. In a workspace of
-several checkouts that is the merged name, such as `catalogue-api` for the
-unit `api` of the checkout `catalogue`, and a port's name is merged the same
-way. A bind without `port` names the port that the unit listens on.
+A bare name, such as `web`, names a unit of the process's own checkout, as
+that checkout's `mxv.toml` writes it. `<checkout>/<unit>`, such as
+`catalogue/api`, names a unit of another checkout of the workspace. The
+`<checkout>` part is the checkout's name in the workspace, its folder in
+the workspace's directory, which `mxv status` and `mxv show` list. It is
+the repository's name unless `mxv new` or `mxv add` gave the checkout
+another folder with `--as`, and `--as` changes it. A bare name that the
+process's own checkout does not declare names a unit of the workspace
+manifest. `port` names a port by the name that the unit's own manifest
+gives it, such as `admin`, and a bind without `port` names the port that the
+unit listens on. These names do not change when a checkout joins or leaves
+the workspace. A merged name, such as `catalogue-api`, names no unit.
 `multiverse/port` gives the host port that the workspace holds for the port.
 `multiverse/url` gives the proxy's URL of the port when the proxy serves a
 route of it, and `http://127.0.0.1:<port>` otherwise. A variable that the
@@ -791,18 +807,33 @@ mxv resolves only these two kinds. Every other variable of the file reaches
 the process as it did before, and a provided variable of another kind does
 not reach it.
 
-A bind that names a unit the manifest does not have, a port the unit does
-not have, or no port of a unit that listens on none, and a bind with a
+A bind that names a checkout the workspace does not have, a unit the
+manifest does not have, a port the unit does not have, or no port of a unit
+that listens on none, and a bind with a
 qualifier other than `process`, `app` and `port` or with both `process` and
 `app`, fails with `mxv::manifest::provided_unknown` before any build runs
 and before any unit starts. Its fields are `unit`, the process whose file
-holds the bind, `variable`, `app`, the unit that the bind names, and `port`,
-the port it names or `listen`, and its message names the unit and the port.
+holds the bind, `variable`, `app`, the unit as the file writes it, and
+`port`, the port as the file writes it or `listen`, and its message names
+the unit and the port.
 `mxv status` lists the units and `mxv show` lists the ports. A variable that
 the file marks `optional` and whose port has no host port yet is left out.
 A starmap file that does not parse fails with
 `mxv::manifest::starmap_invalid`, whose fields name the unit, the file and
 starmap's message.
+
+A provided bind adds no start ordering: the process can start before the
+unit it names listens. A process that needs that unit up first still names
+it in `depends_on`.
+
+A bind that names a unit and port of the manifest that the workspace holds
+no host port for yet, as before its first `up`, fails a required variable
+with `mxv::manifest::unrunnable`, whose hint runs `mxv up`. A
+`<cwd>/starmap.toml` that the process reads without a `starmap` key gets
+the checks of a file that the key names: a symbolic link, a file that is
+not a regular file, or one that reaches outside the checkout fails with
+`mxv::manifest::starmap_invalid`. A provided variable named `PATH` or
+`HOME` fails with `mxv::manifest::unrunnable`, as it does in `env`.
 
 The variables are resolved again on each `up`, `restart` and `run`. A
 process that gains or loses a provided variable has a changed plan, so `up`

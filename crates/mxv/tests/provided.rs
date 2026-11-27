@@ -37,8 +37,8 @@ use crate::test_ports::PortBlock;
 const CATALOGUE: &str = "ports = [\"http\"]\n\n[processes.api]\nargv = [\"sh\", \"-c\", \"echo ready; exec sleep 60\"]\nports = { PORT = \"http\" }\nlisten = \"http\"\nready = { log = \"^ready$\" }\n";
 
 /// The shelf's manifest: `web` writes its environment to `seen.txt` and is
-/// ready once it prints `ready`.
-const SHELF: &str = "[processes.web]\nargv = [\"sh\", \"-c\", \"env > seen.txt; echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\n";
+/// ready once it prints `ready`, and the task `check` exits 0.
+const SHELF: &str = "[processes.web]\nargv = [\"sh\", \"-c\", \"env > seen.txt; echo ready; exec sleep 60\"]\nready = { log = \"^ready$\" }\n\n[tasks.check]\nargv = [\"true\"]\n";
 
 /// A temporary directory with the repositories `catalogue` and `shelf`, a
 /// workspace root, a state directory and a block of host ports.
@@ -92,14 +92,13 @@ impl Setup {
         );
     }
 
-    /// Runs `mxv` with `args` and `--json`, and returns the exit code and
-    /// the JSON document.
-    fn json(&self, args: &[&str]) -> (i32, Value) {
+    /// Returns the command `mxv` with `args`, a home directory, base
+    /// directories and a workspace root of its own.
+    fn command(&self, args: &[&str]) -> Command {
         let root = self.root();
         grants::before(&root.join("state/mxv"), args);
-        let output = Command::new(env!("CARGO_BIN_EXE_mxv"))
+        Command::new(env!("CARGO_BIN_EXE_mxv"))
             .args(args)
-            .arg("--json")
             .current_dir(&root)
             .env_clear()
             .env("PATH", PATH)
@@ -109,8 +108,22 @@ impl Setup {
             .env("XDG_DATA_HOME", root.join("data"))
             .env("XDG_STATE_HOME", root.join("state"))
             .env("MXV_ROOT", root.join("workspaces"))
-            .output()
-            .unwrap();
+    }
+
+    /// Runs `mxv` with `args`, and returns the exit code and standard
+    /// error.
+    fn text(&self, args: &[&str]) -> (i32, String) {
+        let output = self.command(args).output().unwrap();
+        (
+            output.status.code().unwrap(),
+            String::from_utf8(output.stderr).unwrap(),
+        )
+    }
+
+    /// Runs `mxv` with `args` and `--json`, and returns the exit code and
+    /// the JSON document.
+    fn json(&self, args: &[&str]) -> (i32, Value) {
+        let output = self.command(args).arg("--json").output().unwrap();
         let document = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!(
                 "printed no JSON ({error}): {}{}",
@@ -175,10 +188,10 @@ fn up_gives_a_process_the_url_and_port_of_another_checkouts_unit_that_its_starma
     let setup = Setup::new();
     let spec = provided(
         "CATALOGUE_URL",
-        r#"{ provided = "multiverse/url", app = "catalogue-api" }"#,
+        r#"{ provided = "multiverse/url", app = "catalogue/api" }"#,
     ) + &provided(
         "CATALOGUE_PORT",
-        r#"{ provided = "multiverse/port", process = "catalogue-api" }"#,
+        r#"{ provided = "multiverse/port", process = "catalogue/api" }"#,
     );
     let workspace = setup.workspace(&spec);
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
@@ -204,7 +217,7 @@ fn up_refuses_a_bind_to_a_unit_that_does_not_exist_before_any_process_starts() {
     let setup = Setup::new();
     let workspace = setup.workspace(&provided(
         "CATALOGUE_URL",
-        r#"{ provided = "multiverse/url", app = "catalogue-search" }"#,
+        r#"{ provided = "multiverse/url", app = "catalogue/search" }"#,
     ));
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_ne!(exit, 0, "{document}");
@@ -217,11 +230,14 @@ fn up_refuses_a_bind_to_a_unit_that_does_not_exist_before_any_process_starts() {
         document["fields"]["variable"], "CATALOGUE_URL",
         "{document}"
     );
-    assert_eq!(document["fields"]["app"], "catalogue-search", "{document}");
+    assert_eq!(document["fields"]["app"], "catalogue/search", "{document}");
     assert_eq!(document["fields"]["port"], "listen", "{document}");
     let message = document["message"].as_str().unwrap();
-    assert!(message.contains("`catalogue-search`"), "{document}");
-    assert!(message.contains("`listen`"), "{document}");
+    assert!(message.contains("`catalogue/search`"), "{document}");
+    assert!(
+        message.contains("the listen port of `catalogue/search`"),
+        "{document}"
+    );
     assert!(!workspace.join("shelf/seen.txt").exists());
 }
 
@@ -230,7 +246,7 @@ fn up_refuses_a_bind_to_a_port_that_the_unit_does_not_have_and_names_both() {
     let setup = Setup::new();
     setup.workspace(&provided(
         "CATALOGUE_PORT",
-        r#"{ provided = "multiverse/port", app = "catalogue-api", port = "catalogue-grpc" }"#,
+        r#"{ provided = "multiverse/port", app = "catalogue/api", port = "grpc" }"#,
     ));
     let (exit, document) = setup.json(&["up", "-w", "triage"]);
     assert_ne!(exit, 0, "{document}");
@@ -238,11 +254,11 @@ fn up_refuses_a_bind_to_a_port_that_the_unit_does_not_have_and_names_both() {
         document["code"], "mxv::manifest::provided_unknown",
         "{document}"
     );
-    assert_eq!(document["fields"]["app"], "catalogue-api", "{document}");
-    assert_eq!(document["fields"]["port"], "catalogue-grpc", "{document}");
+    assert_eq!(document["fields"]["app"], "catalogue/api", "{document}");
+    assert_eq!(document["fields"]["port"], "grpc", "{document}");
     let message = document["message"].as_str().unwrap();
-    assert!(message.contains("`catalogue-api`"), "{document}");
-    assert!(message.contains("`catalogue-grpc`"), "{document}");
+    assert!(message.contains("`catalogue/api`"), "{document}");
+    assert!(message.contains("`grpc`"), "{document}");
 }
 
 #[test]
@@ -261,5 +277,61 @@ fn up_refuses_a_starmap_file_that_does_not_parse() {
             .unwrap()
             .ends_with("shelf/starmap.toml"),
         "{document}"
+    );
+}
+
+/// Returns the starmap file that binds `CATALOGUE_URL` and
+/// `CATALOGUE_PORT` to the catalogue's api.
+fn both_binds() -> String {
+    provided(
+        "CATALOGUE_URL",
+        r#"{ provided = "multiverse/url", app = "catalogue/api" }"#,
+    ) + &provided(
+        "CATALOGUE_PORT",
+        r#"{ provided = "multiverse/port", process = "catalogue/api" }"#,
+    )
+}
+
+#[test]
+fn restart_gives_the_process_its_provided_variables_again() {
+    let setup = Setup::new();
+    let workspace = setup.workspace(&both_binds());
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, shown) = setup.json(&["show", "triage"]);
+    let port = shown["data"][0]["ports"]["catalogue-http"]
+        .as_u64()
+        .unwrap();
+    let file = workspace.join("shelf/seen.txt");
+    fs::remove_file(&file).unwrap();
+    let (exit, document) = setup.json(&["restart", "-w", "triage", "shelf-web"]);
+    assert_eq!(exit, 0, "{document}");
+    let vars = seen(&file);
+    assert!(
+        vars.contains(&("CATALOGUE_PORT".to_owned(), port.to_string())),
+        "{vars:?}"
+    );
+}
+
+#[test]
+fn run_of_a_task_succeeds_when_every_bind_names_a_port_of_the_workspace() {
+    let setup = Setup::new();
+    setup.workspace(&both_binds());
+    let (exit, stderr) = setup.text(&["run", "-w", "triage", "check"]);
+    assert_eq!(exit, 0, "{stderr}");
+}
+
+#[test]
+fn run_of_a_task_refuses_a_bind_to_a_unit_that_does_not_exist() {
+    let setup = Setup::new();
+    setup.workspace(&provided(
+        "CATALOGUE_URL",
+        r#"{ provided = "multiverse/url", app = "catalogue/search" }"#,
+    ));
+    let (exit, stderr) = setup.text(&["run", "-w", "triage", "check"]);
+    assert_ne!(exit, 0, "{stderr}");
+    assert!(
+        stderr.contains("code:  mxv::manifest::provided_unknown"),
+        "{stderr}"
     );
 }

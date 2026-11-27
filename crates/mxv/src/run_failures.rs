@@ -6,7 +6,9 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem, UnrunnableKind, Waited};
+use multiverse::{
+    Allow, MANIFEST_FILE, ManifestError, ManifestProblem, ProvidedBind, UnrunnableKind, Waited,
+};
 
 use crate::failures::{remove_volumes_line, shown};
 
@@ -750,6 +752,7 @@ fn unrunnable_code(kind: &UnrunnableKind) -> Code<'static> {
     match kind {
         UnrunnableKind::ProvidedUnknown { .. } => MANIFEST_PROVIDED_UNKNOWN,
         UnrunnableKind::StarmapInvalid { .. } => MANIFEST_STARMAP_INVALID,
+        UnrunnableKind::ProvidedUnassigned(_) => MANIFEST_UNRUNNABLE,
         // The library marks the kind non-exhaustive, so a kind that a
         // later version adds reads as unrunnable until mxv gives it a code
         // of its own.
@@ -780,6 +783,18 @@ fn unrunnable_fields<'a>(
             Field::new("app", app),
             Field::new("port", port),
         ]
+    } else if let UnrunnableKind::ProvidedUnassigned(bind) = kind {
+        let ProvidedBind {
+            variable,
+            app,
+            port,
+        } = &**bind;
+        vec![
+            Field::new("unit", unit),
+            Field::new("variable", variable),
+            Field::new("app", app),
+            Field::new("port", port),
+        ]
     } else if let UnrunnableKind::StarmapInvalid { file } = kind {
         vec![
             Field::new("unit", unit),
@@ -800,7 +815,10 @@ fn unrunnable_fields<'a>(
 fn unrunnable_recovery(kind: &UnrunnableKind, workspace: &str) -> Recovery {
     match kind {
         UnrunnableKind::ProvidedUnknown { variable, .. } => Recovery::hint(format!(
-            "change the bind of {variable} in the starmap file to name a unit of the workspace's manifest and one of its ports, or leave out `port` to name the port the unit listens on; `mxv status -w {workspace}` lists the units and `mxv show {workspace}` lists the ports"
+            "change the bind of {variable} in the starmap file to name a unit as `<unit>` for the process's own checkout or `<checkout>/<unit>` for another checkout, and one of its ports by its own manifest's name, or leave out `port` to name the port the unit listens on; `mxv status -w {workspace}` lists the units and `mxv show {workspace}` lists the checkouts and ports"
+        )),
+        UnrunnableKind::ProvidedUnassigned(_) => Recovery::hint(format!(
+            "run `mxv up -w {workspace}`, which gives each port of the workspace a host port, and the bind then resolves"
         )),
         UnrunnableKind::StarmapInvalid { file } => Recovery::hint(format!(
             "fix what the message names in {}; `starmap check` in its directory reports each problem",
@@ -1230,7 +1248,9 @@ impl RunFailure {
             Self::Unrunnable { kind, message, .. }
                 if matches!(
                     **kind,
-                    UnrunnableKind::ProvidedUnknown { .. } | UnrunnableKind::StarmapInvalid { .. }
+                    UnrunnableKind::ProvidedUnknown { .. }
+                        | UnrunnableKind::ProvidedUnassigned(_)
+                        | UnrunnableKind::StarmapInvalid { .. }
                 ) =>
             {
                 formatter.write_str(message)

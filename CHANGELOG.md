@@ -9,15 +9,14 @@ workspace may need to act on.
 
 - `mxv up`, `restart` and `run` give a host process each variable of its
   starmap file whose bind is `multiverse/port` or `multiverse/url`, such as
-  `{ provided = "multiverse/url", app = "catalogue-api" }`, with the host
-  port or the URL of the named unit's port, including a unit of another
-  checkout of the workspace. A bind that names a unit or port the
+  `{ provided = "multiverse/url", app = "catalogue/api" }`, with the host
+  port or the URL of the named unit's port. A bare unit name names a unit
+  of the process's own checkout, `<checkout>/<unit>` names a unit of
+  another checkout by the checkout's folder, and `port` names a port by
+  the unit's own name for it. A bind that names a unit or port the
   workspace does not have fails with `mxv::manifest::provided_unknown`, and
   a starmap file that does not parse fails with
   `mxv::manifest::starmap_invalid`, both before any unit starts.
-- `Unrunnable` has a `kind`, an `UnrunnableKind`, which tells a plan that
-  breaks phase's rules from a provided variable whose bind names no port
-  and from a starmap file that does not parse.
 
 - `phase::is_variable_name` reports whether a name is one phase passes to
   a process: an ASCII letter or `_`, then ASCII letters, digits and `_`.
@@ -31,6 +30,12 @@ workspace may need to act on.
 
 ### Changed
 
+- Breaking: `Unrunnable` has a new public field, `kind`, an
+  `UnrunnableKind`, which tells a plan that breaks phase's rules from a
+  provided variable whose bind names no port of the workspace, a provided
+  variable whose port has no host port yet, and a starmap file that does
+  not parse. A caller that builds `Unrunnable` with a struct literal adds
+  `kind: UnrunnableKind::Plan`.
 - `Runs::granting` takes the workspace's stable id in place of a `Store`,
   and writes nothing. A caller gets the id from `Runs::stable_id` first.
 - `mxv up` without names after `mxv reclaim` asks a person to grant only

@@ -2684,7 +2684,7 @@ fn starmap_problem<'a>(value: &'a str, checkouts: &[String]) -> Result<Vec<&'a s
 /// Checks that `file` is a regular file, is not a symbolic link, and stays
 /// inside the directory `inside` once the links of its parent directories
 /// are resolved, or returns what is there instead.
-fn starmap_file_found(file: &Path, inside: &Path) -> Result<(), StarmapFound> {
+pub(crate) fn starmap_file_found(file: &Path, inside: &Path) -> Result<(), StarmapFound> {
     let metadata = match fs::symlink_metadata(file) {
         Ok(metadata) => metadata,
         Err(error)
