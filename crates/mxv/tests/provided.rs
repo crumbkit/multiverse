@@ -546,3 +546,138 @@ fn run_of_a_task_prints_one_line_per_skipped_bind_before_the_task_starts() {
         );
     }
 }
+
+/// Returns the variable, unit and checkout of each entry of the `binds`
+/// field of `document`.
+fn listed_binds(document: &Value) -> Vec<(String, String, String, Value)> {
+    document["fields"]["binds"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no binds: {document}"))
+        .iter()
+        .map(|bind| {
+            (
+                bind["unit"].as_str().unwrap_or_default().to_owned(),
+                bind["variable"].as_str().unwrap_or_default().to_owned(),
+                bind["app"].as_str().unwrap_or_default().to_owned(),
+                bind["checkout"].clone(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn up_lists_every_required_bind_to_a_missing_checkout_in_one_failure() {
+    let setup = Setup::new();
+    let spec = provided(
+        "LEDGER_URL",
+        r#"{ provided = "multiverse/url", app = "ledger/book" }"#,
+    ) + &provided(
+        "LIBRARY_PORT",
+        r#"{ provided = "multiverse/port", app = "library/api", port = "http" }"#,
+    );
+    let workspace = setup.workspace(&spec);
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_ne!(exit, 0, "{document}");
+    assert_eq!(
+        document["code"], "mxv::manifest::provided_unknown",
+        "{document}"
+    );
+    assert_eq!(document["fields"]["unit"], "shelf-web", "{document}");
+    assert_eq!(document["fields"]["variable"], "LEDGER_URL", "{document}");
+    assert_eq!(document["fields"]["app"], "ledger/book", "{document}");
+    assert_eq!(document["fields"]["port"], "listen", "{document}");
+    assert_eq!(
+        listed_binds(&document),
+        [
+            (
+                "shelf-web".to_owned(),
+                "LEDGER_URL".to_owned(),
+                "ledger/book".to_owned(),
+                Value::from("ledger")
+            ),
+            (
+                "shelf-web".to_owned(),
+                "LIBRARY_PORT".to_owned(),
+                "library/api".to_owned(),
+                Value::from("library")
+            ),
+        ],
+        "{document}"
+    );
+    let binds = &document["fields"]["binds"];
+    assert_eq!(binds[1]["port"], "http", "{document}");
+    assert!(
+        binds[0]["reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("no checkout `ledger`")),
+        "{document}"
+    );
+    assert!(!workspace.join("shelf/seen.txt").exists());
+    let (exit, stderr) = setup.text(&["up", "-w", "triage"]);
+    assert_ne!(exit, 0, "{stderr}");
+    let causes: Vec<&str> = stderr
+        .lines()
+        .filter(|line| line.trim_start().starts_with("cause:"))
+        .collect();
+    assert_eq!(causes.len(), 2, "{stderr}");
+    for (cause, variable) in causes.iter().zip(["LEDGER_URL", "LIBRARY_PORT"]) {
+        assert!(cause.contains(variable), "{stderr}");
+    }
+}
+
+#[test]
+fn up_lists_the_wrong_binds_of_two_processes_in_two_checkouts_in_one_failure() {
+    let setup = Setup::new();
+    let ledger = |name: &str| {
+        provided(
+            name,
+            r#"{ provided = "multiverse/url", app = "ledger/book" }"#,
+        )
+    };
+    setup.repository(
+        "catalogue",
+        &[
+            ("mxv.toml", &neighbour("api")),
+            ("starmap.toml", &ledger("LEDGER_URL")),
+        ],
+    );
+    setup.repository(
+        "shelf",
+        &[
+            ("mxv.toml", &neighbour("web")),
+            ("starmap.toml", &ledger("BOOKS_URL")),
+        ],
+    );
+    let workspace = setup.workspace_of("triage", &["catalogue", "shelf"]);
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_ne!(exit, 0, "{document}");
+    assert_eq!(
+        document["code"], "mxv::manifest::provided_unknown",
+        "{document}"
+    );
+    assert_eq!(
+        listed_binds(&document),
+        [
+            (
+                "catalogue-api".to_owned(),
+                "LEDGER_URL".to_owned(),
+                "ledger/book".to_owned(),
+                Value::from("ledger")
+            ),
+            (
+                "shelf-web".to_owned(),
+                "BOOKS_URL".to_owned(),
+                "ledger/book".to_owned(),
+                Value::from("ledger")
+            ),
+        ],
+        "{document}"
+    );
+    assert_eq!(document["fields"]["unit"], "catalogue-api", "{document}");
+    for checkout in ["catalogue", "shelf"] {
+        assert!(
+            !workspace.join(checkout).join("seen.txt").exists(),
+            "{checkout}"
+        );
+    }
+}
