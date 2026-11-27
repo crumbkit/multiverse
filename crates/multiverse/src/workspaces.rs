@@ -15,7 +15,7 @@ use crate::git::{FETCH_DEADLINE, LOCAL_DEADLINE};
 use crate::host::Host;
 use crate::lookup::{ManifestSource, checkout_prefix, prefixed};
 use crate::manifest::{Manifest, ManifestError};
-use crate::mirror::Origin;
+use crate::mirror::{Origin, RepoOrigin};
 use crate::name::WorkspaceName;
 use crate::record::{self, Checkout, HostData, Workspace, WorkspaceKind, WorkspaceState};
 use crate::store::{self, Created, Records, Store};
@@ -81,12 +81,42 @@ pub struct Workspaces<B> {
 /// whole fetch and a clone without files, which is what the lock covers.
 pub const MIRROR_WAIT: Duration = FETCH_DEADLINE.saturating_add(LOCAL_DEADLINE);
 
+/// Where the checkout of a [`Repo`] comes from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RepoSource {
+    /// The person's repository, or any directory inside it.
+    Path(PathBuf),
+    /// An origin, which mxv fetches into its mirror and clones from, with
+    /// no repository of the person's on this machine.
+    Origin(RepoOrigin),
+}
+
+impl RepoSource {
+    /// Returns what `argument`, a `--repo` value, names. A value that names
+    /// an existing directory is a path, so no value that names a
+    /// repository on this machine changes its meaning. Otherwise a URL or
+    /// the short form that [`RepoOrigin::parse`] reads is an origin, and
+    /// any other value is a path, which fails as one that does not exist.
+    #[must_use]
+    pub fn from_argument(argument: impl Into<PathBuf>) -> Self {
+        let path = argument.into();
+        if path.is_dir() {
+            return Self::Path(path);
+        }
+        match path.to_str().and_then(RepoOrigin::parse) {
+            Some(origin) => Self::Origin(origin),
+            None => Self::Path(path),
+        }
+    }
+}
+
 /// A repository that a workspace checks out, and the folder that holds its
 /// checkout.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Repo {
-    /// The person's repository, or any directory inside it.
-    pub path: PathBuf,
+    /// The person's repository, or the origin to clone from.
+    pub source: RepoSource,
     /// The checkout's folder, which defaults to the repository's name.
     pub folder: Option<String>,
 }
@@ -97,7 +127,7 @@ impl Repo {
     #[must_use]
     pub fn new(path: impl Into<PathBuf>) -> Self {
         Self {
-            path: path.into(),
+            source: RepoSource::Path(path.into()),
             folder: None,
         }
     }
@@ -110,11 +140,80 @@ impl Repo {
     /// Returns why `folder` is not a folder name, as [`folder_name`]
     /// checks it.
     pub fn named(path: impl Into<PathBuf>, folder: &str) -> Result<Self, String> {
+        Self::new(path).with_folder(folder)
+    }
+
+    /// Returns the repository or origin that `source` names, checked out in
+    /// a folder named after it.
+    #[must_use]
+    pub const fn of(source: RepoSource) -> Self {
+        Self {
+            source,
+            folder: None,
+        }
+    }
+
+    /// Returns the repository checked out in the folder `folder`.
+    ///
+    /// # Errors
+    ///
+    /// Returns why `folder` is not a folder name, as [`folder_name`]
+    /// checks it.
+    pub fn with_folder(self, folder: &str) -> Result<Self, String> {
         Ok(Self {
-            path: path.into(),
             folder: Some(folder_name(folder)?),
+            ..self
         })
     }
+}
+
+/// A repository of [`Workspaces::create_repos`] or [`Workspaces::add`]:
+/// the person's repository on this machine, or an origin and its mirror.
+#[derive(Clone, Debug)]
+enum Found {
+    /// The person's repository.
+    Repository(Repository),
+    /// An origin that no repository of the person's holds.
+    Origin {
+        /// The origin as the person named it.
+        origin: RepoOrigin,
+        /// The URL to fetch it from.
+        url: String,
+        /// Its mirror.
+        mirror: PathBuf,
+    },
+}
+
+impl Found {
+    /// Returns the directory that a checkout of it records as its source:
+    /// the repository's top-level directory, or the mirror.
+    fn source(&self) -> &Path {
+        match self {
+            Self::Repository(repository) => &repository.root,
+            Self::Origin { mirror, .. } => mirror,
+        }
+    }
+
+    /// Returns what a refusal names it by: the repository's top-level
+    /// directory, or the origin as the person gave it without a user name
+    /// or password, so a token in a URL never reaches mxv's output.
+    fn shown(&self) -> PathBuf {
+        match self {
+            Self::Repository(repository) => repository.root.clone(),
+            Self::Origin { origin, .. } => PathBuf::from(crate::mirror::redacted(origin.as_str())),
+        }
+    }
+}
+
+/// The URL that a planned clone fetches its mirror from, and whether the
+/// plan already fetched it, as it does for an origin, whose base it reads
+/// from the fetched mirror.
+#[derive(Clone, Debug)]
+struct Fetch {
+    /// The origin's URL.
+    url: String,
+    /// Whether the mirror was fetched from `url` while the plan was made.
+    done: bool,
 }
 
 /// The names in a workspace's directory that mxv writes itself, which no
@@ -1268,26 +1367,88 @@ impl<B: Backend> Workspaces<B> {
     pub fn template(
         &self,
         templates: &Path,
-        repository: &Path,
+        repo: &Repo,
         root: &Path,
     ) -> Result<FoundTemplate, Error> {
-        let repository = self.backend.repository(repository)?;
-        let url = self.backend.origin_url(&repository.root)?;
-        crate::template::find(templates, &url, &repository.root, root)
+        match self.found(repo)? {
+            Found::Repository(repository) => {
+                let url = self.backend.origin_url(&repository.root)?;
+                crate::template::find(templates, &url, &repository.root, root)
+            }
+            Found::Origin { url, .. } => {
+                crate::template::find(templates, &url, Path::new("/"), root)
+            }
+        }
+    }
+
+    /// Returns the repository or the origin and mirror that `repo` names.
+    /// An origin is fetched from the URL that names it, or, for the short
+    /// form, from the URL that its mirror's config records from its last
+    /// fetch, with its SSH user name, or else over
+    /// SSH.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RepositoryNotFound`] or [`Error::NoOrigin`] for a
+    /// path that is not a repository with an `origin`, and
+    /// [`Error::RepositoryNotFound`] for an origin when the workspaces keep
+    /// no mirrors.
+    fn found(&self, repo: &Repo) -> Result<Found, Error> {
+        match &repo.source {
+            // A path that names nothing is shown as the person gave it, which
+            // may be a URL with a password that names no origin.
+            RepoSource::Path(path) => match self.backend.repository(path) {
+                Ok(repository) => Ok(Found::Repository(repository)),
+                Err(Error::RepositoryNotFound { path }) => Err(Error::RepositoryNotFound {
+                    path: path.to_str().map_or(path.clone(), |text| {
+                        PathBuf::from(crate::mirror::redacted(text))
+                    }),
+                }),
+                Err(error) => Err(error),
+            },
+            RepoSource::Origin(origin) => {
+                let Some(mirrors) = &self.mirrors else {
+                    return Err(Error::RepositoryNotFound {
+                        path: PathBuf::from(crate::mirror::redacted(origin.as_str())),
+                    });
+                };
+                let mirror = mirrors.join(origin.key());
+                let url = origin.url(self.backend.mirror_origin(&mirror)?);
+                Ok(Found::Origin {
+                    origin: origin.clone(),
+                    url,
+                    mirror,
+                })
+            }
+        }
+    }
+
+    /// Returns the folder that the checkout of `found` gets: the one that
+    /// `repo` gives, or else the repository's name or the origin's last
+    /// component.
+    fn folder_of(repo: &Repo, found: &Found) -> String {
+        repo.folder.clone().unwrap_or_else(|| match found {
+            Found::Repository(repository) => repository.name.clone(),
+            Found::Origin { origin, .. } => {
+                origin.folder().unwrap_or_else(|| "repository".to_owned())
+            }
+        })
     }
 
     /// Returns the top-level directory of the repository of `repo` and the
     /// folder that its checkout gets: the one that `repo` gives, or else
-    /// the repository's name.
+    /// the repository's name. For an origin, the directory is its mirror,
+    /// which has no working tree, and the folder defaults to the last
+    /// component of the origin's path.
     ///
     /// # Errors
     ///
     /// Returns [`Error::RepositoryNotFound`] for a path that is not in a
     /// git repository.
     pub fn resolve(&self, repo: &Repo) -> Result<(PathBuf, String), Error> {
-        let repository = self.backend.repository(&repo.path)?;
-        let folder = repo.folder.clone().unwrap_or(repository.name);
-        Ok((repository.root, folder))
+        let found = self.found(repo)?;
+        let folder = Self::folder_of(repo, &found);
+        Ok((found.source().to_path_buf(), folder))
     }
 
     /// Checks that `path`, a file that the person names to copy as a
@@ -1408,13 +1569,10 @@ impl<B: Backend> Workspaces<B> {
             return Ok(NewOutcome::NameTaken(existing));
         }
         let path = root.join(name.as_str());
-        let mut found: Vec<(crate::backend::Repository, String)> = Vec::new();
+        let mut found: Vec<(Found, String)> = Vec::new();
         for repo in repos {
-            let repository = self.backend.repository(&repo.path)?;
-            let folder = repo
-                .folder
-                .clone()
-                .unwrap_or_else(|| repository.name.clone());
+            let repository = self.found(repo)?;
+            let folder = Self::folder_of(repo, &repository);
             // A workspace of one repository gives its checkout's names no
             // prefix, so any repository's name works there.
             if repos.len() > 1
@@ -1422,7 +1580,7 @@ impl<B: Backend> Workspaces<B> {
             {
                 return Ok(NewOutcome::BadFolder {
                     folder,
-                    repository: repository.root,
+                    repository: repository.shown(),
                     reason,
                 });
             }
@@ -1435,7 +1593,7 @@ impl<B: Backend> Workspaces<B> {
             ) {
                 return Ok(NewOutcome::FolderTaken {
                     folder,
-                    repository: repository.root,
+                    repository: repository.shown(),
                 });
             }
             found.push((repository, folder));
@@ -1445,8 +1603,12 @@ impl<B: Backend> Workspaces<B> {
         }
         // A clone's branch lives in the clone, and a branch of the same
         // name in the person's repository would still be confusing once
-        // either is pushed, so both kinds refuse it.
-        for (repository, _) in &found {
+        // either is pushed, so both kinds refuse it. An origin has no
+        // repository of the person's to hold one.
+        for (found, _) in &found {
+            let Found::Repository(repository) = found else {
+                continue;
+            };
             if self
                 .backend
                 .branch_tip(&repository.root, name.as_str())?
@@ -1463,7 +1625,14 @@ impl<B: Backend> Workspaces<B> {
             return self.create_clone(root, name, &found, mirrors, mode, options);
         }
         let mut checkouts = Vec::new();
-        for (repository, folder) in &found {
+        for (found, folder) in &found {
+            // An origin is refused before this, because `found` reads one
+            // only with mirrors.
+            let Found::Repository(repository) = found else {
+                return Err(Error::RepositoryNotFound {
+                    path: found.shown(),
+                });
+            };
             if mode == Mode::Change {
                 self.backend.fetch(&repository.root)?;
             }
@@ -1505,31 +1674,92 @@ impl<B: Backend> Workspaces<B> {
         }
     }
 
-    /// Returns the checkout of `repository` in the folder `folder` of the
+    /// Returns the checkout of `found` in the folder `folder` of the
     /// workspace `name` at `path`, as a clone of the mirror of its origin
-    /// below `mirrors`, and the origin's URL.
+    /// below `mirrors`, and the origin's URL. The base of a repository's
+    /// checkout is the default branch that the repository names. An origin
+    /// has no repository to name one, so a change fetches its mirror first
+    /// and reads the base from the mirror's `HEAD`, as
+    /// [`Workspaces::origin_base`] does.
     fn planned_clone(
         &self,
         name: &WorkspaceName,
         path: &Path,
-        repository: &crate::backend::Repository,
+        found: &Found,
         folder: &str,
         mirrors: &Path,
-    ) -> Result<(Checkout, String), Error> {
-        let url = self.backend.origin_url(&repository.root)?;
-        let origin = Origin::parse(&url, &repository.root).ok_or_else(|| Error::NoOrigin {
-            repository: repository.root.clone(),
-        })?;
-        let base = self.backend.base(&repository.root)?;
+        mode: Mode,
+    ) -> Result<(Checkout, Fetch), Error> {
+        let (mirror, base, fetch) = match found {
+            Found::Repository(repository) => {
+                let url = self.backend.origin_url(&repository.root)?;
+                let origin =
+                    Origin::parse(&url, &repository.root).ok_or_else(|| Error::NoOrigin {
+                        repository: repository.root.clone(),
+                    })?;
+                let base = self.backend.base(&repository.root)?;
+                let fetch = Fetch {
+                    url: origin.url,
+                    done: false,
+                };
+                (mirrors.join(&origin.key), base, fetch)
+            }
+            Found::Origin { url, mirror, .. } => {
+                let base = self.origin_base(mirror, url, mode)?;
+                let fetch = Fetch {
+                    url: url.clone(),
+                    done: mode == Mode::Change,
+                };
+                (mirror.clone(), base, fetch)
+            }
+        };
         let checkout = Checkout::new(
             folder.to_owned(),
-            &repository.root,
+            found.source(),
             path.join(folder),
             name.to_string(),
             base,
-            record::Made::clone_of(mirrors.join(&origin.key)),
+            record::Made::clone_of(mirror),
         );
-        Ok((checkout, origin.url))
+        Ok((checkout, fetch))
+    }
+
+    /// Returns the base of a checkout of the origin at `url`, such as
+    /// `refs/remotes/origin/main`, from its mirror at `mirror`. A change
+    /// takes the mirror's lock, makes the mirror when it does not exist,
+    /// reads the branch that the origin's `HEAD` names, fetches the mirror
+    /// and reads the branch back from the mirror's `HEAD`. A dry run
+    /// fetches nothing: it reads the mirror's `HEAD` when the mirror holds
+    /// that branch, and otherwise asks the origin with `git ls-remote`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::OriginNoBranch`] when the origin's `HEAD` names no
+    /// branch, and the failures of the lock, the read and the fetch.
+    fn origin_base(&self, mirror: &Path, url: &str, mode: Mode) -> Result<String, Error> {
+        let no_branch = || Error::OriginNoBranch {
+            origin: crate::mirror::redacted(url),
+            mirror: mirror.to_path_buf(),
+        };
+        let default = if mode == Mode::DryRun {
+            match self.backend.mirror_default(mirror)? {
+                Some(default) => default,
+                None => self
+                    .backend
+                    .remote_default(mirror, url)?
+                    .ok_or_else(no_branch)?,
+            }
+        } else {
+            let _lock = self.lock_mirror(mirror)?;
+            self.backend.prepare_mirror(mirror)?;
+            let named = self
+                .backend
+                .remote_default(mirror, url)?
+                .ok_or_else(no_branch)?;
+            self.backend.fetch_mirror(mirror, url, &named)?;
+            self.backend.mirror_default(mirror)?.ok_or_else(no_branch)?
+        };
+        Ok(format!("refs/remotes/origin/{default}"))
     }
 
     /// Creates the workspace `name` of [`Workspaces::create_repos`] with a
@@ -1538,7 +1768,7 @@ impl<B: Backend> Workspaces<B> {
         &self,
         root: &Path,
         name: &WorkspaceName,
-        found: &[(crate::backend::Repository, String)],
+        found: &[(Found, String)],
         mirrors: &Path,
         mode: Mode,
         options: CreateOptions<'_>,
@@ -1548,9 +1778,10 @@ impl<B: Backend> Workspaces<B> {
         let mut checkouts = Vec::new();
         let mut urls = Vec::new();
         for (repository, folder) in found {
-            let (checkout, url) = self.planned_clone(name, &path, repository, folder, mirrors)?;
+            let (checkout, fetch) =
+                self.planned_clone(name, &path, repository, folder, mirrors, mode)?;
             checkouts.push(checkout);
-            urls.push(url);
+            urls.push(fetch);
         }
         let mut workspace = Workspace::new(name.clone(), path, checkouts).with_host(&self.host);
         workspace.host = host;
@@ -1632,15 +1863,12 @@ impl<B: Backend> Workspaces<B> {
         else {
             return Ok(AddOutcome::Worktrees(workspace));
         };
-        let repository = self.backend.repository(&repo.path)?;
-        let folder = repo
-            .folder
-            .clone()
-            .unwrap_or_else(|| repository.name.clone());
+        let repository = self.found(repo)?;
+        let folder = Self::folder_of(repo, &repository);
         if let Err(reason) = folder_name(&folder) {
             return Ok(AddOutcome::BadFolder {
                 folder,
-                repository: repository.root,
+                repository: repository.shown(),
                 reason,
             });
         }
@@ -1649,7 +1877,7 @@ impl<B: Backend> Workspaces<B> {
             .map(|checkout| (checkout.name.clone(), checkout.source.clone()));
         let resumed = match unfinished {
             Some((unfinished, source)) => {
-                if unfinished != folder || source != repository.root {
+                if unfinished != folder || source != repository.source() {
                     return Ok(AddOutcome::Incomplete {
                         folder: unfinished,
                         repository: source,
@@ -1675,16 +1903,17 @@ impl<B: Backend> Workspaces<B> {
             return Ok(AddOutcome::FolderTaken {
                 workspace,
                 folder,
-                repository: repository.root,
+                repository: repository.shown(),
             });
         }
-        if self
-            .backend
-            .branch_tip(&repository.root, name.as_str())?
-            .is_some()
+        if let Found::Repository(repository) = &repository
+            && self
+                .backend
+                .branch_tip(&repository.root, name.as_str())?
+                .is_some()
         {
             return Ok(AddOutcome::BranchTaken {
-                repository: repository.root,
+                repository: repository.root.clone(),
                 branch: name.to_string(),
             });
         }
@@ -1712,8 +1941,14 @@ impl<B: Backend> Workspaces<B> {
             });
         }
         let before = workspace.clone();
-        let (checkout, url) =
-            self.planned_clone(name, &workspace.path.clone(), &repository, &folder, mirrors)?;
+        let (checkout, fetch) = self.planned_clone(
+            name,
+            &workspace.path.clone(),
+            &repository,
+            &folder,
+            mirrors,
+            mode,
+        )?;
         let leftover = if resumed {
             let mut with = workspace.clone();
             with.checkouts.push(checkout.clone());
@@ -1736,7 +1971,7 @@ impl<B: Backend> Workspaces<B> {
         }
         self.store.update(&mut workspace)?;
         let finished = matches!(leftover, Leftover::Finished(_));
-        let made = self.finish_add(&mut workspace, &before, leftover, &url, manifest);
+        let made = self.finish_add(&mut workspace, &before, leftover, &fetch, manifest);
         match made {
             Ok(Ok(())) => Ok(AddOutcome::Added(workspace)),
             Ok(Err(refused)) => match self.undo_add(&workspace, before, finished) {
@@ -1773,7 +2008,7 @@ impl<B: Backend> Workspaces<B> {
         workspace: &mut Workspace,
         before: &Workspace,
         leftover: Leftover,
-        url: &str,
+        fetch: &Fetch,
         manifest: Option<&str>,
     ) -> Result<Result<(), ManifestError>, Error> {
         let Some(checkout) = workspace.checkouts.last_mut() else {
@@ -1783,9 +2018,9 @@ impl<B: Backend> Workspaces<B> {
             Leftover::Finished(commit) => checkout.commit = Some(commit),
             Leftover::Debris => {
                 delete_clone(&checkout.path, &self.host)?;
-                self.make_clone(checkout, url, &mut 0)?;
+                self.make_clone(checkout, fetch, &mut 0)?;
             }
-            Leftover::Absent | Leftover::Kept(_) => self.make_clone(checkout, url, &mut 0)?,
+            Leftover::Absent | Leftover::Kept(_) => self.make_clone(checkout, fetch, &mut 0)?,
         }
         let merged = match manifest {
             Some(text) => workspace.merged_manifest_with(text).map(Some),
@@ -1956,7 +2191,7 @@ impl<B: Backend> Workspaces<B> {
         &self,
         root: &Path,
         workspace: &mut Workspace,
-        urls: &[String],
+        urls: &[Fetch],
         manifest: Option<&str>,
         made: &mut MadeSoFar,
     ) -> Result<Result<(), ManifestError>, Error> {
@@ -1997,17 +2232,24 @@ impl<B: Backend> Workspaces<B> {
         (self.checkpoint)("marker")
     }
 
-    /// Makes the clone of `checkout` from its mirror, fetched from `url`,
-    /// on its branch, and sets its commit. It adds one to `clones` once it
-    /// starts the clone, which may leave a directory behind.
+    /// Makes the clone of `checkout` from its mirror, fetched from the URL
+    /// of `fetch` unless the plan already fetched it, on its branch, and
+    /// sets its commit. It adds one to `clones` once it starts the clone,
+    /// which may leave a directory behind.
     fn make_clone(
         &self,
         checkout: &mut Checkout,
-        url: &str,
+        fetch: &Fetch,
         clones: &mut usize,
     ) -> Result<(), Error> {
         let base = checkout.base.clone();
-        self.make_clone_at(checkout, url, CloneStart::Branch(&base), true, clones)
+        self.make_clone_at(
+            checkout,
+            &fetch.url,
+            CloneStart::Branch(&base),
+            !fetch.done,
+            clones,
+        )
     }
 
     /// Makes the clone of `checkout` from its mirror, as `start` says, and
@@ -2115,14 +2357,16 @@ impl<B: Backend> Workspaces<B> {
     /// Copies the `info/exclude` file of the person's repository into the
     /// clone of `checkout`, so a path that the person ignores there, such as
     /// `.env`, stays ignored in the clone, as it was in a worktree, which
-    /// shared the file. A repository without the file copies nothing.
+    /// shared the file. A repository without the file copies nothing, and
+    /// neither does a clone made from an origin, which has no repository of
+    /// the person's.
     fn copy_excludes(&self, checkout: &Checkout) -> Result<(), Error> {
         // A restore can outlive the person's repository, whose exclude
         // rules are then gone with it.
-        if !checkout.source.is_dir() {
+        let Some(source) = checkout.working_source().filter(|source| source.is_dir()) else {
             return Ok(());
-        }
-        let from = self.backend.exclude_file(&checkout.source)?;
+        };
+        let from = self.backend.exclude_file(source)?;
         let rules = match store::read(&from) {
             Ok(rules) => rules,
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
@@ -2152,6 +2396,7 @@ impl<B: Backend> Workspaces<B> {
             | Error::NoOrigin { .. }
             | Error::EmptyOrigin { .. }
             | Error::NoDefaultBranch { .. }
+            | Error::OriginNoBranch { .. }
             | Error::ProgramMissing { .. }
             | Error::CommandFailed { .. }
             | Error::TimedOut { .. }

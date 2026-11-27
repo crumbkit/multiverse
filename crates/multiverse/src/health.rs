@@ -568,6 +568,7 @@ fn record_path(error: &Error) -> Option<&Path> {
         | Error::NoOrigin { .. }
         | Error::EmptyOrigin { .. }
         | Error::NoDefaultBranch { .. }
+        | Error::OriginNoBranch { .. }
         | Error::ProgramMissing { .. }
         | Error::CommandFailed { .. }
         | Error::TimedOut { .. }

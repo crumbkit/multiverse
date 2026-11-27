@@ -60,7 +60,7 @@ use crate::backend::{
 };
 use crate::error::Error;
 use crate::host::Host;
-use crate::mirror::redacted;
+use crate::mirror::{recorded_origin, redacted};
 use crate::process::{deadline_in, ran_to_its_end};
 use crate::store;
 
@@ -92,6 +92,10 @@ const MOST_LISTING_BYTES: u64 = 256 * 1024 * 1024;
 
 /// The program that this backend runs.
 const GIT: &str = "git";
+
+/// The key of a mirror's config that holds the URL it last fetched from,
+/// with the user name of an SSH URL and without a password.
+const MIRROR_ORIGIN_KEY: &str = "mxv.origin";
 
 /// The git backend, which runs the `git` program found on `PATH`.
 #[derive(Clone, Copy, Debug, Default)]
@@ -975,8 +979,85 @@ impl Backend for Git {
             "symbolic-ref",
             LOCAL_DEADLINE,
         )?
-        .ok("symbolic-ref", mirror)
+        .ok("symbolic-ref", mirror)?;
+        // git writes the URL into `FETCH_HEAD` without its user name, so
+        // the mirror keeps its own copy, without a password, for a later
+        // fetch of the short form.
+        let recorded = recorded_origin(url);
+        run_in_mirror(
+            mirror,
+            ["config", MIRROR_ORIGIN_KEY, recorded.as_str()],
+            "config",
+            LOCAL_DEADLINE,
+        )?
+        .ok("config", mirror)
         .map(drop)
+    }
+
+    fn mirror_origin(&self, mirror: &Path) -> Result<Option<String>, Error> {
+        if !mirror.join("HEAD").is_file() {
+            return Ok(None);
+        }
+        let found = run_in_mirror(
+            mirror,
+            ["config", "--get", MIRROR_ORIGIN_KEY],
+            "config",
+            LOCAL_DEADLINE,
+        )?;
+        let url = trimmed(&found.stdout);
+        Ok((found.status.success() && !url.is_empty()).then_some(url))
+    }
+
+    fn remote_default(&self, mirror: &Path, url: &str) -> Result<Option<String>, Error> {
+        // The origin is read before the mirror may exist, and `ls-remote`
+        // needs no repository, so it runs in the root directory.
+        let listed = run(
+            Path::new("/"),
+            ["ls-remote", "--symref", "--", url, "HEAD"],
+            "ls-remote",
+            FETCH_DEADLINE,
+        )?;
+        if !listed.status.success() {
+            if let Some(refused) = ssh::refused(url, &listed.stderr) {
+                return Err(refused);
+            }
+            return Err(Error::MirrorFetchFailed {
+                origin: redacted(url),
+                mirror: mirror.to_path_buf(),
+                message: explanation(listed.status, &listed.stderr),
+            });
+        }
+        Ok(listed.stdout.lines().find_map(|line| {
+            let (reference, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
+            let branch = reference.strip_prefix("refs/heads/")?;
+            (name == "HEAD" && !branch.is_empty()).then(|| branch.to_owned())
+        }))
+    }
+
+    fn mirror_default(&self, mirror: &Path) -> Result<Option<String>, Error> {
+        if !mirror.join("HEAD").is_file() {
+            return Ok(None);
+        }
+        let head = run_in_mirror(
+            mirror,
+            ["symbolic-ref", "--quiet", "HEAD"],
+            "symbolic-ref",
+            LOCAL_DEADLINE,
+        )?;
+        let reference = trimmed(&head.stdout);
+        let Some(branch) = reference
+            .strip_prefix("refs/heads/")
+            .filter(|_| head.status.success())
+        else {
+            return Ok(None);
+        };
+        let found = run_in_mirror(
+            mirror,
+            ["rev-parse", "--verify", "--quiet", reference.as_str()],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?;
+        Ok(found.status.success().then(|| branch.to_owned()))
     }
 
     fn clone_mirror(&self, mirror: &Path, checkout: &Path, url: &str) -> Result<(), Error> {
@@ -1194,7 +1275,7 @@ impl Backend for Git {
         concealed::concealed(checkout, host)
     }
 
-    fn local_names(&self, checkout: &Path, source: &Path) -> Result<LocalNames, Error> {
+    fn local_names(&self, checkout: &Path, source: Option<&Path>) -> Result<LocalNames, Error> {
         concealed::local_names(checkout, source)
     }
 

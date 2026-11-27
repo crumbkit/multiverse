@@ -107,6 +107,103 @@ impl Origin {
     }
 }
 
+/// An origin that a person names in place of a repository on this
+/// machine, such as `--repo https://github.com/acme/dispatcher`, which mxv
+/// fetches into its mirror and clones from there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RepoOrigin {
+    /// The text as the person gave it.
+    given: String,
+    /// The URL that the text names, or `None` for the short form.
+    url: Option<String>,
+    /// The URL that the short form is fetched from when its mirror records
+    /// none, or the URL itself.
+    default_url: String,
+    /// The mirror's path below the mirror directory.
+    key: PathBuf,
+}
+
+impl RepoOrigin {
+    /// Returns the origin that `text` names, or `None` when `text` is not
+    /// one. A text with `://`, or in git's scp-like form such as
+    /// `git@github.com:acme/dispatcher.git`, is a URL. A text whose first
+    /// component holds a dot, such as `github.com/acme/dispatcher`, and
+    /// that has at least two more components, is the short form, which is
+    /// fetched from `ssh://git@<host>/<path>` unless its mirror records
+    /// another URL. A text that names a directory on this machine is a
+    /// path, which the caller checks first.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let given = text.trim();
+        // A text that starts with `-` would reach git as an option.
+        if given.starts_with('-') {
+            return None;
+        }
+        let (url, default_url) = if given.contains("://") || scp_like(given).is_some() {
+            (Some(given.to_owned()), given.to_owned())
+        } else {
+            let (host, path) = given.split_once('/')?;
+            let components: Vec<&str> = path.split('/').collect();
+            let host_like = host.contains('.')
+                && !host.starts_with('.')
+                && host
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.' || byte == b'-');
+            if !host_like
+                || components.len() < 2
+                || components.iter().any(|component| component.is_empty())
+            {
+                return None;
+            }
+            (
+                None,
+                format!("ssh://git@{}/{path}", host.to_ascii_lowercase()),
+            )
+        };
+        let origin = Origin::parse(&default_url, Path::new("/"))?;
+        Some(Self {
+            given: given.to_owned(),
+            url,
+            default_url,
+            key: origin.key,
+        })
+    }
+
+    /// Returns the text as the person gave it.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.given
+    }
+
+    /// Returns the name of the checkout's folder: the last component of the
+    /// origin's path without `.git`, or `None` when that is empty.
+    #[must_use]
+    pub fn folder(&self) -> Option<String> {
+        let path = scp_like(&self.default_url)
+            .filter(|_| !self.default_url.contains("://"))
+            .map_or(self.default_url.as_str(), |(_, path)| path);
+        let last = path.trim_end_matches('/').rsplit('/').next()?;
+        let name = last.strip_suffix(".git").unwrap_or(last);
+        (!name.is_empty()).then(|| name.to_owned())
+    }
+
+    /// Returns the mirror's path below the mirror directory.
+    pub(crate) fn key(&self) -> &Path {
+        &self.key
+    }
+
+    /// Returns the URL to fetch: the URL that the person gave, or, for the
+    /// short form, `recorded`, the URL that the mirror's config records from
+    /// its last fetch, with its SSH user name, or else the SSH URL of the
+    /// host and path.
+    pub(crate) fn url(&self, recorded: Option<String>) -> String {
+        match &self.url {
+            Some(url) => url.clone(),
+            None => recorded.unwrap_or_else(|| self.default_url.clone()),
+        }
+    }
+}
+
 /// Returns `url` with the user name and password of each `scheme://`
 /// URL in it left out, such as `https://example.com/app.git` for
 /// `https://someone:token@example.com/app.git`, so a credential that a

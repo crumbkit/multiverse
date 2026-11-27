@@ -969,7 +969,9 @@ impl<B: Backend> Workspaces<B> {
         if checkout.made.is_worktree() {
             return Ok(Vec::new());
         }
-        let names = self.backend.local_names(&checkout.path, &checkout.source)?;
+        let names = self
+            .backend
+            .local_names(&checkout.path, checkout.working_source())?;
         let mut warnings: Vec<String> = [
             ("remotes", names.remotes),
             ("hooks", names.hooks),

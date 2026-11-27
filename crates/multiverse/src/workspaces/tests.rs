@@ -875,6 +875,15 @@ impl Backend for Scripted {
     fn fetch_mirror(&self, mirror: &Path, url: &str, default: &str) -> Result<(), Error> {
         Git.fetch_mirror(mirror, url, default)
     }
+    fn remote_default(&self, mirror: &Path, url: &str) -> Result<Option<String>, Error> {
+        Git.remote_default(mirror, url)
+    }
+    fn mirror_origin(&self, mirror: &Path) -> Result<Option<String>, Error> {
+        Git.mirror_origin(mirror)
+    }
+    fn mirror_default(&self, mirror: &Path) -> Result<Option<String>, Error> {
+        Git.mirror_default(mirror)
+    }
     fn clone_mirror(&self, mirror: &Path, checkout: &Path, url: &str) -> Result<(), Error> {
         Git.clone_mirror(mirror, checkout, url)
     }
@@ -983,7 +992,7 @@ impl Backend for Scripted {
     fn local_names(
         &self,
         checkout: &Path,
-        source: &Path,
+        source: Option<&Path>,
     ) -> Result<crate::backend::LocalNames, Error> {
         Git.local_names(checkout, source)
     }

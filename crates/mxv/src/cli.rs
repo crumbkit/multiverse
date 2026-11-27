@@ -373,13 +373,15 @@ pub(crate) enum Verb {
     ///
     /// Each --repo adds one clone, in the folder <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that an --as right after that --repo gives. Two folders with the same name, compared without case, are refused. Every clone is on the branch NAME. The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG_DATA_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
     ///
+    /// A --repo that names no directory may name an origin instead: a git URL, such as https://github.com/acme/dispatcher or git@github.com:acme/dispatcher.git, or the short form github.com/acme/dispatcher, which mxv fetches from the URL that its mirror last fetched from, or else from ssh://git@github.com/acme/dispatcher. mxv fetches the origin into its mirror, starts the clone from the origin's default branch, names the folder after the last part of the origin's path, and copies no ignored directories and no .git/info/exclude, because no repository on this machine holds them.
+    ///
     /// The workspace's directory is <ROOT>/<NAME>. The root is $MXV_ROOT when it is set, or else the `root` that the config file $XDG_CONFIG_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG_DATA_HOME/mxv/workspaces, which is ~/.local/share/mxv/workspaces when XDG_DATA_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
     ///
     /// New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock, or with mxv::workspace::creating when an earlier mxv new left that workspace unfinished. A dry run takes no lock.
     New(NewArgs),
     /// Add a clone of a repository to a workspace, on the workspace's branch.
     ///
-    /// The clone lives in <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's units and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's units run, and moves the host ports that the workspace holds to the new names.
+    /// The clone lives in <ROOT>/<NAME>/<FOLDER>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone, so --repo may also name an origin, such as github.com/acme/dispatcher or a git URL. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's units and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's units run, and moves the host ports that the workspace holds to the new names.
     Add(AddArgs),
     /// List the workspaces.
     List(ListArgs),
@@ -673,8 +675,8 @@ pub(crate) struct AddArgs {
     #[arg(short, long, value_name = "WORKSPACE")]
     pub(crate) workspace: Option<String>,
 
-    /// The git repository to check out, or any directory inside it
-    #[arg(long, value_name = "PATH")]
+    /// The git repository to check out, any directory inside it, or an origin URL
+    #[arg(long, value_name = "PATH|ORIGIN")]
     pub(crate) repo: PathBuf,
 
     /// The checkout's folder, which defaults to the repository's name
@@ -698,7 +700,7 @@ pub(crate) struct AddArgs {
 /// it gives.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct RepoArg {
-    /// The repository, or any directory inside it.
+    /// The repository, or any directory inside it, or an origin.
     pub(crate) path: PathBuf,
     /// The checkout's folder, when an `--as` gives one.
     pub(crate) folder: Option<String>,
@@ -771,12 +773,12 @@ impl clap::Args for Repos {
             .arg(
                 clap::Arg::new("repo")
                     .long("repo")
-                    .value_name("PATH")
+                    .value_name("PATH|ORIGIN")
                     .value_parser(clap::value_parser!(PathBuf))
                     .action(clap::ArgAction::Append)
                     .value_delimiter(',')
                     .required(true)
-                    .help("A git repository, or a directory in it, to check out; repeat it or use commas"),
+                    .help("A git repository, a directory in it, or an origin URL; repeat it or use commas"),
             )
             .arg(
                 clap::Arg::new("as")

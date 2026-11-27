@@ -52,6 +52,8 @@ Create a workspace with its own clone of each repository, on a new branch from t
 
 Each --repo adds one clone, in the folder \<ROOT\>/\<NAME\>/\<FOLDER\>, where the folder is the repository's name or the one that an --as right after that --repo gives. Two folders with the same name, compared without case, are refused. Every clone is on the branch NAME. The clone has a .git of its own, with no hooks, and its origin is the repository's origin, so nothing in it can change the repository or another workspace. It borrows the objects of a bare mirror of the origin in $XDG\_DATA\_HOME/mxv/mirrors, which mxv fetches first and never deletes. The repository itself is only read, and its .git/info/exclude is copied into the clone.
 
+A --repo that names no directory may name an origin instead: a git URL, such as https://github.com/acme/dispatcher or git@github.com:acme/dispatcher.git, or the short form github.com/acme/dispatcher, which mxv fetches from the URL that its mirror last fetched from, or else from ssh://git@github.com/acme/dispatcher. mxv fetches the origin into its mirror, starts the clone from the origin's default branch, names the folder after the last part of the origin's path, and copies no ignored directories and no .git/info/exclude, because no repository on this machine holds them.
+
 The workspace's directory is \<ROOT\>/\<NAME\>. The root is $MXV\_ROOT when it is set, or else the `root` that the config file $XDG\_CONFIG\_HOME/mxv/config.toml sets, such as `root = "~/work"`, or else $XDG\_DATA\_HOME/mxv/workspaces, which is \~/.local/share/mxv/workspaces when XDG\_DATA\_HOME is unset. The result names the root and where it came from. Each record keeps its workspace's own directory, so changing the root later moves no workspace.
 
 New holds the workspace's lock from before it writes the record until it has copied the ignored directories, so `mxv remove` of the same name fails with mxv::workspace::busy meanwhile. A name that a workspace already holds fails with mxv::workspace::exists at once, without waiting for the lock, or with mxv::workspace::creating when an earlier mxv new left that workspace unfinished. A dry run takes no lock.
@@ -59,7 +61,7 @@ New holds the workspace's lock from before it writes the record until it has cop
 ### Arguments
 
 - `<NAME>`: The workspace's name, which also names its directory and its branch. Required.
-- `--repo <PATH>`: A git repository, or a directory in it, to check out; repeat it or use commas. Required. Takes more than one value.
+- `--repo <PATH|ORIGIN>`: A git repository, a directory in it, or an origin URL; repeat it or use commas. Required. Takes more than one value.
 - `--as <FOLDER>`: The folder of the --repo before it, which defaults to the repository's name. Takes more than one value.
 - `--no-clone`: Clone none of the repositories' ignored directories, such as node\_modules/, into the new checkouts
 - `--manifest <FILE>`: Copy FILE into the new workspace as its workspace manifest, \<ROOT\>/\<NAME\>/mxv.toml, in place of a template
@@ -108,12 +110,12 @@ Effects: additive, not idempotent, open-world.
 
 Add a clone of a repository to a workspace, on the workspace's branch.
 
-The clone lives in \<ROOT\>/\<NAME\>/\<FOLDER\>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's units and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's units run, and moves the host ports that the workspace holds to the new names.
+The clone lives in \<ROOT\>/\<NAME\>/\<FOLDER\>, where the folder is the repository's name or the one that --as gives, and is made as `mxv new` makes each clone, so --repo may also name an origin, such as github.com/acme/dispatcher or a git URL. The workspace's AGENTS.md and record name it afterwards. A workspace with two or more checkouts merges each checkout's mxv.toml with the workspace manifest and puts the checkout's folder in front of each name that the checkout's mxv.toml declares, so adding a second repository renames the first repository's units and ports, such as `server` to `app-server`. The command therefore refuses while the workspace's units run, and moves the host ports that the workspace holds to the new names.
 
 ### Arguments
 
 - `-w`, `--workspace <WORKSPACE>`: The workspace, which defaults to the one that holds the current directory
-- `--repo <PATH>`: The git repository to check out, or any directory inside it. Required.
+- `--repo <PATH|ORIGIN>`: The git repository to check out, any directory inside it, or an origin URL. Required.
 - `--as <FOLDER>`: The checkout's folder, which defaults to the repository's name
 - `--no-clone`: Clone none of the repository's ignored directories, such as node\_modules/, into the new checkout
 - `--manifest <FILE>`: Copy FILE into the workspace as its workspace manifest once it has the new checkout, with paths relative to the workspace's directory; a workspace of one checkout with a workspace manifest needs it

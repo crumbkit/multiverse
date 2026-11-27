@@ -154,7 +154,9 @@ pub struct Checkout {
     /// The version-control system that made the checkout.
     pub backend: BackendKind,
     /// The top-level directory of the repository that the checkout belongs
-    /// to.
+    /// to. A clone that `mxv new` or `mxv add` made from an origin, with no
+    /// repository of the person's, holds its mirror's directory here, which
+    /// has no working tree.
     pub source: PathBuf,
     /// The checkout's directory.
     pub path: PathBuf,
@@ -713,6 +715,15 @@ impl Checkout {
     #[must_use]
     pub fn mirror(&self) -> Option<&Path> {
         self.made.mirror()
+    }
+
+    /// Returns the person's repository that the checkout was made from, or
+    /// `None` for a clone made from an origin, whose `source` is its mirror
+    /// and has no working tree to copy ignored directories or exclude rules
+    /// from.
+    #[must_use]
+    pub fn working_source(&self) -> Option<&Path> {
+        (self.mirror() != Some(self.source.as_path())).then_some(self.source.as_path())
     }
 }
 

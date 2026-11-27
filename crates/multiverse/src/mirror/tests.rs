@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{Origin, redacted};
+use super::{Origin, RepoOrigin, redacted};
 
 fn key(url: &str) -> String {
     Origin::parse(url, Path::new("/home/someone/app"))
@@ -157,4 +157,75 @@ fn the_host_of_an_ssh_url_and_of_an_scp_like_url_is_the_name_after_the_user() {
     let (authority, path) = super::scp_like("git@GitHub.com:acme/app.git").unwrap();
     assert_eq!(super::host_of(authority, None), "github.com");
     assert_eq!(path, "acme/app.git");
+}
+
+#[test]
+fn a_git_url_names_an_origin_with_the_folder_and_mirror_of_its_last_component() {
+    for url in [
+        "https://github.com/acme/dispatcher",
+        "https://github.com/acme/dispatcher.git",
+        "git@github.com:acme/dispatcher.git",
+        "ssh://git@github.com/acme/dispatcher",
+    ] {
+        let origin = RepoOrigin::parse(url).unwrap();
+        assert_eq!(origin.as_str(), url);
+        assert_eq!(origin.folder().as_deref(), Some("dispatcher"), "{url}");
+        assert_eq!(origin.url(None), url);
+        assert_eq!(
+            origin.key().display().to_string(),
+            "github.com/acme/dispatcher.git",
+            "{url}"
+        );
+    }
+    let local = RepoOrigin::parse("file:///srv/repos/dispatcher.git").unwrap();
+    assert_eq!(local.folder().as_deref(), Some("dispatcher"));
+}
+
+#[test]
+fn a_short_form_is_fetched_over_ssh_unless_its_mirror_records_another_url() {
+    let origin = RepoOrigin::parse("github.com/acme/dispatcher").unwrap();
+    assert_eq!(origin.folder().as_deref(), Some("dispatcher"));
+    assert_eq!(
+        origin.key().display().to_string(),
+        "github.com/acme/dispatcher.git"
+    );
+    assert_eq!(origin.url(None), "ssh://git@github.com/acme/dispatcher");
+    assert_eq!(
+        origin.url(Some("https://github.com/acme/dispatcher".to_owned())),
+        "https://github.com/acme/dispatcher"
+    );
+    let with_git = RepoOrigin::parse("GitHub.com/acme/dispatcher.git").unwrap();
+    assert_eq!(with_git.key(), origin.key());
+    assert_eq!(
+        with_git.url(None),
+        "ssh://git@github.com/acme/dispatcher.git"
+    );
+}
+
+#[test]
+fn a_url_names_its_own_origin_even_when_its_mirror_records_another() {
+    let origin = RepoOrigin::parse("https://github.com/acme/dispatcher").unwrap();
+    assert_eq!(
+        origin.url(Some("ssh://git@github.com/acme/dispatcher".to_owned())),
+        "https://github.com/acme/dispatcher"
+    );
+}
+
+#[test]
+fn a_value_that_is_neither_a_url_nor_a_short_form_names_no_origin() {
+    for text in [
+        "app",
+        "src/app",
+        "./acme.d/app/x",
+        "../acme.d/app/x",
+        "/srv/acme.d/app",
+        "github.com/acme",
+        "github.com//acme",
+        "~/github.com/acme/app",
+        "https://github.com",
+        "--upload-pack=touch:x",
+        "",
+    ] {
+        assert!(RepoOrigin::parse(text).is_none(), "{text}");
+    }
 }

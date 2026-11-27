@@ -1039,3 +1039,181 @@ fn a_clone_creation_that_finishes_leaves_the_record_live() {
         .unwrap();
     assert_eq!(read.state(), WorkspaceState::Live);
 }
+
+/// Returns the repository that names the origin of `setup` by its
+/// `file://` URL, as `--repo file:///…/origin.git` does.
+fn origin_repo(setup: &Setup) -> crate::workspaces::Repo {
+    let url = format!("file://{}", setup.fixture.origin.display());
+    let source = crate::workspaces::RepoSource::from_argument(url);
+    assert!(
+        matches!(source, crate::workspaces::RepoSource::Origin(_)),
+        "{source:?}"
+    );
+    crate::workspaces::Repo::of(source)
+}
+
+fn created_from_origin(setup: &Setup, text: &str, mode: Mode) -> Workspace {
+    let outcome = setup
+        .workspaces
+        .create_repos(&setup.root, &name(text), &[origin_repo(setup)], mode, None)
+        .unwrap();
+    match outcome {
+        NewOutcome::Created(workspace) | NewOutcome::Planned(workspace) => workspace,
+        other @ (NewOutcome::NameTaken(_)
+        | NewOutcome::PathTaken(_)
+        | NewOutcome::BadFolder { .. }
+        | NewOutcome::ManifestRefused(_)
+        | NewOutcome::BranchTaken { .. }
+        | NewOutcome::FolderTaken { .. }) => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_workspace_of_an_origin_url_clones_its_default_branch_with_no_repository_of_the_persons() {
+    let setup = setup();
+    let latest = advance_origin(&setup.fixture);
+    let before = person_state(&setup);
+    let workspace = created_from_origin(&setup, "reading-list", Mode::Change);
+    let checkout = &workspace.checkouts[0];
+    assert_eq!(checkout.name, "origin");
+    assert_eq!(checkout.base, "refs/remotes/origin/main");
+    assert_eq!(checkout.commit.as_deref(), Some(latest.as_str()));
+    let mirror = checkout.mirror().unwrap().to_path_buf();
+    assert!(mirror.starts_with(&setup.mirrors), "{}", mirror.display());
+    assert_eq!(checkout.source, mirror);
+    assert_eq!(checkout.working_source(), None);
+    assert_eq!(
+        git(&checkout.path, &["branch", "--show-current"]).trim(),
+        "reading-list"
+    );
+    assert_eq!(
+        git(&checkout.path, &["remote", "get-url", "origin"]).trim(),
+        format!("file://{}", setup.fixture.origin.display())
+    );
+    assert_eq!(person_state(&setup), before);
+    let stored = setup
+        .workspaces
+        .find(&name("reading-list"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.state(), WorkspaceState::Live);
+}
+
+#[test]
+fn an_origin_whose_default_branch_is_not_main_starts_the_checkout_there() {
+    let setup = setup();
+    git(
+        &setup.fixture.clone,
+        &["push", "--quiet", "origin", "main:trunk"],
+    );
+    git(
+        &setup.fixture.origin,
+        &["symbolic-ref", "HEAD", "refs/heads/trunk"],
+    );
+    let workspace = created_from_origin(&setup, "reading-list", Mode::Change);
+    assert_eq!(workspace.checkouts[0].base, "refs/remotes/origin/trunk");
+}
+
+#[test]
+fn a_dry_run_of_an_origin_fetches_nothing_and_reads_the_default_branch_from_the_origin() {
+    let setup = setup();
+    let workspace = created_from_origin(&setup, "reading-list", Mode::DryRun);
+    assert_eq!(workspace.checkouts[0].base, "refs/remotes/origin/main");
+    assert!(!setup.mirrors.exists());
+    assert!(!workspace.path.exists());
+    assert!(
+        setup
+            .workspaces
+            .find(&name("reading-list"))
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn an_origin_without_a_default_branch_fails_naming_the_origin_and_leaves_no_record() {
+    let setup = setup();
+    let empty = setup
+        .fixture
+        .dir
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join("empty.git");
+    git(
+        &setup.fixture.dir.path().canonicalize().unwrap(),
+        &["init", "--quiet", "--bare", "empty.git"],
+    );
+    let url = format!("file://{}", empty.display());
+    let repo = crate::workspaces::Repo::of(crate::workspaces::RepoSource::from_argument(&url));
+    for mode in [Mode::DryRun, Mode::Change] {
+        let error = setup
+            .workspaces
+            .create_repos(
+                &setup.root,
+                &name("reading-list"),
+                std::slice::from_ref(&repo),
+                mode,
+                None,
+            )
+            .unwrap_err();
+        let Error::OriginNoBranch { origin, .. } = &error else {
+            panic!("{error:?}");
+        };
+        assert_eq!(origin, &url);
+        assert!(error.to_string().contains(&url), "{error}");
+    }
+    assert!(
+        setup
+            .workspaces
+            .find(&name("reading-list"))
+            .unwrap()
+            .is_none()
+    );
+    assert!(!setup.root.join("reading-list").exists());
+}
+
+#[test]
+fn a_workspace_of_an_origin_copies_no_ignored_directory_and_no_exclude_rules() {
+    let setup = setup();
+    fs::create_dir_all(setup.fixture.clone.join("node_modules/left-pad")).unwrap();
+    write(
+        setup.fixture.clone.join(".git/info/exclude"),
+        "node_modules/\n",
+    );
+    let workspace = created_from_origin(&setup, "reading-list", Mode::Change);
+    let globs = [crate::disposable::PathGlob::parse_clone("node_modules/").unwrap()];
+    let cloned = setup
+        .workspaces
+        .clone_ignored(&workspace, &globs, Mode::Change)
+        .unwrap();
+    assert!(cloned.paths.is_empty(), "{cloned:?}");
+    let checkout = &workspace.checkouts[0].path;
+    assert!(!checkout.join("node_modules").exists());
+    assert!(!checkout.join(".git/info/exclude").exists());
+}
+
+#[test]
+fn adding_an_origin_to_a_workspace_clones_it_beside_the_first_checkout() {
+    let setup = setup();
+    created(&setup, "reading-list");
+    let other = crate::testing::fixture_named("dispatcher");
+    let url = format!("file://{}", other.origin.display());
+    let repo = crate::workspaces::Repo::of(crate::workspaces::RepoSource::from_argument(&url))
+        .with_folder("dispatcher")
+        .unwrap();
+    let outcome = setup
+        .workspaces
+        .add(&name("reading-list"), &repo, Mode::Change, None)
+        .unwrap();
+    let crate::workspaces::AddOutcome::Added(workspace) = outcome else {
+        panic!("{outcome:?}");
+    };
+    let added = workspace.checkouts.last().unwrap();
+    assert_eq!(added.name, "dispatcher");
+    assert_eq!(Some(added.source.as_path()), added.mirror());
+    assert_eq!(
+        git(&added.path, &["branch", "--show-current"]).trim(),
+        "reading-list"
+    );
+}

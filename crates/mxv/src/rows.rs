@@ -672,6 +672,17 @@ impl Row for NewRow {
     const UNCUT_COLUMNS: &'static [&'static str] = &["name"];
 }
 
+/// Reports whether `checkout` holds an `mxv.toml`: in the checkout once it
+/// exists, or else, on a dry run, in the person's repository. A checkout made
+/// from an origin has no repository of the person's, so its dry run finds
+/// none.
+fn has_manifest(checkout: &Checkout) -> bool {
+    checkout.path.join(MANIFEST_FILE).is_file()
+        || checkout
+            .working_source()
+            .is_some_and(|source| source.join(MANIFEST_FILE).is_file())
+}
+
 impl NewRow {
     /// Returns the row of `workspace` with `root`, the root that the run
     /// used, and the directories that `cloned` names.
@@ -696,7 +707,7 @@ impl NewRow {
                 paths.push(workspace.manifest_file());
             }
             for checkout in &workspace.checkouts {
-                if checkout.source.join(MANIFEST_FILE).is_file() {
+                if has_manifest(checkout) {
                     paths.push(checkout.path.join(MANIFEST_FILE));
                 }
             }
@@ -716,7 +727,7 @@ impl NewRow {
             placed.manifest_paths = placed.manifest_path.iter().cloned().collect();
         } else if placed.manifest == ManifestRow::None
             && let Some(checkout) = workspace.manifest_checkout()
-            && checkout.source.join(MANIFEST_FILE).is_file()
+            && has_manifest(checkout)
         {
             placed.manifest = ManifestRow::Repository;
             placed.manifest_path = Some(checkout.path.join(MANIFEST_FILE).display().to_string());

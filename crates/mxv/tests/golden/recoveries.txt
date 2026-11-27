@@ -145,6 +145,7 @@ mxv run --json -w both check
   hint
 
 codes that no start provokes:
+  mxv::origin::no_default_branch: Only an origin without a default branch provokes it, and an example can name a local origin only by a file:// URL with the absolute path of its fresh directory, which changes on every run; tests/workspaces.rs provokes it with such a URL.
   mxv::proxy::port_held: Each needs a Caddy program, a held address or a terminal that a fixed fixture cannot hold; tests/proxy.rs provokes them with a missing program, a held address and a refused terminal.
   mxv::proxy::port_denied: Each needs a Caddy program, a held address or a terminal that a fixed fixture cannot hold; tests/proxy.rs provokes them with a missing program, a held address and a refused terminal.
   mxv::proxy::caddy_missing: Each needs a Caddy program, a held address or a terminal that a fixed fixture cannot hold; tests/proxy.rs provokes them with a missing program, a held address and a refused terminal.
