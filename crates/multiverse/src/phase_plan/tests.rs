@@ -66,6 +66,7 @@ fn plan_of(manifest: &Manifest, caller: &CallerEnvironment) -> Built {
         caller,
         own_command: Some(vec!["/bin/mxv".to_owned(), "phase".to_owned()]),
         urls: ProxyUrls::default(),
+        read_starmaps: true,
     })
     .unwrap()
 }
@@ -479,6 +480,7 @@ fn a_merged_manifest_maps_onto_apps_and_ports_whose_names_do_not_clash() {
         caller: &caller,
         own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: true,
     })
     .unwrap();
     let names: BTreeSet<String> = built
@@ -543,6 +545,7 @@ fn a_process_whose_directory_is_outside_every_root_is_unrunnable() {
         caller: &caller,
         own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: true,
     }) else {
         panic!("a directory outside every root built a plan");
     };
@@ -580,6 +583,7 @@ fn placed_at(cwd: &str) -> Result<(Source, Option<PathBuf>), crate::phase_plan::
         caller: &caller,
         own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: true,
     })?;
     let plan = built.plan.app(&app("api")).unwrap();
     Ok((plan.source.clone(), plan.processes[0].cwd.clone()))
@@ -648,6 +652,7 @@ fn a_process_with_permissions_gives_its_app_its_writes_listen_ports_and_connecti
         caller: &caller,
         own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: true,
     })
     .unwrap();
     let server = built.plan.app(&app("server")).unwrap();
@@ -682,6 +687,7 @@ fn the_plan_of_an_existing_manifest_and_so_its_digest_are_unchanged() {
         caller: &caller,
         own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: true,
     })
     .unwrap();
 
@@ -717,6 +723,7 @@ fn the_requested_permissions_of_host_units_need_no_ports_and_match_the_plan() {
             caller: &caller,
             own_command: None,
             urls: crate::phase_plan::ProxyUrls::default(),
+            read_starmaps: true,
         },
         &units,
     )
@@ -790,6 +797,7 @@ fn a_merged_manifest_gives_each_checkouts_permissions_its_prefixed_port_and_unit
         caller: &caller,
         own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: true,
     })
     .unwrap();
     for prefix in ["api", "web"] {
@@ -849,6 +857,7 @@ fn unrunnable_write(write: &str) -> crate::phase_plan::Unrunnable {
         caller: &caller,
         own_command: None,
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: true,
     }) else {
         panic!("the write path {write} built a plan");
     };
@@ -916,6 +925,7 @@ fn task_plan_with(dir: &Path, own_ports: &BTreeMap<String, String>) -> Built {
             caller: &caller,
             own_command: None,
             urls: crate::phase_plan::ProxyUrls::default(),
+            read_starmaps: true,
         },
         &TaskEntry {
             root: Path::new("/work/triage/app"),
@@ -1044,6 +1054,7 @@ fn routed_plan(urls: ProxyUrls, text: &str) -> Built {
         caller: &CallerEnvironment::default(),
         own_command: None,
         urls,
+        read_starmaps: true,
     })
     .unwrap()
 }
@@ -1168,6 +1179,7 @@ fn a_task_receives_the_domain_and_each_route_but_no_host_or_url_of_its_own() {
             caller: &CallerEnvironment::default(),
             own_command: None,
             urls: urls_of("triage", 443, &[]),
+            read_starmaps: true,
         },
         &TaskEntry {
             root: Path::new("/work/triage/app"),

@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
-use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem, Waited};
+use multiverse::{Allow, MANIFEST_FILE, ManifestError, ManifestProblem, UnrunnableKind, Waited};
 
 use crate::failures::{remove_volumes_line, shown};
 
@@ -44,6 +44,11 @@ pub const MANIFEST_NAME_CLASH: Code = Code::from_spelling("mxv::manifest::name_c
 /// The code of a process's `starmap` file that is missing, is a symbolic
 /// link, is not a regular file, or reaches outside its checkout.
 pub const MANIFEST_STARMAP_FILE: Code = Code::from_spelling("mxv::manifest::starmap_file");
+/// The code of a provided variable of a process's starmap file whose bind
+/// names a unit or a port that the workspace's manifest does not have.
+pub const MANIFEST_PROVIDED_UNKNOWN: Code = Code::from_spelling("mxv::manifest::provided_unknown");
+/// The code of a process's starmap file that does not parse.
+pub const MANIFEST_STARMAP_INVALID: Code = Code::from_spelling("mxv::manifest::starmap_invalid");
 /// The code of a process name that the workspace does not know.
 pub const PROCESS_NOT_FOUND: Code = Code::from_spelling("mxv::process::not_found");
 /// The code of a process that exited before it was ready.
@@ -92,6 +97,8 @@ pub(crate) const CODES: &[Code<'static>] = &[
     MANIFEST_UNREADABLE,
     MANIFEST_NAME_CLASH,
     MANIFEST_STARMAP_FILE,
+    MANIFEST_PROVIDED_UNKNOWN,
+    MANIFEST_STARMAP_INVALID,
     PROCESS_NOT_FOUND,
     PROCESS_EXITED,
     PROCESS_NOT_READY,
@@ -275,6 +282,9 @@ pub(crate) enum RunFailure {
     },
     /// The workspace's plan cannot be run by phase.
     Unrunnable {
+        /// What kind of problem it is, boxed so that the failure stays
+        /// small.
+        kind: Box<UnrunnableKind>,
         /// The workspace's name.
         workspace: String,
         /// The unit at fault, or `None` when the fault is the manifest's.
@@ -386,7 +396,7 @@ impl Failure for RunFailure {
             Self::Running { .. } => WORKSPACE_RUNNING,
             Self::Volumes { .. } => WORKSPACE_VOLUMES,
             Self::VolumeRenamed { .. } => VOLUME_RENAMED,
-            Self::Unrunnable { .. } => MANIFEST_UNRUNNABLE,
+            Self::Unrunnable { kind, .. } => unrunnable_code(kind),
             Self::ManifestMissing { .. } => MANIFEST_NOT_FOUND,
             Self::Manifest(error) => match error.problem {
                 ManifestProblem::UnknownKey { .. } => MANIFEST_UNKNOWN_KEY,
@@ -444,7 +454,9 @@ impl Failure for RunFailure {
                     .collect::<Vec<_>>()
                     .join("; ")
             )),
-            Self::Unrunnable { .. } => Recovery::hint("fix what the message names in the manifest"),
+            Self::Unrunnable {
+                kind, workspace, ..
+            } => unrunnable_recovery(kind, workspace),
             Self::BuildFailed { .. } => Recovery::hint(
                 "read the build's output above and fix the build, then run the command again; every running unit is still running",
             ),
@@ -730,6 +742,72 @@ impl RunFailure {
             | Self::Unrunnable { .. }
             | Self::Volumes { .. } => Vec::new(),
         }
+    }
+}
+
+/// Returns the code of a plan that phase cannot run, by its `kind`.
+fn unrunnable_code(kind: &UnrunnableKind) -> Code<'static> {
+    match kind {
+        UnrunnableKind::ProvidedUnknown { .. } => MANIFEST_PROVIDED_UNKNOWN,
+        UnrunnableKind::StarmapInvalid { .. } => MANIFEST_STARMAP_INVALID,
+        // The library marks the kind non-exhaustive, so a kind that a
+        // later version adds reads as unrunnable until mxv gives it a code
+        // of its own.
+        UnrunnableKind::Plan => MANIFEST_UNRUNNABLE,
+        _ => MANIFEST_UNRUNNABLE,
+    }
+}
+
+/// Returns the fields of a plan of `workspace` that phase cannot run, by
+/// its `kind`: the variable, unit and port of a bind that names no port,
+/// the file of a starmap file that does not parse, and otherwise the
+/// workspace, the unit and the message.
+fn unrunnable_fields<'a>(
+    kind: &'a UnrunnableKind,
+    workspace: &'a str,
+    unit: Option<&'a str>,
+    message: &'a str,
+) -> Vec<Field<'a>> {
+    if let UnrunnableKind::ProvidedUnknown {
+        variable,
+        app,
+        port,
+    } = kind
+    {
+        vec![
+            Field::new("unit", unit),
+            Field::new("variable", variable),
+            Field::new("app", app),
+            Field::new("port", port),
+        ]
+    } else if let UnrunnableKind::StarmapInvalid { file } = kind {
+        vec![
+            Field::new("unit", unit),
+            Field::new("file", shown(file)),
+            Field::new("message", message),
+        ]
+    } else {
+        vec![
+            Field::new("workspace", workspace),
+            Field::new("unit", unit),
+            Field::new("message", message),
+        ]
+    }
+}
+
+/// Returns the recovery of a plan of `workspace` that phase cannot run, by
+/// its `kind`.
+fn unrunnable_recovery(kind: &UnrunnableKind, workspace: &str) -> Recovery {
+    match kind {
+        UnrunnableKind::ProvidedUnknown { variable, .. } => Recovery::hint(format!(
+            "change the bind of {variable} in the starmap file to name a unit of the workspace's manifest and one of its ports, or leave out `port` to name the port the unit listens on; `mxv status -w {workspace}` lists the units and `mxv show {workspace}` lists the ports"
+        )),
+        UnrunnableKind::StarmapInvalid { file } => Recovery::hint(format!(
+            "fix what the message names in {}; `starmap check` in its directory reports each problem",
+            shown(file)
+        )),
+        UnrunnableKind::Plan => Recovery::hint("fix what the message names in the manifest"),
+        _ => Recovery::hint("fix what the message names in the manifest"),
     }
 }
 
@@ -1074,14 +1152,11 @@ impl RunFailure {
                 ),
             ],
             Self::Unrunnable {
+                kind,
                 workspace,
                 unit,
                 message,
-            } => vec![
-                Field::new("workspace", workspace),
-                Field::new("unit", unit.as_deref()),
-                Field::new("message", message),
-            ],
+            } => unrunnable_fields(kind, workspace, unit.as_deref(), message),
             Self::BuildFailed {
                 workspace,
                 process,
@@ -1152,6 +1227,14 @@ impl RunFailure {
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            Self::Unrunnable { kind, message, .. }
+                if matches!(
+                    **kind,
+                    UnrunnableKind::ProvidedUnknown { .. } | UnrunnableKind::StarmapInvalid { .. }
+                ) =>
+            {
+                formatter.write_str(message)
+            }
             Self::Unrunnable {
                 unit: Some(unit),
                 message,

@@ -7,6 +7,18 @@ workspace may need to act on.
 
 ### Added
 
+- `mxv up`, `restart` and `run` give a host process each variable of its
+  starmap file whose bind is `multiverse/port` or `multiverse/url`, such as
+  `{ provided = "multiverse/url", app = "catalogue-api" }`, with the host
+  port or the URL of the named unit's port, including a unit of another
+  checkout of the workspace. A bind that names a unit or port the
+  workspace does not have fails with `mxv::manifest::provided_unknown`, and
+  a starmap file that does not parse fails with
+  `mxv::manifest::starmap_invalid`, both before any unit starts.
+- `Unrunnable` has a `kind`, an `UnrunnableKind`, which tells a plan that
+  breaks phase's rules from a provided variable whose bind names no port
+  and from a starmap file that does not parse.
+
 - `phase::is_variable_name` reports whether a name is one phase passes to
   a process: an ASCII letter or `_`, then ASCII letters, digits and `_`.
 - `Runs::stable_id` returns a workspace's stable id, and mints and saves

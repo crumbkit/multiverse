@@ -447,6 +447,7 @@ fn build<'lock>(
             Err(RunFailure::UnknownProcess { workspace, process }.into())
         }
         BuildEnd::Unrunnable(unrunnable) => Err(RunFailure::Unrunnable {
+            kind: Box::new(unrunnable.kind),
             workspace,
             unit: unrunnable.unit,
             message: unrunnable.message,
@@ -670,6 +671,7 @@ fn start(
         }
         .into()),
         UpOutcome::Unrunnable(unrunnable) => Err(RunFailure::Unrunnable {
+            kind: Box::new(unrunnable.kind),
             workspace,
             unit: unrunnable.unit,
             message: unrunnable.message,

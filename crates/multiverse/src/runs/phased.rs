@@ -624,6 +624,7 @@ impl Runs {
             caller: &self.caller,
             own_command: self.own_command.clone(),
             urls: self.proxy_urls_of(workspace),
+            read_starmaps: true,
         }
     }
 

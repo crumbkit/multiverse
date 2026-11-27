@@ -62,9 +62,11 @@
 //! a `..` name fail with [`ManifestProblem::Invalid`]. A read against a
 //! checkout, such as [`Manifest::read`], also checks that the file is a
 //! regular file inside the checkout, and fails with
-//! [`ManifestProblem::StarmapFile`] otherwise. mxv never reads the file. A
-//! process without the key names none, and such tools then read
-//! `<cwd>/starmap.toml`.
+//! [`ManifestProblem::StarmapFile`] otherwise. The plan of `mxv up` reads
+//! the file and gives the process its variables whose bind is
+//! `multiverse/port` or `multiverse/url`. A process without the key names
+//! none, and mxv and such tools then read `<cwd>/starmap.toml` when it
+//! exists.
 //!
 //! A process's `build` is a command that `mxv up` and `mxv restart` run
 //! before the process starts, under a place from the machine's job limiter,
@@ -420,8 +422,8 @@ pub struct Process {
     /// read `<cwd>/starmap.toml`. Its path is relative to the top of the
     /// checkout, whatever the process's `cwd`, and holds no `..`. A merged
     /// manifest holds it as an absolute path below the directory that its
-    /// file's paths are relative to. mxv checks that the file exists and
-    /// never reads it.
+    /// file's paths are relative to. mxv checks that the file exists, and
+    /// the plan of `mxv up` reads its provided variables.
     pub starmap: Option<PathBuf>,
 }
 
@@ -1333,6 +1335,7 @@ fn check_runnable(
         caller: &crate::phase_plan::CallerEnvironment::default(),
         own_command: Some(crate::phase_plan::checking_own_command()),
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: false,
     };
     match crate::phase_plan::build(&inputs) {
         Ok(_) => Ok(()),
