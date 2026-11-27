@@ -19,6 +19,24 @@ workspace may need to act on.
   `.git/info/exclude` copied in, and an origin without a default branch
   fails with `mxv::origin::no_default_branch`, which names the origin.
 
+### Changed
+
+- `mxv up`, `restart` and `run` check the starmap file of every selected
+  host process before they report a wrong provided bind, and
+  `mxv::manifest::provided_unknown` lists every such bind in one failure.
+  Before, mxv stopped at the first one, so a person missing several
+  checkouts met them one start at a time. The new `binds` field holds one
+  object per bind with `unit`, `variable`, `app`, `port`, `checkout` and
+  `reason`, and the text output prints one `cause:` line per bind when
+  there are several. The fields `unit`, `variable`, `app` and `port` still
+  give the first bind. An optional bind to a missing checkout stays unset
+  and is not listed, and `mxv::manifest::starmap_invalid` is still reported
+  alone. A process whose `cwd`, name or permissions phase cannot run is
+  reported only when no bind is wrong.
+- In the multiverse library, which is 0.x, so this is a minor-version
+  change, `UnrunnableKind::ProvidedUnknown` holds `RefusedBinds`, a
+  non-empty list of `RefusedBind`, in place of one variable, unit and port.
+
 ## [0.8.0] - 2026-11-27
 
 ### Added

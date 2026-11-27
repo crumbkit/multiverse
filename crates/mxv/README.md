@@ -833,10 +833,18 @@ manifest does not have, a port the unit does not have, or no port of a unit
 that listens on none, and a bind with a
 qualifier other than `process`, `app` and `port` or with both `process` and
 `app`, fails with `mxv::manifest::provided_unknown` before any build runs
-and before any unit starts. Its fields are `unit`, the process whose file
-holds the bind, `variable`, `app`, the unit as the file writes it, and
-`port`, the port as the file writes it or `listen`, and its message names
-the unit and the port.
+and before any unit starts. mxv checks the starmap file of every selected
+host process first, and one failure lists every such bind, so a person who
+lacks three checkouts learns of all three from one `up`. The field `binds`
+holds one object per bind, in the order of the process and then the
+variable, each with `unit`, the process whose file holds the bind,
+`variable`, `app`, the unit as the file writes it, `port`, the port as the
+file writes it or `listen`, `checkout`, the checkout folder that
+`<checkout>/<unit>` names or null, and `reason`, what is wrong. The fields
+`unit`, `variable`, `app` and `port` repeat the first bind's values. When
+the failure lists one bind its message names the unit and the port; when it
+lists several, its message says how many, and the text output prints one
+`cause:` line for each bind.
 `mxv status` lists the units and `mxv show` lists the ports. A variable that
 the file marks `optional` and whose port has no host port yet is left out.
 
@@ -855,7 +863,7 @@ each `up`, `restart` and `run`, so a process gets the variable from the
 `restart` after the checkout joins the workspace.
 A starmap file that does not parse fails with
 `mxv::manifest::starmap_invalid`, whose fields name the unit, the file and
-starmap's message.
+starmap's message. That failure is reported alone, and lists no bind.
 
 A provided bind adds no start ordering: the process can start before the
 unit it names listens. A process that needs that unit up first still names
