@@ -411,6 +411,7 @@ fn record_name(problem: &Error) -> String {
         | Error::NoOrigin { .. }
         | Error::EmptyOrigin { .. }
         | Error::NoDefaultBranch { .. }
+        | Error::OriginNoBranch { .. }
         | Error::ProgramMissing { .. }
         | Error::CommandFailed { .. }
         | Error::TimedOut { .. }

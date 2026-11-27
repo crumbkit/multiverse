@@ -86,6 +86,7 @@ pub use crate::manifest::{
 };
 pub use crate::marker::{MARKER_FILE, Marker, ensure as ensure_marker};
 pub use crate::merged::{GitHub, HELPER_DEADLINE, PullRequests, Verdict, update_board_mount};
+pub use crate::mirror::RepoOrigin;
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{
     CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, ProvidedBind, Unrunnable, UnrunnableKind,
@@ -127,8 +128,8 @@ pub use crate::template::{
 };
 pub use crate::workspaces::{
     AddOutcome, Allow, BranchFate, CheckoutRemoval, CreateOptions, DISPOSABLE, Fate, MIRROR_WAIT,
-    Mode, NewOutcome, Removal, RemovalKind, RemovalOutcome, RemovalPlan, Repo, Workspaces,
-    folder_name,
+    Mode, NewOutcome, Removal, RemovalKind, RemovalOutcome, RemovalPlan, Repo, RepoSource,
+    Workspaces, folder_name,
 };
 pub use phase;
 #[cfg(test)]

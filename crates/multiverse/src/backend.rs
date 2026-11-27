@@ -432,6 +432,29 @@ pub trait Backend {
     /// and the failure of setting `HEAD`.
     fn fetch_mirror(&self, mirror: &Path, url: &str, default: &str) -> Result<(), Error>;
 
+    /// Returns the branch that the `HEAD` of the origin at `url` names, such
+    /// as `main`, as `git ls-remote --symref` reads it, or `None` when the
+    /// origin's `HEAD` names no branch, as for an origin without commits.
+    /// It reads the origin under the same environment and deadline as a
+    /// fetch, so neither git nor ssh asks a question. `mirror` is the
+    /// mirror that a failure names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SshRefused`] when ssh refuses to connect to an SSH
+    /// origin, and [`Error::MirrorFetchFailed`] when the read fails
+    /// otherwise.
+    fn remote_default(&self, mirror: &Path, url: &str) -> Result<Option<String>, Error>;
+
+    /// Returns the branch that the `HEAD` of the bare `mirror` names, such as
+    /// `main`, when the mirror holds that branch, and `None` when the mirror
+    /// does not exist, its `HEAD` names no branch, or it lacks the branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup.
+    fn mirror_default(&self, mirror: &Path) -> Result<Option<String>, Error>;
+
     /// Clones the bare `mirror` into `checkout` with `--shared` and without
     /// git's templates, so the clone borrows the mirror's objects and starts
     /// with no hooks, and checks out no files yet. It then sets the clone's
@@ -676,12 +699,13 @@ pub trait Backend {
 
     /// Returns what the clone at `checkout` holds that neither an archive
     /// keeps nor a clone rebuilt from its mirror and the person's
-    /// repository at `source` has.
+    /// repository at `source` has. A clone made from an origin has no such
+    /// repository, so its `source` is `None`.
     ///
     /// # Errors
     ///
     /// Returns the failure of a listing.
-    fn local_names(&self, checkout: &Path, source: &Path) -> Result<LocalNames, Error>;
+    fn local_names(&self, checkout: &Path, source: Option<&Path>) -> Result<LocalNames, Error>;
 
     /// Deletes the remote `origin` of `checkout`.
     ///

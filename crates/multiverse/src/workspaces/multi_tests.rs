@@ -412,7 +412,7 @@ fn a_checkout_folder_named_deadband_workspace_is_refused() {
         .add(
             &name("triage"),
             &Repo {
-                path: setup.web.clone.clone(),
+                source: crate::workspaces::RepoSource::Path(setup.web.clone.clone()),
                 folder: Some(".deadband-workspace".to_owned()),
             },
             Mode::Change,

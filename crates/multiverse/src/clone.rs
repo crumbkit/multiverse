@@ -91,8 +91,9 @@ impl<B: Backend> Workspaces<B> {
     /// module docs describe, and returns what it cloned. A dry run returns
     /// what a run would clone, and clones nothing.
     ///
-    /// A directory is cloned only when `git status` in the repository
-    /// reports it as a whole ignored directory, it is not a symbolic link,
+    /// A checkout made from an origin, with no repository of the person's,
+    /// receives none. A directory is cloned only when `git status` in the
+    /// repository reports it as a whole ignored directory, it is not a symbolic link,
     /// its name is not `target`, nothing is at its place in the checkout,
     /// and its parent directory exists there. The first clone that fails
     /// stops the cloning with a warning, and its partial copy is deleted.
@@ -129,10 +130,12 @@ impl<B: Backend> Workspaces<B> {
     ) -> Result<Cloned, Error> {
         let mut cloned = Cloned::default();
         for (checkout, globs) in each {
-            if globs.is_empty() {
+            // A clone made from an origin has no working tree to clone
+            // ignored directories from.
+            let Some(source) = checkout.working_source().filter(|_| !globs.is_empty()) else {
                 continue;
-            }
-            let changes = self.backend.changes(&checkout.source)?;
+            };
+            let changes = self.backend.changes(source)?;
             for path in changes.ignored {
                 let Some(body) = path.strip_suffix('/') else {
                     continue;
@@ -142,7 +145,7 @@ impl<B: Backend> Workspaces<B> {
                 {
                     continue;
                 }
-                let from = checkout.source.join(body);
+                let from = source.join(body);
                 let to = checkout.path.join(body);
                 let is_directory = fs::symlink_metadata(&from)
                     .is_ok_and(|metadata| metadata.is_dir() && !metadata.is_symlink());

@@ -1857,3 +1857,162 @@ fn a_dry_run_of_new_takes_no_lock() {
     drop(held);
     assert!(!setup.workspace("triage").exists());
 }
+
+/// Returns the `file://` URL of the bare origin of `setup`.
+fn origin_url(setup: &Setup) -> String {
+    format!("file://{}", setup.root().join("origin.git").display())
+}
+
+/// Returns the bare mirror that mxv keeps for the origin `key`, such as
+/// `example.invalid/acme/app.git`.
+fn mirror_of(setup: &Setup, key: &str) -> PathBuf {
+    setup.root().join("data/mxv/mirrors").join(key)
+}
+
+#[test]
+fn new_of_an_origin_url_clones_its_default_branch_on_a_new_branch() {
+    let setup = Setup::new();
+    let url = origin_url(&setup);
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", &url]);
+    assert_eq!(exit, 0, "{document}");
+    let checkout = setup.workspace("reading-list").join("origin");
+    assert_eq!(
+        git(&checkout, &["branch", "--show-current"]).trim(),
+        "reading-list"
+    );
+    assert_eq!(git(&checkout, &["remote", "get-url", "origin"]).trim(), url);
+    assert_eq!(
+        git(&checkout, &["rev-parse", "HEAD"]),
+        git(&setup.root().join("origin.git"), &["rev-parse", "main"])
+    );
+    let (_, shown) = setup.json(&["show", "reading-list", "--full"]);
+    let shown = &shown["data"][0]["checkouts"][0];
+    assert_eq!(shown["base"], "refs/remotes/origin/main", "{shown}");
+    assert_eq!(shown["source"], shown["mirror"], "{shown}");
+}
+
+#[test]
+fn new_of_an_origin_url_with_as_names_the_folder() {
+    let setup = Setup::new();
+    let url = origin_url(&setup);
+    let (exit, document) =
+        setup.json(&["new", "reading-list", "--repo", &url, "--as", "dispatcher"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(
+        setup
+            .workspace("reading-list")
+            .join("dispatcher/.git")
+            .is_dir()
+    );
+}
+
+#[test]
+fn new_of_a_short_form_with_no_mirror_fetches_it_over_ssh() {
+    let setup = Setup::new();
+    let ssh = fake_ssh(&setup.root(), &setup.root().join("origin.git"));
+    let (exit, document) = Setup::run_json(
+        setup
+            .command(&["new", "reading-list", "--repo", "example.invalid/acme/app"])
+            .env("GIT_SSH_COMMAND", ssh.command("accept")),
+    );
+    assert_eq!(exit, 0, "{document}\n{}", ssh.logged());
+    let logged = ssh.logged();
+    assert!(logged.contains("git@example.invalid"), "{logged}");
+    assert!(logged.contains("'/acme/app'"), "{logged}");
+    let checkout = setup.workspace("reading-list").join("app");
+    assert_eq!(
+        git(&checkout, &["remote", "get-url", "origin"]).trim(),
+        "ssh://git@example.invalid/acme/app"
+    );
+    assert!(
+        mirror_of(&setup, "example.invalid/acme/app.git")
+            .join("HEAD")
+            .is_file()
+    );
+}
+
+#[test]
+fn new_of_a_short_form_fetches_the_url_that_its_mirror_records() {
+    let setup = Setup::new();
+    let url = origin_url(&setup);
+    let mirror = mirror_of(&setup, "example.invalid/acme/app.git");
+    fs::create_dir_all(&mirror).unwrap();
+    git(&mirror, &["init", "--quiet", "--bare"]);
+    write_text(
+        &mirror.join("FETCH_HEAD"),
+        &format!(
+            "0000000000000000000000000000000000000000\tnot-for-merge\tbranch 'main' of {url}\n"
+        ),
+    );
+    let (exit, document) =
+        setup.json(&["new", "reading-list", "--repo", "example.invalid/acme/app"]);
+    assert_eq!(exit, 0, "{document}");
+    let checkout = setup.workspace("reading-list").join("app");
+    assert_eq!(git(&checkout, &["remote", "get-url", "origin"]).trim(), url);
+}
+
+#[test]
+fn an_existing_directory_named_like_a_short_form_is_read_as_a_path() {
+    let setup = Setup::new();
+    let nested = setup.root().join("example.invalid/acme");
+    fs::create_dir_all(&nested).unwrap();
+    git(&nested, &["clone", "--quiet", "../../origin.git", "app"]);
+    let (exit, document) =
+        setup.json(&["new", "reading-list", "--repo", "example.invalid/acme/app"]);
+    assert_eq!(exit, 0, "{document}");
+    let (_, shown) = setup.json(&["show", "reading-list", "--full"]);
+    assert_eq!(
+        shown["data"][0]["checkouts"][0]["source"],
+        nested.join("app").display().to_string()
+    );
+    assert!(!mirror_of(&setup, "example.invalid").exists());
+}
+
+#[test]
+fn a_dry_run_of_an_origin_fetches_nothing() {
+    let setup = Setup::new();
+    let url = origin_url(&setup);
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", &url, "--dry-run"]);
+    assert_eq!(exit, 0, "{document}");
+    assert!(!setup.root().join("data/mxv/mirrors").exists());
+    assert!(!setup.workspace("reading-list").exists());
+}
+
+#[test]
+fn new_of_an_origin_without_a_default_branch_fails_naming_the_origin_and_leaves_no_record() {
+    let setup = Setup::new();
+    empty_repository(&setup.root());
+    let url = format!("file://{}", setup.root().join("empty.git").display());
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", &url]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::origin::no_default_branch");
+    assert_eq!(document["fields"]["origin"], url);
+    let hint = document["recovery"].to_string();
+    assert!(hint.contains("push a commit"), "{hint}");
+    assert!(!setup.workspace("reading-list").exists());
+    assert_eq!(setup.json(&["list"]).1["total"], 0);
+}
+
+#[test]
+fn archive_and_restore_of_a_checkout_made_from_an_origin_keep_its_commits() {
+    let setup = Setup::new();
+    let url = origin_url(&setup);
+    let (exit, document) = setup.json(&["new", "reading-list", "--repo", &url]);
+    assert_eq!(exit, 0, "{document}");
+    let checkout = setup.workspace("reading-list").join("origin");
+    git(
+        &checkout,
+        &["commit", "--quiet", "--allow-empty", "-m", "Local"],
+    );
+    let commit = git(&checkout, &["rev-parse", "HEAD"]);
+    let (exit, archived) = setup.json(&["archive", "-w", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{archived}");
+    assert!(!setup.workspace("reading-list").exists());
+    let (exit, restored) = setup.json(&["restore", "reading-list", "--yes"]);
+    assert_eq!(exit, 0, "{restored}");
+    assert_eq!(git(&checkout, &["rev-parse", "HEAD"]), commit);
+    assert_eq!(
+        git(&checkout, &["branch", "--show-current"]).trim(),
+        "reading-list"
+    );
+}

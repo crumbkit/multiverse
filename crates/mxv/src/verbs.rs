@@ -9,8 +9,8 @@ use multiverse::health::{self, Problem};
 use multiverse::{
     AddOutcome, Allow, ArchiveState, Checkout, Cloned, DEFAULT_CLONE_ON_NEW, Git, Joined,
     Lifecycle, Manifest, ManifestProblem, Mode, NewOutcome, PathGlob, Removal, RemovalPlan,
-    RemoveAsked, Removed, Repo, Store, Workspace, WorkspaceName, WorkspaceState, Workspaces,
-    checkout_prefix, prefixed,
+    RemoveAsked, Removed, Repo, RepoSource, Store, Workspace, WorkspaceName, WorkspaceState,
+    Workspaces, checkout_prefix, prefixed,
 };
 
 use crate::cli::{AddArgs, CdArgs, ListArgs, NewArgs, RemoveArgs, ShowArgs};
@@ -121,15 +121,19 @@ fn repos(args: &NewArgs) -> Result<Vec<Repo>, MxvFailure> {
         .collect()
 }
 
-/// Returns the repository at `path` with the folder `folder`, when one is
-/// given.
+/// Returns the repository or origin that the `--repo` value `path` names,
+/// as [`RepoSource::from_argument`] reads it, with the folder `folder`, when
+/// one is given.
 fn repo_of(path: &std::path::Path, folder: Option<&str>) -> Result<Repo, MxvFailure> {
+    let repo = Repo::of(RepoSource::from_argument(path));
     match folder {
-        Some(folder) => Repo::named(path, folder).map_err(|reason| MxvFailure::BadFolder {
-            folder: folder.to_owned(),
-            reason,
-        }),
-        None => Ok(Repo::new(path)),
+        Some(folder) => repo
+            .with_folder(folder)
+            .map_err(|reason| MxvFailure::BadFolder {
+                folder: folder.to_owned(),
+                reason,
+            }),
+        None => Ok(repo),
     }
 }
 
@@ -193,7 +197,7 @@ fn copied(
     } else if let [repo] = repos {
         let templates = environment.templates()?;
         let found = workspaces
-            .template(&templates, &repo.path, root)
+            .template(&templates, repo, root)
             .map_err(MxvFailure::from)?;
         let copied = found.template.map(|template| Copied {
             from: template.path,
@@ -393,7 +397,10 @@ fn taken(name: &WorkspaceName, found: &Workspace) -> MxvFailure {
 /// Clones the ignored directories of the repositories of `checkouts`, which
 /// belong to `workspace`, that the config file and the manifests name,
 /// into each checkout, or names them on a dry run. The workspace exists by
-/// then, so a failure of the cloning becomes the warning of the result.
+/// then, so a failure of the cloning becomes the warning of the result. A
+/// checkout made from an origin has no repository to clone from, so it
+/// receives nothing, and the result notes that once when the manifest names
+/// `clone_on_new` globs.
 fn clone_into(
     environment: &Environment,
     workspaces: &Workspaces<Git>,
@@ -405,6 +412,20 @@ fn clone_into(
     let mut each = Vec::new();
     let mut warning = None;
     for checkout in checkouts {
+        if checkout.working_source().is_none() {
+            let shared = match copied {
+                Some(copied) => copied.parse().ok(),
+                None => workspace.workspace_manifest().ok().flatten(),
+            };
+            if warning.is_none() && shared.is_some_and(|manifest| !manifest.clone_on_new.is_empty())
+            {
+                warning = Some(format!(
+                    "mxv cloned no ignored directory into {}, because it was cloned from an origin and no repository on this machine holds its ignored directories",
+                    checkout.name
+                ));
+            }
+            continue;
+        }
         let (globs, failed) = clone_globs(environment, workspace, checkout, copied)?;
         warning = warning.or(failed);
         each.push((*checkout, globs));

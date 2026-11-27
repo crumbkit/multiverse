@@ -887,3 +887,22 @@ fn an_add_that_waited_while_the_workspace_was_replaced_is_not_found_and_leaves_t
     assert!(!workspace.join("web").exists());
     assert_eq!(setup.record("triage"), before);
 }
+
+#[test]
+fn add_of_an_origin_url_clones_it_into_a_folder_named_after_the_origin() {
+    let setup = Setup::new();
+    let workspace = setup.created("triage", &["api"]);
+    let url = format!("file://{}", setup.root().join("web.git").display());
+    let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", &url]);
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(branch(&workspace.join("web")), "triage");
+    assert_eq!(
+        git(&workspace.join("web"), &["remote", "get-url", "origin"]).trim(),
+        url
+    );
+    let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert!(agents.contains(&url), "{agents}");
+    let (exit, document) = setup.json(&["add", "-w", "triage", "--repo", &url]);
+    assert_eq!(exit, 1, "{document}");
+    assert_eq!(document["code"], "mxv::checkout::name_taken", "{document}");
+}

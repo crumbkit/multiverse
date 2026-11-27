@@ -5,6 +5,20 @@ workspace may need to act on.
 
 ## Unreleased
 
+### Added
+
+- `mxv new` and `mxv add` take an origin for `--repo` as well as a path: a
+  git URL, such as `https://github.com/acme/dispatcher` or
+  `git@github.com:acme/dispatcher.git`, or the short form
+  `github.com/acme/dispatcher`, so no `git clone` is needed first. mxv
+  fetches the origin into its mirror and clones the checkout from there, on
+  a new branch from the origin's default branch. The short form is fetched
+  from the URL that its mirror last fetched from, or else from
+  `ssh://git@<host>/<path>`. A value that names an existing directory is
+  still read as a path. Such a checkout gets no ignored directories and no
+  `.git/info/exclude` copied in, and an origin without a default branch
+  fails with `mxv::origin::no_default_branch`, which names the origin.
+
 ## [0.8.0] - 2026-11-27
 
 ### Added

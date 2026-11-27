@@ -115,6 +115,27 @@ host, and says what to do. At
 a terminal, `mxv new` prints a line on standard error when it has to wait
 for the lock.
 
+`--repo` can also name an origin, for a repository that has no clone on
+this machine yet. A git URL, such as `https://github.com/acme/dispatcher` or
+`git@github.com:acme/dispatcher.git`, is fetched as it is written. The short
+form `github.com/acme/dispatcher` is fetched from the URL that the mirror of
+`github.com/acme/dispatcher.git` last fetched from, as its `FETCH_HEAD`
+records it, or else from `ssh://git@github.com/acme/dispatcher`, because ssh
+with the person's key reaches a private repository without a prompt. Give
+the full `https` URL to fetch over `https`. A value that names an existing
+directory is always read as a path, so a directory named like a short form
+keeps working. mxv asks the origin for its default branch with
+`git ls-remote --symref`, fetches the mirror under its lock, and starts the
+clone from the branch that the mirror's `HEAD` then names, before it writes
+the workspace's record. The checkout's folder is the last part of the
+origin's path without `.git`, unless `--as` names another, and its record
+names the mirror as its source. No repository on this machine holds the
+origin's ignored directories or `.git/info/exclude`, so mxv copies neither,
+and `mxv new` prints a note when the manifest names `clone_on_new` globs. An
+origin without a default branch fails with `mxv::origin::no_default_branch`,
+which names the origin and leaves no workspace. A dry run fetches nothing:
+it reads the default branch from an existing mirror, or asks the origin.
+
 A user name and password in an origin URL, such as
 `https://someone:token@example.com/app.git`, never appear in mxv's output.
 mxv leaves them out of each URL it prints in a failure, in text and in

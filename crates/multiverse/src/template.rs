@@ -139,6 +139,7 @@ pub fn find(dir: &Path, url: &str, repository: &Path, root: &Path) -> Result<Fou
                 | Error::NoOrigin { .. }
                 | Error::EmptyOrigin { .. }
                 | Error::NoDefaultBranch { .. }
+                | Error::OriginNoBranch { .. }
                 | Error::ProgramMissing { .. }
                 | Error::CommandFailed { .. }
                 | Error::TimedOut { .. }

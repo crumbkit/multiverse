@@ -979,6 +979,58 @@ impl Backend for Git {
         .map(drop)
     }
 
+    fn remote_default(&self, mirror: &Path, url: &str) -> Result<Option<String>, Error> {
+        // The origin is read before the mirror may exist, and `ls-remote`
+        // needs no repository, so it runs in the root directory.
+        let listed = run(
+            Path::new("/"),
+            ["ls-remote", "--symref", "--", url, "HEAD"],
+            "ls-remote",
+            FETCH_DEADLINE,
+        )?;
+        if !listed.status.success() {
+            if let Some(refused) = ssh::refused(url, &listed.stderr) {
+                return Err(refused);
+            }
+            return Err(Error::MirrorFetchFailed {
+                origin: redacted(url),
+                mirror: mirror.to_path_buf(),
+                message: explanation(listed.status, &listed.stderr),
+            });
+        }
+        Ok(listed.stdout.lines().find_map(|line| {
+            let (reference, name) = line.strip_prefix("ref: ")?.split_once('\t')?;
+            let branch = reference.strip_prefix("refs/heads/")?;
+            (name == "HEAD" && !branch.is_empty()).then(|| branch.to_owned())
+        }))
+    }
+
+    fn mirror_default(&self, mirror: &Path) -> Result<Option<String>, Error> {
+        if !mirror.join("HEAD").is_file() {
+            return Ok(None);
+        }
+        let head = run_in_mirror(
+            mirror,
+            ["symbolic-ref", "--quiet", "HEAD"],
+            "symbolic-ref",
+            LOCAL_DEADLINE,
+        )?;
+        let reference = trimmed(&head.stdout);
+        let Some(branch) = reference
+            .strip_prefix("refs/heads/")
+            .filter(|_| head.status.success())
+        else {
+            return Ok(None);
+        };
+        let found = run_in_mirror(
+            mirror,
+            ["rev-parse", "--verify", "--quiet", reference.as_str()],
+            "rev-parse",
+            LOCAL_DEADLINE,
+        )?;
+        Ok(found.status.success().then(|| branch.to_owned()))
+    }
+
     fn clone_mirror(&self, mirror: &Path, checkout: &Path, url: &str) -> Result<(), Error> {
         let parent = checkout.parent().unwrap_or(checkout);
         run(
@@ -1194,7 +1246,7 @@ impl Backend for Git {
         concealed::concealed(checkout, host)
     }
 
-    fn local_names(&self, checkout: &Path, source: &Path) -> Result<LocalNames, Error> {
+    fn local_names(&self, checkout: &Path, source: Option<&Path>) -> Result<LocalNames, Error> {
         concealed::local_names(checkout, source)
     }
 

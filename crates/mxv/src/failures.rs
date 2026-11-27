@@ -130,6 +130,9 @@ pub const REPOSITORY_EMPTY_ORIGIN: Code = Code::from_spelling("mxv::repository::
 /// The code of a repository that knows no default branch of `origin`.
 pub const REPOSITORY_NO_DEFAULT_BRANCH: Code =
     Code::from_spelling("mxv::repository::no_default_branch");
+/// The code of an origin, named in place of a repository, that has no
+/// default branch.
+pub const ORIGIN_NO_DEFAULT_BRANCH: Code = Code::from_spelling("mxv::origin::no_default_branch");
 /// The code of a `git` program that cannot start.
 pub const GIT_NOT_FOUND: Code = Code::from_spelling("mxv::git::not_found");
 /// The code of a git command that failed.
@@ -546,6 +549,7 @@ impl From<Error> for MxvFailure {
             | Error::NoOrigin { .. }
             | Error::EmptyOrigin { .. }
             | Error::NoDefaultBranch { .. }
+            | Error::OriginNoBranch { .. }
             | Error::ProgramMissing { .. }
             | Error::CommandFailed { .. }
             | Error::TimedOut { .. }
@@ -622,6 +626,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     REPOSITORY_NO_ORIGIN,
     REPOSITORY_EMPTY_ORIGIN,
     REPOSITORY_NO_DEFAULT_BRANCH,
+    ORIGIN_NO_DEFAULT_BRANCH,
     GIT_NOT_FOUND,
     GIT_FAILED,
     GIT_TIMED_OUT,
@@ -789,6 +794,7 @@ impl Failure for MxvFailure {
                 Error::NoOrigin { .. } => REPOSITORY_NO_ORIGIN,
                 Error::EmptyOrigin { .. } => REPOSITORY_EMPTY_ORIGIN,
                 Error::NoDefaultBranch { .. } => REPOSITORY_NO_DEFAULT_BRANCH,
+                Error::OriginNoBranch { .. } => ORIGIN_NO_DEFAULT_BRANCH,
                 Error::ProgramMissing { .. } => GIT_NOT_FOUND,
                 Error::CommandFailed { .. } => GIT_FAILED,
                 Error::TimedOut { .. } => GIT_TIMED_OUT,
@@ -1200,6 +1206,9 @@ fn library_recovery(error: &Error) -> Recovery {
             "push an initial commit to the default branch of origin, or run `git remote set-head origin --auto` in {} when origin already has one",
             shown(repository)
         )),
+        Error::OriginNoBranch { origin, .. } => Recovery::hint(format!(
+            "push a commit to the default branch of {origin}, or check that `git ls-remote --symref {origin} HEAD` names a branch, and run the command again"
+        )),
         Error::ProgramMissing { .. } => Recovery::hint("install git and put it on PATH"),
         Error::CommandFailed { .. } => {
             Recovery::hint("fix the cause that git's message names, and run the command again")
@@ -1330,6 +1339,15 @@ fn library_recovery(error: &Error) -> Recovery {
     }
 }
 
+/// Returns the values at fault in a failure that names the origin `origin`
+/// and its mirror `mirror`.
+fn origin_fields<'a>(origin: &'a str, mirror: &std::path::Path) -> Vec<Field<'a>> {
+    vec![
+        Field::new("origin", origin),
+        Field::new("mirror", shown(mirror)),
+    ]
+}
+
 /// Returns the values at fault in a technical failure of the library.
 fn library_fields(error: &Error) -> Vec<Field<'_>> {
     match error {
@@ -1418,6 +1436,7 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
                 FieldValue::list(templates.iter().map(|path| shown(path))),
             ),
         ],
+        Error::OriginNoBranch { origin, mirror } => origin_fields(origin, mirror),
         Error::MirrorFetchFailed {
             origin,
             mirror,

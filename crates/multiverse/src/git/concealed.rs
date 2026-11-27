@@ -641,7 +641,9 @@ fn exclude_rules(path: &Path) -> Result<Vec<String>, Error> {
 
 /// Returns what the clone at `checkout` holds that a clone rebuilt from its
 /// mirror at `mirror` and the person's repository at `source` would not.
-pub(super) fn local_names(checkout: &Path, source: &Path) -> Result<LocalNames, Error> {
+/// A clone made from an origin has no `source`, and a rebuilt clone copies
+/// no exclude rules into it.
+pub(super) fn local_names(checkout: &Path, source: Option<&Path>) -> Result<LocalNames, Error> {
     let remotes = run(checkout, ["remote"], "remote", LOCAL_DEADLINE)?.ok("remote", checkout)?;
     let config = run(
         checkout,
@@ -656,7 +658,7 @@ pub(super) fn local_names(checkout: &Path, source: &Path) -> Result<LocalNames, 
         .collect();
     config.sort_unstable();
     config.dedup();
-    let copied = if source.is_dir() {
+    let copied = if let Some(source) = source.filter(|source| source.is_dir()) {
         exclude_rules(&Git.exclude_file(source)?)?
     } else {
         Vec::new()

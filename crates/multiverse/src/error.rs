@@ -39,6 +39,15 @@ pub enum Error {
         /// The repository's top-level directory.
         repository: PathBuf,
     },
+    /// An origin that the person named in place of a repository has no
+    /// default branch to start a checkout from, as an origin without
+    /// commits has.
+    OriginNoBranch {
+        /// The origin's URL, without a user name or password.
+        origin: String,
+        /// The mirror's directory.
+        mirror: PathBuf,
+    },
     /// The version-control program could not start, such as when `git` is
     /// not on `PATH`.
     ProgramMissing {
@@ -464,6 +473,7 @@ impl Error {
             | Self::NoOrigin { .. }
             | Self::EmptyOrigin { .. }
             | Self::NoDefaultBranch { .. }
+            | Self::OriginNoBranch { .. }
             | Self::ProgramMissing { .. }
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
@@ -539,6 +549,10 @@ impl Error {
     /// Writes the text of a failure to lock or fetch a mirror.
     fn fmt_fetch(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::OriginNoBranch { origin, .. } => write!(
+                formatter,
+                "the origin {origin} has no default branch, so a workspace has nothing to branch from"
+            ),
             Self::MirrorBusy { mirror } => write!(
                 formatter,
                 "another mxv command holds the lock of the mirror {} and has not released it",
@@ -701,6 +715,7 @@ impl Error {
             | Self::NoOrigin { .. }
             | Self::EmptyOrigin { .. }
             | Self::NoDefaultBranch { .. }
+            | Self::OriginNoBranch { .. }
             | Self::ProgramMissing { .. }
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
@@ -762,6 +777,7 @@ impl Error {
             | Self::NoOrigin { .. }
             | Self::EmptyOrigin { .. }
             | Self::NoDefaultBranch { .. }
+            | Self::OriginNoBranch { .. }
             | Self::ProgramMissing { .. }
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
@@ -834,6 +850,7 @@ impl Error {
             | Self::NoOrigin { .. }
             | Self::EmptyOrigin { .. }
             | Self::NoDefaultBranch { .. }
+            | Self::OriginNoBranch { .. }
             | Self::ProgramMissing { .. }
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
@@ -925,6 +942,7 @@ impl Error {
             | Self::NoOrigin { .. }
             | Self::EmptyOrigin { .. }
             | Self::NoDefaultBranch { .. }
+            | Self::OriginNoBranch { .. }
             | Self::ProgramMissing { .. }
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
@@ -1131,9 +1149,10 @@ impl fmt::Display for Error {
             Self::DatedNamesTaken { .. } | Self::StoppedRestoreHoldsOtherFiles { .. } => {
                 self.fmt_repair(formatter)
             }
-            Self::MirrorBusy { .. } | Self::MirrorFetchFailed { .. } | Self::SshRefused { .. } => {
-                self.fmt_fetch(formatter)
-            }
+            Self::MirrorBusy { .. }
+            | Self::MirrorFetchFailed { .. }
+            | Self::SshRefused { .. }
+            | Self::OriginNoBranch { .. } => self.fmt_fetch(formatter),
             Self::TemplateInvalid { .. }
             | Self::TemplateAmbiguous { .. }
             | Self::ManifestUntrusted { .. } => self.fmt_template(formatter),
@@ -1276,6 +1295,7 @@ impl Error {
             | Self::NoOrigin { .. }
             | Self::EmptyOrigin { .. }
             | Self::NoDefaultBranch { .. }
+            | Self::OriginNoBranch { .. }
             | Self::ProgramMissing { .. }
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
@@ -1422,6 +1442,7 @@ impl std::error::Error for Error {
             | Self::NoOrigin { .. }
             | Self::EmptyOrigin { .. }
             | Self::NoDefaultBranch { .. }
+            | Self::OriginNoBranch { .. }
             | Self::CommandFailed { .. }
             | Self::TimedOut { .. }
             | Self::MismatchedRecord { .. }
