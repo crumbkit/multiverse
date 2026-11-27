@@ -5,6 +5,8 @@ workspace may need to act on.
 
 ## Unreleased
 
+## [0.8.0] - 2026-11-27
+
 ### Added
 
 - `mxv up`, `restart` and `run` give a host process each variable of its
