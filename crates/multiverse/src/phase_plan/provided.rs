@@ -30,7 +30,9 @@ use starmap_resolve::{
     Context, Places, Provider, ProviderError, ResolveProblem, check_binds, resolve,
 };
 
-use super::{Inputs, ProvidedBind, ProxyUrls, Unrunnable, UnrunnableKind, placed};
+use super::{
+    Inputs, ProvidedBind, ProxyUrls, RefusedBind, RefusedBinds, Unrunnable, UnrunnableKind, placed,
+};
 use crate::manifest::{Manifest, Process, ReadyCheck, StarmapFound, Unit};
 use crate::runs::ProcessNote;
 
@@ -298,6 +300,9 @@ pub(crate) struct Unknown {
     pub(crate) app: String,
     /// The port that the bind names, or [`LISTEN`] when it names none.
     pub(crate) port: String,
+    /// The checkout that the bind names as `<checkout>/<unit>`, or `None`
+    /// when it names a bare unit name or none.
+    pub(crate) checkout: Option<String>,
     /// What is wrong, in a clause.
     pub(crate) reason: String,
 }
@@ -326,6 +331,9 @@ fn target(manifest: &Manifest, place: &Place, reference: &ProvidedRef) -> Result
     let unknown = |reason: String| Unknown {
         app: named.clone(),
         port: asked.clone(),
+        checkout: named
+            .split_once('/')
+            .map(|(checkout, _)| checkout.to_owned()),
         reason,
     };
     if let Some((key, _)) = reference
@@ -552,10 +560,10 @@ fn unassigned(name: &str, file: &Path, variable: &Name, found: Target, reason: &
     }
 }
 
-/// Returns the failure of the variable `variable` of the starmap file
-/// `file` of `name`, whose bind `unknown` refuses.
-fn refused(name: &str, file: &Path, variable: &Name, unknown: Unknown) -> Unrunnable {
-    Unrunnable {
+/// Returns the refused bind of the variable `variable` of the starmap file
+/// `file` of `name`, which `unknown` describes.
+fn refused_bind(name: &str, file: &Path, variable: &Name, unknown: Unknown) -> RefusedBind {
+    RefusedBind {
         message: format!(
             "the starmap file {} of `{name}` binds {} to {}, and {}",
             file.display(),
@@ -563,13 +571,35 @@ fn refused(name: &str, file: &Path, variable: &Name, unknown: Unknown) -> Unrunn
             port_phrase(&unknown.app, &unknown.port),
             unknown.reason
         ),
-        kind: UnrunnableKind::ProvidedUnknown {
-            variable: variable.as_str().to_owned(),
-            app: unknown.app,
-            port: unknown.port,
-        },
-        unit: Some(name.to_owned()),
+        unit: name.to_owned(),
+        variable: variable.as_str().to_owned(),
+        app: unknown.app,
+        port: unknown.port,
+        checkout: unknown.checkout,
+        reason: unknown.reason,
     }
+}
+
+/// Returns the one failure that lists every bind of `binds`, or `None`
+/// when `binds` is empty. Its unit is the first bind's process. Its
+/// message is the first bind's sentence when it lists one bind, and says
+/// how many it lists otherwise.
+pub(super) fn refusal(binds: Vec<RefusedBind>) -> Option<Unrunnable> {
+    let binds = RefusedBinds::sorted(binds)?;
+    let first = binds.first();
+    let message = if binds.len() == 1 {
+        first.message.clone()
+    } else {
+        format!(
+            "{} provided variables of the workspace's starmap files bind units or ports that the workspace does not have",
+            binds.len()
+        )
+    };
+    Some(Unrunnable {
+        unit: Some(first.unit.clone()),
+        message,
+        kind: UnrunnableKind::ProvidedUnknown(Box::new(binds)),
+    })
 }
 
 /// A provided variable that the plan leaves unset, because the spec marks
@@ -632,49 +662,66 @@ fn skipped(spec: &Spec, place: &Place) -> Vec<Skipped> {
 /// # Errors
 ///
 /// Returns [`Unrunnable`] of [`UnrunnableKind::StarmapInvalid`] for a file
-/// that cannot be read or does not parse, and of
-/// [`UnrunnableKind::ProvidedUnknown`] for the first bind that names no
-/// port of the workspace.
-pub(super) fn check(inputs: &Inputs<'_>, name: &str, process: &Process) -> Result<(), Unrunnable> {
+/// that cannot be read or does not parse.
+///
+/// Returns each bind that names no port of the workspace, for the caller
+/// to report with the binds of the other processes through [`refusal`].
+pub(super) fn check(
+    inputs: &Inputs<'_>,
+    name: &str,
+    process: &Process,
+) -> Result<Vec<RefusedBind>, Unrunnable> {
     let Some((spec, file)) = spec_of(inputs, name, process)? else {
-        return Ok(());
+        return Ok(Vec::new());
     };
-    check_spec(inputs, name, process, &spec, &file).map(drop)
+    check_spec(inputs, name, process, &spec, &file).map(|checked| checked.refused)
+}
+
+/// What [`check_spec`] found: the variables that the plan leaves unset,
+/// and the binds that it refuses.
+struct Checked {
+    /// The variables that the plan leaves unset, which the check admits.
+    skipped: Vec<Skipped>,
+    /// Each bind that names no port of the workspace, in the order of
+    /// its variable.
+    refused: Vec<RefusedBind>,
 }
 
 /// Checks the binds of `spec`, the starmap file `file` of `process`,
 /// named `name`, through [`check_binds`], and returns the variables that
-/// the plan leaves unset, which the check admits.
+/// the plan leaves unset and every bind that it refuses.
 fn check_spec(
     inputs: &Inputs<'_>,
     name: &str,
     process: &Process,
     spec: &Spec,
     file: &Path,
-) -> Result<Vec<Skipped>, Unrunnable> {
+) -> Result<Checked, Unrunnable> {
     let place = Place::of(inputs, name, process)?;
-    let skips = skipped(spec, &place);
+    let skipped = skipped(spec, &place);
     let neighbours = Neighbours::new(inputs, &place);
     let (port, url) = providers(neighbours)?;
-    let Some(failure) = check_binds(spec, &[&port, &url])
+    let refused = check_binds(spec, &[&port, &url])
         .into_iter()
-        .find(|failure| {
-            !skips
+        .filter(|failure| {
+            !skipped
                 .iter()
                 .any(|skip| skip.variable == failure.name.as_str())
         })
-    else {
-        return Ok(skips);
-    };
-    let unknown = provided_variables(spec)
-        .find(|(variable, _)| **variable == failure.name)
-        .and_then(|(_, reference)| neighbours.target(reference).err())
-        .unwrap_or_else(|| Unknown {
-            app: String::new(),
-            port: LISTEN.to_owned(),
-            reason: failure.error.to_string(),
-        });
-    Err(refused(name, file, &failure.name, unknown))
+        .map(|failure| {
+            let unknown = provided_variables(spec)
+                .find(|(variable, _)| **variable == failure.name)
+                .and_then(|(_, reference)| neighbours.target(reference).err())
+                .unwrap_or_else(|| Unknown {
+                    app: String::new(),
+                    port: LISTEN.to_owned(),
+                    checkout: None,
+                    reason: failure.error.to_string(),
+                });
+            refused_bind(name, file, &failure.name, unknown)
+        })
+        .collect();
+    Ok(Checked { skipped, refused })
 }
 
 /// The provided variables of a process: the value of each by variable
@@ -695,9 +742,10 @@ pub(super) struct Provided {
 ///
 /// # Errors
 ///
-/// Returns the errors of [`check`], and [`Unrunnable`] of
-/// [`UnrunnableKind::ProvidedUnknown`] for a required variable whose port
-/// has no host port.
+/// Returns the errors of [`check`], [`Unrunnable`] of
+/// [`UnrunnableKind::ProvidedUnknown`] that lists every bind that
+/// [`check`] refuses, and of [`UnrunnableKind::ProvidedUnassigned`] for
+/// the first required variable whose port has no host port.
 pub(super) fn values(
     inputs: &Inputs<'_>,
     name: &str,
@@ -706,7 +754,10 @@ pub(super) fn values(
     let Some((spec, file)) = spec_of(inputs, name, process)? else {
         return Ok(Provided::default());
     };
-    let skipped = check_spec(inputs, name, process, &spec, &file)?;
+    let Checked { skipped, refused } = check_spec(inputs, name, process, &spec, &file)?;
+    if let Some(failure) = refusal(refused) {
+        return Err(failure);
+    }
     let wanted: BTreeMap<&Name, &ProvidedRef> = provided_variables(&spec).collect();
     if wanted.is_empty() {
         return Ok(Provided::default());
@@ -727,6 +778,8 @@ pub(super) fn values(
     .provider(&port)
     .provider(&url);
     let resolution = resolve(&spec, Mode::Local, &context);
+    let mut wrong = Vec::new();
+    let mut unassigned_first = None;
     for failure in &resolution.failures {
         let Some(reference) = wanted.get(&failure.name) else {
             continue;
@@ -743,12 +796,18 @@ pub(super) fn values(
         } else {
             "starmap could not resolve it".to_owned()
         };
-        return Err(match neighbours.target(reference) {
-            Err(unknown) => refused(name, &file, &failure.name, unknown),
+        match neighbours.target(reference) {
+            Err(unknown) => wrong.push(refused_bind(name, &file, &failure.name, unknown)),
             // The bind names a unit and a port of the manifest, and the
             // workspace holds no host port for that port yet.
-            Ok(found) => unassigned(name, &file, &failure.name, found, &reason),
-        });
+            Ok(found) => {
+                unassigned_first
+                    .get_or_insert_with(|| unassigned(name, &file, &failure.name, found, &reason));
+            }
+        }
+    }
+    if let Some(failure) = refusal(wrong).or(unassigned_first) {
+        return Err(failure);
     }
     let values = resolution
         .bindings

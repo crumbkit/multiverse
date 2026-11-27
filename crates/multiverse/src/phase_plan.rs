@@ -245,6 +245,80 @@ pub struct ProvidedBind {
     pub port: String,
 }
 
+/// A bind of a provided variable that names no port of the workspace: the
+/// process that reads it, the variable, the unit and port it names, the
+/// checkout it names, and what is wrong.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefusedBind {
+    /// The process whose starmap file holds the variable.
+    pub unit: String,
+    /// The variable.
+    pub variable: String,
+    /// The unit that the bind names, as `process` or `app` gives it, or
+    /// empty when the bind names none.
+    pub app: String,
+    /// The port that the bind names, or `listen` when it names none.
+    pub port: String,
+    /// The checkout folder that the bind names as `<checkout>/<unit>`, or
+    /// `None` when it names a unit by its bare name.
+    pub checkout: Option<String>,
+    /// What is wrong, in a clause.
+    pub reason: String,
+    /// The sentence that names the starmap file, the process, the
+    /// variable, the unit and port, and what is wrong.
+    pub message: String,
+}
+
+/// The binds that a check refused, at least one, in the order of their
+/// process and then their variable.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefusedBinds {
+    /// The first bind.
+    first: RefusedBind,
+    /// The binds after the first.
+    rest: Vec<RefusedBind>,
+}
+
+impl RefusedBinds {
+    /// Returns the binds of `binds`, sorted by process and then variable,
+    /// or `None` when `binds` is empty.
+    pub(crate) fn sorted(mut binds: Vec<RefusedBind>) -> Option<Self> {
+        binds.sort_by(|left, right| {
+            (&left.unit, &left.variable).cmp(&(&right.unit, &right.variable))
+        });
+        binds.dedup();
+        let mut binds = binds.into_iter();
+        let first = binds.next()?;
+        Some(Self {
+            first,
+            rest: binds.collect(),
+        })
+    }
+
+    /// Returns the first bind.
+    #[must_use]
+    pub fn first(&self) -> &RefusedBind {
+        &self.first
+    }
+
+    /// Returns every bind, the first one first.
+    pub fn iter(&self) -> impl Iterator<Item = &RefusedBind> {
+        std::iter::once(&self.first).chain(&self.rest)
+    }
+
+    /// Returns how many binds there are, at least one.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        1 + self.rest.len()
+    }
+
+    /// Reports whether there are no binds, which is never so.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
 /// The kind of problem that stops phase from running a manifest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
@@ -255,16 +329,12 @@ pub enum UnrunnableKind {
     /// A variable of a process's starmap file whose bind is
     /// `multiverse/port` or `multiverse/url` names a unit or a port that
     /// the workspace's manifest does not have, names a unit that listens on
-    /// no port, or has a qualifier that the bind does not take.
-    ProvidedUnknown {
-        /// The variable.
-        variable: String,
-        /// The unit that the bind names, as `process` or `app` gives it,
-        /// or empty when the bind names none.
-        app: String,
-        /// The port that the bind names, or `listen` when it names none.
-        port: String,
-    },
+    /// no port, or has a qualifier that the bind does not take. The
+    /// failure lists every such bind of every host process that the check
+    /// read, each optional one included, but leaves out an optional bind
+    /// that names a checkout the workspace does not have, which the plan
+    /// leaves unset.
+    ProvidedUnknown(Box<RefusedBinds>),
     /// A required variable of a process's starmap file whose bind is
     /// `multiverse/port` or `multiverse/url` names a unit and port of the
     /// workspace's manifest that the workspace holds no host port for yet,
@@ -627,20 +697,25 @@ fn assemble(
 /// # Errors
 ///
 /// Returns [`Unrunnable`] as [`build`] does for a unit whose name, `cwd` or
-/// permissions phase cannot run.
+/// permissions phase cannot run, and for a starmap file that cannot be read
+/// or does not parse. Once every unit's file is read, it returns one
+/// [`UnrunnableKind::ProvidedUnknown`] that lists the wrong binds of every
+/// unit.
 pub(crate) fn permissions(
     inputs: &Inputs<'_>,
     units: &[String],
 ) -> Result<BTreeMap<AppName, phase::Grant>, Unrunnable> {
     let mut requested = BTreeMap::new();
+    let mut refused = Vec::new();
     for name in units {
         let Some(process) = inputs.manifest.processes.get(name) else {
             continue;
         };
         let (source, _) = placed(inputs, name, process)?;
-        // A wrong bind in the process's starmap file fails here, before
-        // any build runs or any port is given.
-        provided::check(inputs, name, process)?;
+        // A wrong bind in the process's starmap file fails below, before
+        // any build runs or any port is given, together with the wrong
+        // binds of every other process.
+        refused.extend(provided::check(inputs, name, process)?);
         let permissions = process
             .permissions
             .as_ref()
@@ -653,6 +728,9 @@ pub(crate) fn permissions(
             })
             .transpose()?;
         requested.insert(app_name(name)?, phase::Grant::of(permissions.as_ref()));
+    }
+    if let Some(failure) = provided::refusal(refused) {
+        return Err(failure);
     }
     Ok(requested)
 }

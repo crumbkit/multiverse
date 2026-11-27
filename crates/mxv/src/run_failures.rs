@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 
 use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
 use multiverse::{
-    Allow, MANIFEST_FILE, ManifestError, ManifestProblem, ProvidedBind, UnrunnableKind, Waited,
+    Allow, MANIFEST_FILE, ManifestError, ManifestProblem, ProvidedBind, RefusedBind, RefusedBinds,
+    UnrunnableKind, Waited,
 };
 
 use crate::failures::{remove_volumes_line, shown};
@@ -433,6 +434,14 @@ impl Failure for RunFailure {
         }
     }
 
+    fn causes(&self) -> Vec<String> {
+        if let Self::Unrunnable { kind, .. } = self {
+            unrunnable_causes(kind)
+        } else {
+            Vec::new()
+        }
+    }
+
     fn recovery(&self) -> Recovery {
         match self {
             Self::NotCurrent => Recovery::Run(Call::new(&["list"])),
@@ -750,7 +759,7 @@ impl RunFailure {
 /// Returns the code of a plan that phase cannot run, by its `kind`.
 fn unrunnable_code(kind: &UnrunnableKind) -> Code<'static> {
     match kind {
-        UnrunnableKind::ProvidedUnknown { .. } => MANIFEST_PROVIDED_UNKNOWN,
+        UnrunnableKind::ProvidedUnknown(_) => MANIFEST_PROVIDED_UNKNOWN,
         UnrunnableKind::StarmapInvalid { .. } => MANIFEST_STARMAP_INVALID,
         UnrunnableKind::ProvidedUnassigned(_) => MANIFEST_UNRUNNABLE,
         // The library marks the kind non-exhaustive, so a kind that a
@@ -762,26 +771,26 @@ fn unrunnable_code(kind: &UnrunnableKind) -> Code<'static> {
 }
 
 /// Returns the fields of a plan of `workspace` that phase cannot run, by
-/// its `kind`: the variable, unit and port of a bind that names no port,
-/// the file of a starmap file that does not parse, and otherwise the
-/// workspace, the unit and the message.
+/// its `kind`: the variable, unit and port of the first bind that names no
+/// port with every such bind under `binds`, the file of a starmap file that
+/// does not parse, and otherwise the workspace, the unit and the message.
 fn unrunnable_fields<'a>(
     kind: &'a UnrunnableKind,
     workspace: &'a str,
     unit: Option<&'a str>,
     message: &'a str,
 ) -> Vec<Field<'a>> {
-    if let UnrunnableKind::ProvidedUnknown {
-        variable,
-        app,
-        port,
-    } = kind
-    {
+    if let UnrunnableKind::ProvidedUnknown(binds) = kind {
+        let first = binds.first();
         vec![
             Field::new("unit", unit),
-            Field::new("variable", variable),
-            Field::new("app", app),
-            Field::new("port", port),
+            Field::new("variable", &first.variable),
+            Field::new("app", &first.app),
+            Field::new("port", &first.port),
+            Field::new(
+                "binds",
+                FieldValue::List(binds.iter().map(refused_bind).collect()),
+            ),
         ]
     } else if let UnrunnableKind::ProvidedUnassigned(bind) = kind {
         let ProvidedBind {
@@ -810,12 +819,69 @@ fn unrunnable_fields<'a>(
     }
 }
 
+/// Returns the object of the `binds` field that describes `bind`.
+fn refused_bind(bind: &RefusedBind) -> FieldValue<'_> {
+    FieldValue::object([
+        ("unit", FieldValue::from(&bind.unit)),
+        ("variable", FieldValue::from(&bind.variable)),
+        ("app", FieldValue::from(&bind.app)),
+        ("port", FieldValue::from(&bind.port)),
+        ("checkout", FieldValue::from(bind.checkout.as_deref())),
+        ("reason", FieldValue::from(&bind.reason)),
+    ])
+}
+
+/// Returns the causes of a plan that phase cannot run, by its `kind`: the
+/// sentence of each bind that names no port when there are several, and
+/// none otherwise, because the message already says the one.
+fn unrunnable_causes(kind: &UnrunnableKind) -> Vec<String> {
+    match kind {
+        UnrunnableKind::ProvidedUnknown(binds) if binds.len() > 1 => {
+            binds.iter().map(|bind| bind.message.clone()).collect()
+        }
+        UnrunnableKind::ProvidedUnknown(_)
+        | UnrunnableKind::ProvidedUnassigned(_)
+        | UnrunnableKind::StarmapInvalid { .. }
+        | UnrunnableKind::Plan => Vec::new(),
+        _ => Vec::new(),
+    }
+}
+
+/// Returns the start of the recovery of `binds`: `change the bind of <variable>
+/// in the starmap file` for one bind, and `change the binds of <variables>
+/// in their starmap files` for several.
+fn change_binds(binds: &RefusedBinds) -> String {
+    let variables: Vec<&str> = binds.iter().map(|bind| bind.variable.as_str()).collect();
+    if binds.len() == 1 {
+        format!(
+            "change the bind of {} in the starmap file",
+            joined(&variables)
+        )
+    } else {
+        format!(
+            "change the binds of {} in their starmap files",
+            joined(&variables)
+        )
+    }
+}
+
+/// Returns `names` joined as a person writes a list: `A`, `A and B`, or
+/// `A, B and C`.
+fn joined(names: &[&str]) -> String {
+    match names.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+        Some((last, _)) => (*last).to_owned(),
+        None => String::new(),
+    }
+}
+
 /// Returns the recovery of a plan of `workspace` that phase cannot run, by
 /// its `kind`.
 fn unrunnable_recovery(kind: &UnrunnableKind, workspace: &str) -> Recovery {
     match kind {
-        UnrunnableKind::ProvidedUnknown { variable, .. } => Recovery::hint(format!(
-            "change the bind of {variable} in the starmap file to name a unit as `<unit>` for the process's own checkout or `<checkout>/<unit>` for another checkout, and one of its ports by its own manifest's name, or leave out `port` to name the port the unit listens on; `mxv status -w {workspace}` lists the units and `mxv show {workspace}` lists the checkouts and ports"
+        UnrunnableKind::ProvidedUnknown(binds) => Recovery::hint(format!(
+            "{} to name a unit as `<unit>` for the process's own checkout or `<checkout>/<unit>` for another checkout, and one of its ports by its own manifest's name, or leave out `port` to name the port the unit listens on; `mxv status -w {workspace}` lists the units and `mxv show {workspace}` lists the checkouts and ports",
+            change_binds(binds)
         )),
         UnrunnableKind::ProvidedUnassigned(_) => Recovery::hint(format!(
             "run `mxv up -w {workspace}`, which gives each port of the workspace a host port, and the bind then resolves"
@@ -1248,7 +1314,7 @@ impl RunFailure {
             Self::Unrunnable { kind, message, .. }
                 if matches!(
                     **kind,
-                    UnrunnableKind::ProvidedUnknown { .. }
+                    UnrunnableKind::ProvidedUnknown(_)
                         | UnrunnableKind::ProvidedUnassigned(_)
                         | UnrunnableKind::StarmapInvalid { .. }
                 ) =>

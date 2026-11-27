@@ -88,7 +88,8 @@ pub use crate::marker::{MARKER_FILE, Marker, ensure as ensure_marker};
 pub use crate::merged::{GitHub, HELPER_DEADLINE, PullRequests, Verdict, update_board_mount};
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::{
-    CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, ProvidedBind, Unrunnable, UnrunnableKind,
+    CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, ProvidedBind, RefusedBind, RefusedBinds,
+    Unrunnable, UnrunnableKind,
 };
 pub use crate::ports::DEFAULT_PORT_RANGE;
 pub use crate::preflight::{Approvals, CHECK_TIMEOUT, Checked, Outcome, Preflight};

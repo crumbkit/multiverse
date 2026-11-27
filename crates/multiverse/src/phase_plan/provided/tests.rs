@@ -221,7 +221,7 @@ fn a_unit_of_another_checkout_resolves_by_its_merged_name() {
         false,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "api"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().app == "api"),
         "{failure:?}"
     );
 }
@@ -234,12 +234,9 @@ fn an_unknown_unit_fails_with_a_message_that_names_the_unit_and_the_port() {
         false,
     ));
     assert_eq!(
-        failure.kind,
-        UnrunnableKind::ProvidedUnknown {
-            variable: "CATALOGUE_URL".to_owned(),
-            app: "catalogue/search".to_owned(),
-            port: "listen".to_owned(),
-        }
+        bind_names(&failure),
+        [("CATALOGUE_URL", "catalogue/search", "listen")],
+        "{failure:?}"
     );
     assert_eq!(failure.unit.as_deref(), Some("shelf-web"));
     assert!(
@@ -272,12 +269,9 @@ fn an_unknown_port_fails_with_a_message_that_names_the_unit_and_the_port() {
         false,
     ));
     assert_eq!(
-        failure.kind,
-        UnrunnableKind::ProvidedUnknown {
-            variable: "CATALOGUE_PORT".to_owned(),
-            app: "catalogue/api".to_owned(),
-            port: "grpc".to_owned(),
-        }
+        bind_names(&failure),
+        [("CATALOGUE_PORT", "catalogue/api", "grpc")],
+        "{failure:?}"
     );
     assert!(failure.message.contains("`catalogue/api`"), "{failure:?}");
     assert!(failure.message.contains("`grpc`"), "{failure:?}");
@@ -301,12 +295,9 @@ fn a_unit_with_no_listen_port_fails_with_a_message_that_names_the_unit_and_the_p
         false,
     ));
     assert_eq!(
-        failure.kind,
-        UnrunnableKind::ProvidedUnknown {
-            variable: "WORKER_PORT".to_owned(),
-            app: "catalogue/worker".to_owned(),
-            port: "listen".to_owned(),
-        }
+        bind_names(&failure),
+        [("WORKER_PORT", "catalogue/worker", "listen")],
+        "{failure:?}"
     );
     assert!(
         failure.message.contains("`catalogue/worker`"),
@@ -336,7 +327,7 @@ fn a_bind_with_both_process_and_app_fails_with_a_message_that_names_the_unit_and
         false,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, port, .. } if app == "catalogue/api" && port == "listen"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().app == "catalogue/api" && binds.first().port == "listen"),
         "{failure:?}"
     );
     assert!(failure.message.contains("both"), "{failure:?}");
@@ -361,7 +352,7 @@ fn a_bind_with_an_unknown_qualifier_fails_with_provided_unknown() {
         false,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { .. }),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(_)),
         "{failure:?}"
     );
     assert!(failure.message.contains("`scheme`"), "{failure:?}");
@@ -518,7 +509,7 @@ fn the_permissions_check_refuses_a_wrong_bind_with_no_ports_given() {
     };
     let failure = permissions(&inputs, &["shelf-web".to_owned()]).unwrap_err();
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "catalogue/search"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().app == "catalogue/search"),
         "{failure:?}"
     );
 }
@@ -541,7 +532,7 @@ fn a_container_named_without_a_port_fails_because_it_listens_on_no_port() {
         false,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, port, .. } if app == "catalogue/store" && port == "listen"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().app == "catalogue/store" && binds.first().port == "listen"),
         "{failure:?}"
     );
     assert!(failure.message.contains("`db`"), "{failure:?}");
@@ -652,7 +643,7 @@ fn a_checkout_that_the_workspace_does_not_have_fails_with_provided_unknown() {
         false,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "library/api"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().app == "library/api"),
         "{failure:?}"
     );
     assert!(
@@ -669,7 +660,7 @@ fn a_merged_name_does_not_name_a_unit_of_another_checkout() {
         false,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "catalogue-api"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().app == "catalogue-api"),
         "{failure:?}"
     );
 }
@@ -732,7 +723,7 @@ fn a_required_variable_bound_to_a_checkout_that_the_workspace_lacks_still_fails_
         false,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "ledger/api"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().app == "ledger/api"),
         "{failure:?}"
     );
 }
@@ -745,7 +736,7 @@ fn an_optional_bind_to_a_unit_that_a_present_checkout_lacks_still_fails_with_pro
         true,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "catalogue/apii"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().app == "catalogue/apii"),
         "{failure:?}"
     );
     let built = shelf_plan(&variable(
@@ -764,7 +755,7 @@ fn an_optional_bind_to_a_port_that_a_present_unit_lacks_still_fails_with_provide
         true,
     ));
     assert!(
-        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { port, .. } if port == "grpc"),
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown(binds) if binds.first().port == "grpc"),
         "{failure:?}"
     );
     let built = shelf_plan(&variable(
@@ -803,4 +794,176 @@ fn the_permissions_check_admits_an_optional_bind_to_a_missing_checkout_with_no_p
     };
     let granted = permissions(&inputs, &["shelf-web".to_owned()]);
     assert!(granted.is_ok(), "{:?}", granted.err());
+}
+
+/// Returns the variable, unit and port of each bind that `failure` lists,
+/// or panics when it is not [`UnrunnableKind::ProvidedUnknown`].
+fn bind_names(failure: &Unrunnable) -> Vec<(&str, &str, &str)> {
+    let UnrunnableKind::ProvidedUnknown(binds) = &failure.kind else {
+        panic!("not provided_unknown: {failure:?}");
+    };
+    binds
+        .iter()
+        .map(|bind| {
+            (
+                bind.variable.as_str(),
+                bind.app.as_str(),
+                bind.port.as_str(),
+            )
+        })
+        .collect()
+}
+
+/// Returns the failure of the permissions check of `shelf-web`, with no
+/// host ports given, when the shelf's starmap file holds `spec`.
+fn permissions_failure(spec: &str) -> Unrunnable {
+    let dir = workspace_with(spec);
+    let manifest = Manifest::parse(MERGED, Path::new("/repo/mxv.toml")).unwrap();
+    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let none = BTreeMap::new();
+    let shelf = dir.path().join("shelf");
+    let inputs = Inputs {
+        manifest: &manifest,
+        workspace: &workspace,
+        id: &id,
+        checkout: &shelf,
+        roots: roots_of(dir.path()),
+        ports: &none,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &CallerEnvironment::default(),
+        own_command: None,
+        urls: ProxyUrls::default(),
+        read_starmaps: true,
+    };
+    match permissions(&inputs, &["shelf-web".to_owned()]) {
+        Ok(_) => panic!("the permissions check passed"),
+        Err(unrunnable) => unrunnable,
+    }
+}
+
+#[test]
+fn two_required_binds_to_two_missing_checkouts_fail_once_and_the_failure_lists_both() {
+    let spec = variable(
+        "LEDGER_URL",
+        r#"{ provided = "multiverse/url", app = "ledger/api" }"#,
+        false,
+    ) + &variable(
+        "LIBRARY_PORT",
+        r#"{ provided = "multiverse/port", app = "library/api", port = "http" }"#,
+        false,
+    );
+    for failure in [permissions_failure(&spec), shelf_failure(&spec)] {
+        assert_eq!(
+            bind_names(&failure),
+            [
+                ("LEDGER_URL", "ledger/api", "listen"),
+                ("LIBRARY_PORT", "library/api", "http"),
+            ],
+            "{failure:?}"
+        );
+        let UnrunnableKind::ProvidedUnknown(binds) = &failure.kind else {
+            panic!("{failure:?}");
+        };
+        assert_eq!(binds.len(), 2);
+        for (bind, checkout) in binds.iter().zip(["ledger", "library"]) {
+            assert_eq!(bind.unit, "shelf-web", "{bind:?}");
+            assert_eq!(bind.checkout.as_deref(), Some(checkout), "{bind:?}");
+            assert!(
+                bind.reason
+                    .contains(&format!("the workspace has no checkout `{checkout}`")),
+                "{bind:?}"
+            );
+            assert!(bind.message.contains(&bind.variable), "{bind:?}");
+            assert!(
+                bind.message.contains("starmap.toml of `shelf-web`"),
+                "{bind:?}"
+            );
+        }
+        assert_eq!(failure.unit.as_deref(), Some("shelf-web"));
+        assert!(
+            failure.message.contains("2 provided variables"),
+            "{failure:?}"
+        );
+    }
+}
+
+#[test]
+fn a_wrong_qualifier_and_a_missing_checkout_in_one_file_are_both_listed() {
+    let failure = permissions_failure(
+        &(variable(
+            "CATALOGUE_PORT",
+            r#"{ provided = "multiverse/port", app = "catalogue/api", scheme = "https" }"#,
+            false,
+        ) + &variable(
+            "LEDGER_URL",
+            r#"{ provided = "multiverse/url", app = "ledger/api" }"#,
+            false,
+        )),
+    );
+    assert_eq!(
+        bind_names(&failure),
+        [
+            ("CATALOGUE_PORT", "catalogue/api", "listen"),
+            ("LEDGER_URL", "ledger/api", "listen"),
+        ],
+        "{failure:?}"
+    );
+    let UnrunnableKind::ProvidedUnknown(binds) = &failure.kind else {
+        panic!("{failure:?}");
+    };
+    assert!(binds.first().reason.contains("`scheme`"), "{failure:?}");
+}
+
+#[test]
+fn an_optional_bind_to_a_missing_checkout_is_not_listed_beside_a_refused_bind() {
+    let spec = variable(
+        "LEDGER_URL",
+        r#"{ provided = "multiverse/url", app = "ledger/api" }"#,
+        true,
+    ) + &variable(
+        "LIBRARY_URL",
+        r#"{ provided = "multiverse/url", app = "library/api" }"#,
+        false,
+    );
+    for failure in [permissions_failure(&spec), shelf_failure(&spec)] {
+        assert_eq!(
+            bind_names(&failure),
+            [("LIBRARY_URL", "library/api", "listen")],
+            "{failure:?}"
+        );
+    }
+}
+
+#[test]
+fn an_optional_bind_to_a_unit_that_a_present_checkout_lacks_is_listed_beside_a_required_one() {
+    let failure = permissions_failure(
+        &(variable(
+            "CATALOGUE_URL",
+            r#"{ provided = "multiverse/url", app = "catalogue/apii" }"#,
+            true,
+        ) + &variable(
+            "LIBRARY_URL",
+            r#"{ provided = "multiverse/url", app = "library/api" }"#,
+            false,
+        )),
+    );
+    assert_eq!(
+        bind_names(&failure),
+        [
+            ("CATALOGUE_URL", "catalogue/apii", "listen"),
+            ("LIBRARY_URL", "library/api", "listen"),
+        ],
+        "{failure:?}"
+    );
+}
+
+#[test]
+fn the_permissions_check_reports_an_invalid_starmap_file_alone() {
+    let failure = permissions_failure("[variables.BROKEN]\npurpose = 3\n");
+    assert!(
+        matches!(&failure.kind, UnrunnableKind::StarmapInvalid { file } if file.ends_with("shelf/starmap.toml")),
+        "{failure:?}"
+    );
 }
