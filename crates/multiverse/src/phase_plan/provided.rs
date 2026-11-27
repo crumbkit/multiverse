@@ -32,6 +32,7 @@ use starmap_resolve::{
 
 use super::{Inputs, ProvidedBind, ProxyUrls, Unrunnable, UnrunnableKind, placed};
 use crate::manifest::{Manifest, Process, ReadyCheck, StarmapFound, Unit};
+use crate::runs::ProcessNote;
 
 #[cfg(test)]
 mod tests;
@@ -571,10 +572,62 @@ fn refused(name: &str, file: &Path, variable: &Name, unknown: Unknown) -> Unrunn
     }
 }
 
+/// A provided variable that the plan leaves unset, because the spec marks
+/// it optional in local mode and its bind names a unit of a checkout that
+/// the workspace does not have.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Skipped {
+    /// The variable.
+    pub(crate) variable: String,
+    /// The checkout that its bind names.
+    pub(crate) checkout: String,
+}
+
+impl Skipped {
+    /// Returns the note that tells the person about the skip.
+    pub(crate) fn note(&self) -> ProcessNote {
+        ProcessNote::ProvidedSkipped {
+            message: format!(
+                "left {} unset, because the workspace has no checkout `{}`",
+                self.variable, self.checkout
+            ),
+            variable: self.variable.clone(),
+            checkout: self.checkout.clone(),
+        }
+    }
+}
+
+/// Returns the provided variables of `spec` that the plan leaves unset at
+/// `place`: each that is optional in local mode and whose bind names
+/// `<checkout>/<unit>` with only one of `process` and `app`, where the
+/// workspace has no checkout `<checkout>`. A required variable is never
+/// skipped, and a bind whose checkout is present gets the usual checks.
+fn skipped(spec: &Spec, place: &Place) -> Vec<Skipped> {
+    provided_variables(spec)
+        .filter(|(name, _)| {
+            spec.variables().any(|(variable, declared)| {
+                variable == *name
+                    && !matches!(declared.unset().in_mode(Mode::Local), Unset::Required)
+            })
+        })
+        .filter_map(|(name, reference)| {
+            let named = match (reference.qualifier("process"), reference.qualifier("app")) {
+                (Some(named), None) | (None, Some(named)) => named,
+                (Some(_), Some(_)) | (None, None) => return None,
+            };
+            let (checkout, _) = named.split_once('/')?;
+            (!place.checkouts.iter().any(|known| known == checkout)).then(|| Skipped {
+                variable: name.as_str().to_owned(),
+                checkout: checkout.to_owned(),
+            })
+        })
+        .collect()
+}
+
 /// Checks the bind of each provided variable of the starmap file of
 /// `process`, named `name`, against the workspace's manifest, without
 /// resolving any value. It needs no ports, so it runs before `up` gives the
-/// workspace any.
+/// workspace any. It admits each variable that [`skipped`] leaves unset.
 ///
 /// # Errors
 ///
@@ -586,24 +639,32 @@ pub(super) fn check(inputs: &Inputs<'_>, name: &str, process: &Process) -> Resul
     let Some((spec, file)) = spec_of(inputs, name, process)? else {
         return Ok(());
     };
-    check_spec(inputs, name, process, &spec, &file)
+    check_spec(inputs, name, process, &spec, &file).map(drop)
 }
 
 /// Checks the binds of `spec`, the starmap file `file` of `process`,
-/// named `name`, through
-/// [`check_binds`].
+/// named `name`, through [`check_binds`], and returns the variables that
+/// the plan leaves unset, which the check admits.
 fn check_spec(
     inputs: &Inputs<'_>,
     name: &str,
     process: &Process,
     spec: &Spec,
     file: &Path,
-) -> Result<(), Unrunnable> {
+) -> Result<Vec<Skipped>, Unrunnable> {
     let place = Place::of(inputs, name, process)?;
+    let skips = skipped(spec, &place);
     let neighbours = Neighbours::new(inputs, &place);
     let (port, url) = providers(neighbours)?;
-    let Some(failure) = check_binds(spec, &[&port, &url]).into_iter().next() else {
-        return Ok(());
+    let Some(failure) = check_binds(spec, &[&port, &url])
+        .into_iter()
+        .find(|failure| {
+            !skips
+                .iter()
+                .any(|skip| skip.variable == failure.name.as_str())
+        })
+    else {
+        return Ok(skips);
     };
     let unknown = provided_variables(spec)
         .find(|(variable, _)| **variable == failure.name)
@@ -616,9 +677,21 @@ fn check_spec(
     Err(refused(name, file, &failure.name, unknown))
 }
 
+/// The provided variables of a process: the value of each by variable
+/// name, and those that the plan leaves unset.
+#[derive(Debug, Default)]
+pub(super) struct Provided {
+    /// The value of each variable that resolved, by variable name.
+    pub(super) values: BTreeMap<String, String>,
+    /// The variables that the plan leaves unset, because each is optional
+    /// and its bind names a checkout that the workspace does not have.
+    pub(super) skipped: Vec<Skipped>,
+}
+
 /// Returns the value of each provided variable of the starmap file of
-/// `process`, named `name`, by variable name. A variable that the spec
-/// marks optional and whose port has no host port yet is left out.
+/// `process`, named `name`, by variable name, and the variables that
+/// [`skipped`] leaves unset. A variable that the spec marks optional and
+/// whose port has no host port yet is left out too, with no note.
 ///
 /// # Errors
 ///
@@ -629,14 +702,14 @@ pub(super) fn values(
     inputs: &Inputs<'_>,
     name: &str,
     process: &Process,
-) -> Result<BTreeMap<String, String>, Unrunnable> {
+) -> Result<Provided, Unrunnable> {
     let Some((spec, file)) = spec_of(inputs, name, process)? else {
-        return Ok(BTreeMap::new());
+        return Ok(Provided::default());
     };
-    check_spec(inputs, name, process, &spec, &file)?;
+    let skipped = check_spec(inputs, name, process, &spec, &file)?;
     let wanted: BTreeMap<&Name, &ProvidedRef> = provided_variables(&spec).collect();
     if wanted.is_empty() {
-        return Ok(BTreeMap::new());
+        return Ok(Provided::default());
     }
     let (source, _) = placed(inputs, name, process)?;
     let place = Place::of(inputs, name, process)?;
@@ -677,7 +750,7 @@ pub(super) fn values(
             Ok(found) => unassigned(name, &file, &failure.name, found, &reason),
         });
     }
-    Ok(resolution
+    let values = resolution
         .bindings
         .iter()
         .filter(|(variable, _)| wanted.contains_key(variable))
@@ -691,5 +764,6 @@ pub(super) fn values(
             };
             Some((variable.as_str().to_owned(), value))
         })
-        .collect())
+        .collect();
+    Ok(Provided { values, skipped })
 }

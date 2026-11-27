@@ -977,14 +977,24 @@ impl Runs {
                 &Cancel::new(),
             )
             .map_err(|error| self.phase_error(&id, error))?;
+        // The plan's notes of the selected units, such as the provided
+        // variables it left unset, come before phase's notes.
+        let mut planned: BTreeMap<String, Vec<ProcessNote>> = built
+            .notes
+            .iter()
+            .filter(|(name, _)| order.contains(name))
+            .map(|(name, notes)| (name.clone(), notes.clone()))
+            .collect();
         match self.failure(workspace, manifest, &id, &report) {
             Ok(None) => {}
             Ok(Some(outcome)) => {
+                earlier.extend(planned.into_values().flatten());
                 earlier.extend(notes_of(&report).into_values().flatten());
                 self.roll_back_phase(&id, &report);
                 return Ok(outcome);
             }
             Err(error) => {
+                earlier.extend(planned.into_values().flatten());
                 earlier.extend(notes_of(&report).into_values().flatten());
                 self.roll_back_phase(&id, &report);
                 return Err(error);
@@ -1006,7 +1016,8 @@ impl Runs {
                 .map(|name| {
                     let mut status =
                         Self::phase_unit_status(workspace, Some(manifest), name, rows.get(name));
-                    status.notes = notes.remove(name).unwrap_or_default();
+                    status.notes = planned.remove(name).unwrap_or_default();
+                    status.notes.extend(notes.remove(name).unwrap_or_default());
                     status
                 })
                 .collect(),

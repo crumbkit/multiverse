@@ -47,6 +47,9 @@ struct Setup {
     dir: TempDir,
     /// The host ports that `mxv up` allocates from.
     ports: PortBlock,
+    /// The workspaces other than `triage` that the test created, which
+    /// the setup takes down when it drops.
+    others: std::cell::RefCell<Vec<String>>,
 }
 
 impl Setup {
@@ -55,6 +58,7 @@ impl Setup {
         let setup = Self {
             dir,
             ports: PortBlock::claim(),
+            others: std::cell::RefCell::default(),
         };
         let config = setup.root().join("config/mxv/config.toml");
         fs::create_dir_all(config.parent().unwrap()).unwrap();
@@ -150,6 +154,9 @@ impl Setup {
 impl Drop for Setup {
     fn drop(&mut self) {
         let _ = self.json(&["down", "-w", "triage"]);
+        for name in self.others.borrow().iter() {
+            let _ = self.json(&["down", "-w", name]);
+        }
     }
 }
 
@@ -334,4 +341,208 @@ fn run_of_a_task_refuses_a_bind_to_a_unit_that_does_not_exist() {
         stderr.contains("code:  mxv::manifest::provided_unknown"),
         "{stderr}"
     );
+}
+
+/// Returns the manifest of a neighbour whose process `unit` listens on
+/// `http`, writes its environment to `seen.txt` and is ready once it
+/// prints `ready`. Its task `check` prints `checked` on standard error.
+fn neighbour(unit: &str) -> String {
+    format!(
+        "ports = [\"http\"]\n\n[processes.{unit}]\nargv = [\"sh\", \"-c\", \"env > seen.txt; echo ready; exec sleep 60\"]\nports = {{ PORT = \"http\" }}\nlisten = \"http\"\nready = {{ log = \"^ready$\" }}\n\n[tasks.check]\nargv = [\"sh\", \"-c\", \"echo checked >&2\"]\n"
+    )
+}
+
+/// The three neighbours, each with its checkout, its process and the
+/// variable that the other two bind to its URL.
+const NEIGHBOURS: [(&str, &str, &str); 3] = [
+    ("catalogue", "api", "CATALOGUE_URL"),
+    ("shelf", "web", "SHELF_URL"),
+    ("ledger", "book", "LEDGER_URL"),
+];
+
+/// Returns a starmap file entry that declares the optional variable `name`
+/// as provided with `bind`.
+fn optional(name: &str, bind: &str) -> String {
+    format!(
+        "[variables.{name}]\npurpose = \"A value of a neighbour.\"\ntype = \"string\"\nunset = \"optional\"\nshow = \"shown\"\nsource = \"provided\"\nbind = {bind}\n\n"
+    )
+}
+
+/// Returns the starmap file of the neighbour `own`, which binds an
+/// optional variable to the URL of each other neighbour, and names
+/// `shelf_unit` in place of the catalogue's `api` when `own` is `shelf`.
+fn neighbour_spec(own: &str, shelf_unit: &str) -> String {
+    NEIGHBOURS
+        .iter()
+        .filter(|(checkout, _, _)| *checkout != own)
+        .map(|(checkout, unit, variable)| {
+            let unit = if own == "shelf" && *checkout == "catalogue" {
+                shelf_unit
+            } else {
+                unit
+            };
+            optional(
+                variable,
+                &format!(r#"{{ provided = "multiverse/url", app = "{checkout}/{unit}" }}"#),
+            )
+        })
+        .collect()
+}
+
+impl Setup {
+    /// Makes the three neighbours' repositories, where the shelf binds
+    /// `CATALOGUE_URL` to `catalogue/<shelf_unit>`.
+    fn neighbours(&self, shelf_unit: &str) {
+        for (checkout, unit, _) in NEIGHBOURS {
+            let spec = neighbour_spec(checkout, shelf_unit);
+            self.repository(
+                checkout,
+                &[("mxv.toml", &neighbour(unit)), ("starmap.toml", &spec)],
+            );
+        }
+    }
+
+    /// Creates the workspace `name` with a checkout of each of `checkouts`,
+    /// and returns its directory.
+    fn workspace_of(&self, name: &str, checkouts: &[&str]) -> PathBuf {
+        let mut args = vec!["new", name];
+        for checkout in checkouts {
+            args.extend(["--repo", checkout]);
+        }
+        let (exit, document) = self.json(&args);
+        assert_eq!(exit, 0, "{document}");
+        if name != "triage" {
+            self.others.borrow_mut().push(name.to_owned());
+        }
+        self.root().join("workspaces").join(name)
+    }
+}
+
+/// Returns the names of the neighbours' variables that the environment in
+/// `file` holds.
+fn neighbour_variables(file: &Path) -> Vec<String> {
+    let vars = seen(file);
+    NEIGHBOURS
+        .iter()
+        .map(|(_, _, variable)| *variable)
+        .filter(|variable| vars.iter().any(|(name, _)| name == variable))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn up_leaves_an_optional_bind_to_a_missing_checkout_unset_and_starts_every_process() {
+    let setup = Setup::new();
+    setup.neighbours("api");
+    let cases: [(&str, &[&str]); 3] = [
+        ("solo", &["shelf"]),
+        ("pair", &["shelf", "catalogue"]),
+        ("trio", &["shelf", "catalogue", "ledger"]),
+    ];
+    for (name, checkouts) in cases {
+        let workspace = setup.workspace_of(name, checkouts);
+        let (exit, document) = setup.json(&["up", "-w", name]);
+        assert_eq!(exit, 0, "{name}: {document}");
+        let rows = document["data"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{name}: no rows: {document}"));
+        assert_eq!(rows.len(), checkouts.len(), "{name}: {document}");
+        for (checkout, _, own) in NEIGHBOURS {
+            if !checkouts.contains(&checkout) {
+                continue;
+            }
+            let expected: Vec<String> = NEIGHBOURS
+                .iter()
+                .filter(|(other, _, variable)| checkouts.contains(other) && *variable != own)
+                .map(|(_, _, variable)| (*variable).to_owned())
+                .collect();
+            assert_eq!(
+                neighbour_variables(&workspace.join(checkout).join("seen.txt")),
+                expected,
+                "{name}: {checkout}"
+            );
+            let missing: Vec<&str> = NEIGHBOURS
+                .iter()
+                .filter(|(other, _, _)| *other != checkout && !checkouts.contains(other))
+                .map(|(other, _, _)| *other)
+                .collect();
+            let row = rows
+                .iter()
+                .find(|row| {
+                    row["name"].as_str().is_some_and(|unit| {
+                        unit.ends_with(NEIGHBOURS.iter().find(|n| n.0 == checkout).unwrap().1)
+                    })
+                })
+                .unwrap_or_else(|| panic!("{name}: no row of {checkout}: {document}"));
+            let notes = row["notes"].as_array().cloned().unwrap_or_default();
+            assert_eq!(notes.len(), missing.len(), "{name}: {checkout}: {row}");
+            for other in missing {
+                assert!(
+                    notes.iter().any(|note| {
+                        note["level"] == "info"
+                            && note["message"].as_str().is_some_and(|message| {
+                                message.ends_with(&format!(
+                                    "because the workspace has no checkout `{other}`"
+                                ))
+                            })
+                    }),
+                    "{name}: {checkout}: {row}"
+                );
+            }
+        }
+        let (exit, document) = setup.json(&["down", "-w", name]);
+        assert_eq!(exit, 0, "{name}: {document}");
+    }
+}
+
+#[test]
+fn up_refuses_an_optional_bind_to_a_unit_that_a_present_checkout_lacks() {
+    let setup = Setup::new();
+    setup.neighbours("apii");
+    let workspace = setup.workspace_of("triage", &["shelf", "catalogue", "ledger"]);
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_ne!(exit, 0, "{document}");
+    assert_eq!(
+        document["code"], "mxv::manifest::provided_unknown",
+        "{document}"
+    );
+    assert_eq!(document["fields"]["app"], "catalogue/apii", "{document}");
+    for (checkout, _, _) in NEIGHBOURS {
+        assert!(
+            !workspace.join(checkout).join("seen.txt").exists(),
+            "{checkout}"
+        );
+    }
+}
+
+#[test]
+fn run_of_a_task_prints_one_line_per_skipped_bind_before_the_task_starts() {
+    let setup = Setup::new();
+    setup.neighbours("api");
+    setup.workspace_of("triage", &["shelf"]);
+    let (exit, stderr) = setup.text(&["run", "-w", "triage", "check"]);
+    assert_eq!(exit, 0, "{stderr}");
+    let lines: Vec<&str> = stderr.lines().collect();
+    let checked = lines
+        .iter()
+        .position(|line| *line == "checked")
+        .unwrap_or_else(|| panic!("the task printed nothing: {stderr}"));
+    let skipped: Vec<usize> = lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| {
+            line.starts_with("info: ")
+                && line.contains(" unset, because the workspace has no checkout ")
+        })
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(skipped.len(), 2, "{stderr}");
+    assert!(skipped.iter().all(|index| *index < checked), "{stderr}");
+    for (checkout, variable) in [("catalogue", "CATALOGUE_URL"), ("ledger", "LEDGER_URL")] {
+        assert!(
+            lines.iter().any(|line| line.contains(variable)
+                && line.contains(&format!("no checkout `{checkout}`"))),
+            "{stderr}"
+        );
+    }
 }

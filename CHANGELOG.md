@@ -17,6 +17,15 @@ workspace may need to act on.
   workspace does not have fails with `mxv::manifest::provided_unknown`, and
   a starmap file that does not parse fails with
   `mxv::manifest::starmap_invalid`, both before any unit starts.
+- `mxv up`, `restart` and `run` leave an optional provided variable unset,
+  and start the process, when its bind names `<checkout>/<unit>` for a
+  checkout the workspace does not have. `up` and `restart` put an `info`
+  note on the process's row for each such variable, and `run` prints it on
+  standard error before the task starts. A required variable, and an
+  optional bind to a present checkout with no such unit or port, still fail
+  with `mxv::manifest::provided_unknown`. `ProcessNote::ProvidedSkipped`
+  carries the note, with the variable and the checkout, and
+  `PreparedTask::notes` returns the plan's notes of each unit.
 
 - `phase::is_variable_name` reports whether a name is one phase passes to
   a process: an ASCII letter or `_`, then ASCII letters, digits and `_`.

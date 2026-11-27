@@ -51,6 +51,7 @@ use crate::manifest::{Container, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
 use crate::record::Workspace;
 use crate::redacted::Redacted;
+use crate::runs::ProcessNote;
 use crate::service::Service;
 
 mod provided;
@@ -284,6 +285,9 @@ pub(crate) struct Built {
     pub(crate) plan: Plan,
     /// The values that each app's process receives.
     pub(crate) environment: ManifestEnvironment,
+    /// What the plan found about each unit, by unit name, such as the
+    /// provided variables it left unset.
+    pub(crate) notes: BTreeMap<String, Vec<ProcessNote>>,
 }
 
 /// What [`build`] builds the plan from.
@@ -560,6 +564,7 @@ fn assemble(
 ) -> Result<Built, Unrunnable> {
     let mut apps = Vec::new();
     let mut values = BTreeMap::new();
+    let mut notes: BTreeMap<String, Vec<ProcessNote>> = BTreeMap::new();
     for (plan, vars) in service_apps(inputs)? {
         values.insert(plan.name.clone(), vars);
         apps.push(plan);
@@ -567,7 +572,13 @@ fn assemble(
     for name in inputs.manifest.start_order(&[]).unwrap_or_default() {
         let app = app_name(&name)?;
         let (plan, vars) = match inputs.manifest.unit(&name) {
-            Some(Unit::Process(process)) => host_app(inputs, &name, &app, process)?,
+            Some(Unit::Process(process)) => {
+                let host = host_app(inputs, &name, &app, process)?;
+                if !host.notes.is_empty() {
+                    notes.insert(name.clone(), host.notes);
+                }
+                (host.plan, host.vars)
+            }
             Some(Unit::Container(container)) => container_app(inputs, &name, &app, container)?,
             None => continue,
         };
@@ -601,6 +612,7 @@ fn assemble(
     Ok(Built {
         plan,
         environment: ManifestEnvironment { values },
+        notes,
     })
 }
 
@@ -710,14 +722,26 @@ fn depends(depends_on: &[String]) -> Result<Vec<AppName>, Unrunnable> {
     depends_on.iter().map(|name| app_name(name)).collect()
 }
 
-/// Returns the plan of the host process `process`, named `name`, and the
-/// values of its variables.
+/// The plan of a host process, the values of its variables, and what the
+/// plan found about it.
+struct HostApp {
+    /// The plan of the process's app.
+    plan: AppPlan,
+    /// The values of its variables.
+    vars: Vec<(String, Redacted)>,
+    /// One note for each provided variable that the plan leaves unset.
+    notes: Vec<ProcessNote>,
+}
+
+/// Returns the plan of the host process `process`, named `name`, the
+/// values of its variables, and one note for each provided variable that
+/// the plan leaves unset.
 fn host_app(
     inputs: &Inputs<'_>,
     name: &str,
     app: &AppName,
     process: &Process,
-) -> Result<(AppPlan, Vec<(String, Redacted)>), Unrunnable> {
+) -> Result<HostApp, Unrunnable> {
     if let Some(variable) = process
         .env
         .keys()
@@ -749,7 +773,10 @@ fn host_app(
     // The provided variables of the process's starmap file replace the
     // passed-through and proxy variables, and the manifest's own variables
     // below replace them.
-    let provided = provided::values(inputs, name, process)?;
+    let provided::Provided {
+        values: provided,
+        skipped,
+    } = provided::values(inputs, name, process)?;
     if let Some(variable) = provided
         .keys()
         .find(|variable| PHASE_SETS.contains(&variable.as_str()))
@@ -843,7 +870,11 @@ fn host_app(
             .connect
             .extend(service_connects(inputs.manifest, process));
     }
-    Ok((plan, vars.into_iter().collect()))
+    Ok(HostApp {
+        plan,
+        vars: vars.into_iter().collect(),
+        notes: skipped.iter().map(provided::Skipped::note).collect(),
+    })
 }
 
 /// Returns the permissions of the app of the process `name`, whose source
