@@ -37,6 +37,10 @@ sha2 = { workspace = true }
 # archive` keeps a workspace's ignored files, with their permission bits
 # and link targets.
 tar = { workspace = true }
+# starmap parses each host process's `starmap.toml`, and starmap-resolve
+# resolves its variables whose bind is `multiverse/port` or `multiverse/url`.
+starmap = { workspace = true }
+starmap-resolve = { workspace = true }
 # phase holds the container engine that `up`, `down`, `status`, `logs` and
 # `remove` run a manifest's containers with, the run directory's paths, and
 # the rules of workspace and unit names. phase never depends on multiverse.

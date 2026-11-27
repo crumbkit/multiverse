@@ -329,6 +329,7 @@ fn run_in_process(
         }
         ExecTarget::Unrunnable(unrunnable) => {
             return Err(RunFailure::Unrunnable {
+                kind: Box::new(unrunnable.kind),
                 workspace,
                 unit: unrunnable.unit,
                 message: unrunnable.message,

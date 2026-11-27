@@ -464,6 +464,7 @@ pub(crate) fn run_start(
         .map_err(MxvFailure::from)?;
     drop(lock);
     let prepared = prepared.map_err(|unrunnable| RunFailure::Unrunnable {
+        kind: Box::new(unrunnable.kind),
         workspace: record.name.to_string(),
         unit: unrunnable.unit,
         message: unrunnable.message,

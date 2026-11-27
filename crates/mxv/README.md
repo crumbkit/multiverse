@@ -381,7 +381,7 @@ The schema has these keys, and any other key fails with
 | `processes.<name>.listen` | The port that the process listens on, which must be one of the ports it receives through `ports` or an `env` placeholder. A port has at most one listener. |
 | `processes.<name>.ready` | `port` or `log`, and `timeout_seconds`, from 1 to 3600 with a default of 60. `port` defaults to the listen port, and it must be the listen port or a port the process receives; the process is ready when a TCP connection to 127.0.0.1 or `::1` on that port succeeds. `log` is a regular expression; the process is ready when it writes a log line that matches, after this `up` started it. An empty `log` pattern fails with `mxv::manifest::invalid` and the line of the key. A table may not set both. |
 | `processes.<name>.depends_on` | Units that start, and are ready, before this one. A cycle fails. |
-| `processes.<name>.starmap` | The starmap file that declares the variables the process reads, for tools that read the manifest, such as jumpgate. The path is relative to the repository root whatever the process's `cwd`, so `cwd = "cli"` with `starmap = "cli/starmap.toml"` names one file. mxv drops a leading `./` and repeated or trailing `/`. An empty value, `.`, a value that starts with `/` and a value with a `..` part fail with `mxv::manifest::invalid` and the value's line. Each command that reads the manifest checks that the file exists, is a regular file, is not a symbolic link and does not reach outside the repository through a linked directory, and a file that fails fails with `mxv::manifest::starmap_file`, whose fields name the unit, the file, the line and what mxv `found`: `missing`, `link`, `not_a_file` or `unreadable`. `down` and `status` still stop and list the running units then, and `status` reports the code in `manifest_error_code`. mxv never reads the file or passes its variables to the process. A process without the key names none, and such tools then read `<cwd>/starmap.toml`. Containers and tasks do not take the key. |
+| `processes.<name>.starmap` | The starmap file that declares the variables the process reads, for tools that read the manifest, such as jumpgate. The path is relative to the repository root whatever the process's `cwd`, so `cwd = "cli"` with `starmap = "cli/starmap.toml"` names one file. mxv drops a leading `./` and repeated or trailing `/`. An empty value, `.`, a value that starts with `/` and a value with a `..` part fail with `mxv::manifest::invalid` and the value's line. Each command that reads the manifest checks that the file exists, is a regular file, is not a symbolic link and does not reach outside the repository through a linked directory, and a file that fails fails with `mxv::manifest::starmap_file`, whose fields name the unit, the file, the line and what mxv `found`: `missing`, `link`, `not_a_file` or `unreadable`. `down` and `status` still stop and list the running units then, and `status` reports the code in `manifest_error_code`. `up`, `restart` and `run` read the file and give the process its provided variables, as [Provided variables](#provided-variables) describes. A process without the key names none, and mxv and such tools then read `<cwd>/starmap.toml` when it exists. Containers and tasks do not take the key. |
 | `processes.<name>.permissions` | Runs the process under phase's sandbox, with the grants of `write`, `listen` and `connect`. An empty table runs it sandboxed with no grants, and a process without the table runs unsandboxed. [Sandboxed processes](#sandboxed-processes) describes it. |
 | `processes.<name>.permissions.write` | Paths that the process may write: `$STATE`, the process's own state directory, or a path relative to the repository root without `..`, such as `target`. An absolute path, a path with `..`, the root itself, a path inside `.git` in any case, and any other `$` name fail with `mxv::manifest::invalid` and the path's line. |
 | `processes.<name>.permissions.listen` | Ports that the process may listen on. Each is its `listen` port or a port it receives, and a process with a `listen` port must name it here. A port that another process listens on or a container publishes fails with `mxv::manifest::invalid` and its line. |
@@ -750,6 +750,95 @@ the current shell. A container receives only its manifest `env`.
 The decision record
 [host-process-environment.md](docs/decisions/host-process-environment.md)
 says why mxv passes these variables and what follows from it.
+
+#### Provided variables
+
+A host process also receives each variable of its starmap file whose
+`source` is `provided` and whose bind's kind is `multiverse/port` or
+`multiverse/url`. Its starmap file is the one its `starmap` key names, or
+`<cwd>/starmap.toml` when it has no key and that file exists. The bind names
+a unit with `process` or `app`, and may name one of that unit's ports with
+`port`:
+
+```toml
+[variables.CATALOGUE_URL]
+purpose = "The base URL of the catalogue's api."
+type = "url"
+unset = "required"
+show = "shown"
+source = "provided"
+bind = { provided = "multiverse/url", app = "catalogue/api" }
+
+[variables.CATALOGUE_ADMIN_PORT]
+purpose = "The admin port of the catalogue's api."
+type = "port"
+unset = "required"
+show = "shown"
+source = "provided"
+bind = { provided = "multiverse/port", process = "catalogue/api", port = "admin" }
+
+[variables.OWN_PORT]
+purpose = "The port this checkout's web process listens on."
+type = "port"
+unset = "required"
+show = "shown"
+source = "provided"
+bind = { provided = "multiverse/port", process = "web" }
+```
+
+A bare name, such as `web`, names a unit of the process's own checkout, as
+that checkout's `mxv.toml` writes it. `<checkout>/<unit>`, such as
+`catalogue/api`, names a unit of another checkout of the workspace. The
+`<checkout>` part is the checkout's name in the workspace, its folder in
+the workspace's directory, which `mxv status` and `mxv show` list. It is
+the repository's name unless `mxv new` or `mxv add` gave the checkout
+another folder with `--as`, and `--as` changes it. A bare name that the
+process's own checkout does not declare names a unit of the workspace
+manifest. `port` names a port by the name that the unit's own manifest
+gives it, such as `admin`, and a bind without `port` names the port that the
+unit listens on. These names do not change when a checkout joins or leaves
+the workspace. A merged name, such as `catalogue-api`, names no unit.
+`multiverse/port` gives the host port that the workspace holds for the port.
+`multiverse/url` gives the proxy's URL of the port when the proxy serves a
+route of it, and `http://127.0.0.1:<port>` otherwise. A variable that the
+manifest sets through `env`, `ports` or a service replaces a provided one of
+the same name, and a provided one replaces a variable of mxv's environment.
+mxv resolves only these two kinds. Every other variable of the file reaches
+the process as it did before, and a provided variable of another kind does
+not reach it.
+
+A bind that names a checkout the workspace does not have, a unit the
+manifest does not have, a port the unit does not have, or no port of a unit
+that listens on none, and a bind with a
+qualifier other than `process`, `app` and `port` or with both `process` and
+`app`, fails with `mxv::manifest::provided_unknown` before any build runs
+and before any unit starts. Its fields are `unit`, the process whose file
+holds the bind, `variable`, `app`, the unit as the file writes it, and
+`port`, the port as the file writes it or `listen`, and its message names
+the unit and the port.
+`mxv status` lists the units and `mxv show` lists the ports. A variable that
+the file marks `optional` and whose port has no host port yet is left out.
+A starmap file that does not parse fails with
+`mxv::manifest::starmap_invalid`, whose fields name the unit, the file and
+starmap's message.
+
+A provided bind adds no start ordering: the process can start before the
+unit it names listens. A process that needs that unit up first still names
+it in `depends_on`.
+
+A bind that names a unit and port of the manifest that the workspace holds
+no host port for yet, as before its first `up`, fails a required variable
+with `mxv::manifest::unrunnable`, whose hint runs `mxv up`. A
+`<cwd>/starmap.toml` that the process reads without a `starmap` key gets
+the checks of a file that the key names: a symbolic link, a file that is
+not a regular file, or one that reaches outside the checkout fails with
+`mxv::manifest::starmap_invalid`. A provided variable named `PATH` or
+`HOME` fails with `mxv::manifest::unrunnable`, as it does in `env`.
+
+The variables are resolved again on each `up`, `restart` and `run`. A
+process that gains or loses a provided variable has a changed plan, so `up`
+restarts it. A changed value alone, such as another checkout's port, takes
+`mxv restart`, as for any other variable.
 
 `mxv up` restarts a running host process whose part of the plan changed,
 such as its `argv`, its ports or its `permissions`, and prints an `info:`

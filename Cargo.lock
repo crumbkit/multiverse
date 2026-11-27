@@ -1305,6 +1305,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "starmap",
+ "starmap-resolve",
  "tar",
  "tempfile",
  "toml",
@@ -2284,9 +2286,9 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "starmap"
-version = "0.4.2"
+version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aac6bfef0accd2593b3b4992fc21239e82c1f098451f816ef4f9f17f1d0b43bb"
+checksum = "f73b248ebebe647e5b2d770a51b3cdf521344f15d57cf475a3b12174d6645d3a"
 dependencies = [
  "base64 0.23.1",
  "regex",
@@ -2295,6 +2297,15 @@ dependencies = [
  "toml_edit",
  "url",
  "zeroize",
+]
+
+[[package]]
+name = "starmap-resolve"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22ef4b93f2e272bf2be50caac7a5aeaa0938306c4da253a16de9ab8e4a2f75a4"
+dependencies = [
+ "starmap",
 ]
 
 [[package]]

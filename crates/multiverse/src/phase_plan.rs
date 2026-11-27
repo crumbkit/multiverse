@@ -13,8 +13,9 @@
 //! phase starts a host process with only `PATH` and `HOME` of the caller's
 //! environment, so the plan declares by name every other variable that a
 //! process receives, and [`ManifestEnvironment`] resolves each name. A host
-//! process receives its manifest `env`, its port variables, and the
-//! variables of [`PASSED_THROUGH`] that the caller's environment holds. A
+//! process receives its manifest `env`, its port variables, the provided
+//! variables of its starmap file, which the `provided` module resolves, and
+//! the variables of [`PASSED_THROUGH`] that the caller's environment holds. A
 //! container receives only its manifest `env`. The plan declares every
 //! variable of [`PASSED_THROUGH`] for each host process, and marks each one
 //! that the manifest does not set as optional, so phase starts the process
@@ -52,6 +53,7 @@ use crate::record::Workspace;
 use crate::redacted::Redacted;
 use crate::service::Service;
 
+mod provided;
 mod services;
 #[cfg(test)]
 mod tests;
@@ -221,11 +223,59 @@ impl CallerEnvironment {
 /// sentence that names the unit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Unrunnable {
+    /// What kind of problem it is.
+    pub kind: UnrunnableKind,
     /// The process or container, or `None` when the problem is the whole
     /// plan's.
     pub unit: Option<String>,
     /// What is wrong.
     pub message: String,
+}
+
+/// A provided variable's bind: the variable, the unit it names and the
+/// port it names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvidedBind {
+    /// The variable.
+    pub variable: String,
+    /// The unit that the bind names.
+    pub app: String,
+    /// The port that the bind names.
+    pub port: String,
+}
+
+/// The kind of problem that stops phase from running a manifest.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum UnrunnableKind {
+    /// The plan breaks one of phase's rules, such as a process that sets
+    /// `PATH`.
+    Plan,
+    /// A variable of a process's starmap file whose bind is
+    /// `multiverse/port` or `multiverse/url` names a unit or a port that
+    /// the workspace's manifest does not have, names a unit that listens on
+    /// no port, or has a qualifier that the bind does not take.
+    ProvidedUnknown {
+        /// The variable.
+        variable: String,
+        /// The unit that the bind names, as `process` or `app` gives it,
+        /// or empty when the bind names none.
+        app: String,
+        /// The port that the bind names, or `listen` when it names none.
+        port: String,
+    },
+    /// A required variable of a process's starmap file whose bind is
+    /// `multiverse/port` or `multiverse/url` names a unit and port of the
+    /// workspace's manifest that the workspace holds no host port for yet,
+    /// such as before its first `mxv up`.
+    ProvidedUnassigned(Box<ProvidedBind>),
+    /// A process's starmap file does not parse as a starmap file, cannot
+    /// be read, or is a default `<cwd>/starmap.toml` that is a symbolic
+    /// link, is not a regular file or reaches outside its checkout.
+    StarmapInvalid {
+        /// The file.
+        file: PathBuf,
+    },
 }
 
 /// The plan of a workspace's app and the values of each app's variables.
@@ -272,6 +322,11 @@ pub(crate) struct Inputs<'a> {
     /// The names that the proxy serves for the workspace's routes, which
     /// give each host process and task its URL variables.
     pub(crate) urls: ProxyUrls,
+    /// Whether the plan reads each host process's starmap file and gives
+    /// the process its provided variables. The check of one manifest file,
+    /// which knows neither the checkout's directory nor the other
+    /// checkouts' units, reads none.
+    pub(crate) read_starmaps: bool,
 }
 
 /// Returns the command that a manifest's check builds its plan with, which
@@ -323,6 +378,7 @@ pub(crate) fn placed(
                 .map(|rest| (root.clone(), relative(rest)))
         })
         .ok_or_else(|| Unrunnable {
+            kind: UnrunnableKind::Plan,
             unit: Some(name.to_owned()),
             message: format!(
                 "the process `{name}` runs in {}, which is in none of the workspace's checkouts",
@@ -525,6 +581,7 @@ fn assemble(
     let mut plan =
         Plan::new(inputs.workspace.clone(), inputs.id.clone(), apps).map_err(|error| {
             Unrunnable {
+                kind: UnrunnableKind::Plan,
                 unit: None,
                 message: format!("phase cannot run the manifest: {error}"),
             }
@@ -569,6 +626,9 @@ pub(crate) fn permissions(
             continue;
         };
         let (source, _) = placed(inputs, name, process)?;
+        // A wrong bind in the process's starmap file fails here, before
+        // any build runs or any port is given.
+        provided::check(inputs, name, process)?;
         let permissions = process
             .permissions
             .as_ref()
@@ -593,6 +653,7 @@ pub(crate) fn permissions(
 /// an uppercase letter.
 pub(crate) fn app_name(name: &str) -> Result<AppName, Unrunnable> {
     AppName::try_from(name.to_owned()).map_err(|error| Unrunnable {
+        kind: UnrunnableKind::Plan,
         unit: Some(name.to_owned()),
         message: format!(
             "`{name}` is not a name phase can run, which holds 1 to 64 lowercase letters, digits, '-' and '_' and starts with a letter or a digit: {error}"
@@ -603,6 +664,7 @@ pub(crate) fn app_name(name: &str) -> Result<AppName, Unrunnable> {
 /// Returns the process name [`MAIN`].
 fn main_process() -> Result<ProcessName, Unrunnable> {
     ProcessName::try_from(MAIN.to_owned()).map_err(|error| Unrunnable {
+        kind: UnrunnableKind::Plan,
         unit: None,
         message: format!("{MAIN}: {error}"),
     })
@@ -611,6 +673,7 @@ fn main_process() -> Result<ProcessName, Unrunnable> {
 /// Returns the phase port name of the port `port` of `unit`.
 fn port_name(unit: &str, port: &str) -> Result<PortName, Unrunnable> {
     PortName::try_from(port.to_owned()).map_err(|error| Unrunnable {
+        kind: UnrunnableKind::Plan,
         unit: Some(unit.to_owned()),
         message: format!("the port `{port}` of `{unit}` is not a port name phase accepts: {error}"),
     })
@@ -631,6 +694,7 @@ fn app_ports<'n>(
             .copied()
             .and_then(NonZeroU16::new)
             .ok_or_else(|| Unrunnable {
+                kind: UnrunnableKind::Plan,
                 unit: Some(unit.to_owned()),
                 message: format!(
                     "the workspace holds no host port for the port `{name}` of `{unit}`"
@@ -661,6 +725,7 @@ fn host_app(
         .find(|variable| PHASE_SETS.contains(&variable.as_str()))
     {
         return Err(Unrunnable {
+            kind: UnrunnableKind::Plan,
             unit: Some(name.to_owned()),
             message: format!(
                 "the process `{name}` sets {variable}, which phase gives every process from mxv's own environment"
@@ -681,6 +746,25 @@ fn host_app(
     for (variable, value) in proxied {
         vars.insert(variable, Redacted::new(value));
     }
+    // The provided variables of the process's starmap file replace the
+    // passed-through and proxy variables, and the manifest's own variables
+    // below replace them.
+    let provided = provided::values(inputs, name, process)?;
+    if let Some(variable) = provided
+        .keys()
+        .find(|variable| PHASE_SETS.contains(&variable.as_str()))
+    {
+        return Err(Unrunnable {
+            kind: UnrunnableKind::Plan,
+            unit: Some(name.to_owned()),
+            message: format!(
+                "the starmap file of the process `{name}` provides {variable}, which phase gives every process from mxv's own environment"
+            ),
+        });
+    }
+    for (variable, value) in &provided {
+        vars.insert(variable.clone(), Redacted::new(value.clone()));
+    }
     for (variable, value) in &process.env {
         vars.insert(variable.clone(), value.render(inputs.ports));
     }
@@ -695,6 +779,7 @@ fn host_app(
         .map(String::as_str)
         .collect();
     set.extend(serviced.keys().map(String::as_str));
+    set.extend(provided.keys().map(String::as_str));
     for (variable, value) in &serviced {
         vars.insert(variable.clone(), Redacted::new(value.clone()));
     }
@@ -788,6 +873,7 @@ fn app_permissions(
         let written = lexical(written);
         let Ok(rest) = written.strip_prefix(lexical(source)) else {
             return Err(Unrunnable {
+                kind: UnrunnableKind::Plan,
                 unit: Some(name.to_owned()),
                 message: format!(
                     "the process `{name}` may write {path}, which is outside {}, the checkout it runs in",
@@ -797,6 +883,7 @@ fn app_permissions(
         };
         if rest.as_os_str().is_empty() {
             return Err(Unrunnable {
+                kind: UnrunnableKind::Plan,
                 unit: Some(name.to_owned()),
                 message: format!(
                     "the process `{name}` may write {path}, which is the whole checkout it runs in, whose `.git` a sandboxed process may only read"
@@ -823,6 +910,7 @@ fn container_app(
     container: &Container,
 ) -> Result<(AppPlan, Vec<(String, Redacted)>), Unrunnable> {
     let image = ImageReference::try_from(container.image.clone()).map_err(|error| Unrunnable {
+        kind: UnrunnableKind::Plan,
         unit: Some(name.to_owned()),
         message: format!(
             "the image `{}` of `{name}` is not one phase runs, which is pinned by a tag other than `latest` or by an `@sha256:` digest: {error}",
@@ -847,6 +935,7 @@ fn container_app(
     main.env = container.env.keys().cloned().collect();
     for published in &container.ports {
         let inside = NonZeroU16::new(published.container).ok_or_else(|| Unrunnable {
+            kind: UnrunnableKind::Plan,
             unit: Some(name.to_owned()),
             message: format!("`{name}` publishes the container port 0"),
         })?;
@@ -855,6 +944,7 @@ fn container_app(
     }
     for (volume, mount) in &container.volumes {
         let volume = VolumeName::try_from(volume.clone()).map_err(|error| Unrunnable {
+            kind: UnrunnableKind::Plan,
             unit: Some(name.to_owned()),
             message: format!(
                 "the volume `{volume}` of `{name}` is not a volume name phase accepts: {error}"

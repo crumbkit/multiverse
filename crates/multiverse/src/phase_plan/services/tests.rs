@@ -72,6 +72,7 @@ fn plan_with(
         caller,
         own_command,
         urls: crate::phase_plan::ProxyUrls::default(),
+        read_starmaps: true,
     })
 }
 

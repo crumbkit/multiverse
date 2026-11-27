@@ -65,6 +65,15 @@ impl ProxyUrls {
         variables
     }
 
+    /// Returns the URL of the served route named `port`, or `None` when no
+    /// served route has that name.
+    pub(crate) fn url(&self, port: &str) -> Option<&str> {
+        self.routes
+            .iter()
+            .find(|(name, _, _)| name == port)
+            .map(|(_, _, url)| url.as_str())
+    }
+
     /// Returns `MXV_HOST` and `MXV_URL` for a process that listens on the
     /// port `port`, or none when no served route has that name.
     pub(crate) fn listened(&self, port: &str) -> Vec<(String, String)> {

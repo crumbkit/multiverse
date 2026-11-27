@@ -13,8 +13,17 @@ repository = "https://github.com/crumbkit/multiverse"
 
 [workspace.dependencies]
 # starmap parses `starmap.toml`, which declares the environment variables that
-# mxv reads. Only mxv's tests use it, and it needs no feature.
-starmap = { version = "0.4.2", default-features = false }
+# a process reads. The multiverse library reads each host process's file to
+# find its provided variables, and mxv's tests check a spec with it. It needs
+# no feature.
+starmap = { version = "0.4.3", default-features = false }
+
+# starmap-resolve resolves the provided variables of a process's
+# `starmap.toml`: multiverse implements its `Provider` trait for the kinds
+# `multiverse/port` and `multiverse/url` and resolves with `resolve`. Its
+# features add 1Password, Keychain and agent resolvers, which multiverse does
+# not use, so the workspace entry turns off its default features.
+starmap-resolve = { version = "0.4.3", default-features = false }
 
 # clap parses the `mxv` command line. The workspace entry enables only
 # `std`, and mxv enables the user-facing features it needs. Cargo turns on a

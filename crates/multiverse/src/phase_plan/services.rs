@@ -15,7 +15,7 @@ use phase::{
 #[cfg(test)]
 mod tests;
 
-use super::{Inputs, Unrunnable, app_name, app_ports, main_process, port_name};
+use super::{Inputs, Unrunnable, UnrunnableKind, app_name, app_ports, main_process, port_name};
 use crate::manifest::{Manifest, Process};
 use crate::provision::Spec;
 use crate::redacted::Redacted;
@@ -118,6 +118,7 @@ fn own_command(
     arguments: impl IntoIterator<Item = String>,
 ) -> Result<Vec<String>, Unrunnable> {
     let mut command = inputs.own_command.clone().ok_or_else(|| Unrunnable {
+        kind: UnrunnableKind::Plan,
         unit: Some(app.to_owned()),
         message: format!("mxv cannot find its own program, which runs `{app}`"),
     })?;
@@ -146,6 +147,7 @@ fn services_app(inputs: &Inputs<'_>) -> Result<Planned, Unrunnable> {
             .get(kind.port())
             .copied()
             .ok_or_else(|| Unrunnable {
+                kind: UnrunnableKind::Plan,
                 unit: Some(SERVICES_APP.to_owned()),
                 message: format!(
                     "the workspace holds no host port for the port `{}` of `{SERVICES_APP}`",
@@ -180,6 +182,7 @@ fn localstack_app(inputs: &Inputs<'_>) -> Result<Planned, Unrunnable> {
     let name = Backend::Aws.app();
     let image =
         ImageReference::try_from(LOCALSTACK_IMAGE.to_owned()).map_err(|error| Unrunnable {
+            kind: UnrunnableKind::Plan,
             unit: Some(name.to_owned()),
             message: format!("the image of `{name}` is not one phase runs: {error}"),
         })?;
@@ -188,6 +191,7 @@ fn localstack_app(inputs: &Inputs<'_>) -> Result<Planned, Unrunnable> {
     plan.ports = app_ports(inputs, name, [ledger])?;
     let port = port_name(name, ledger)?;
     let inside = NonZeroU16::new(LOCALSTACK_PORT).ok_or_else(|| Unrunnable {
+        kind: UnrunnableKind::Plan,
         unit: Some(name.to_owned()),
         message: format!("`{name}` publishes the container port 0"),
     })?;
