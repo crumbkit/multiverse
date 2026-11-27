@@ -449,7 +449,7 @@ fn an_optional_variable_whose_port_has_no_host_port_yet_is_left_out() {
         read_starmaps: true,
     };
     let process = &manifest.processes["shelf-web"];
-    let values = super::values(&inputs, "shelf-web", process).unwrap();
+    let values = super::values(&inputs, "shelf-web", process).unwrap().values;
     assert!(values.is_empty(), "{values:?}");
     write(
         dir.path().join("shelf/starmap.toml"),
@@ -586,7 +586,9 @@ fn a_starmap_key_names_the_file_that_the_process_reads_in_place_of_the_default()
         urls: ProxyUrls::default(),
         read_starmaps: true,
     };
-    let found = super::values(&inputs, "shelf-web", &manifest.processes["shelf-web"]).unwrap();
+    let found = super::values(&inputs, "shelf-web", &manifest.processes["shelf-web"])
+        .unwrap()
+        .values;
     assert_eq!(
         found,
         BTreeMap::from([("NAMED_ONLY".to_owned(), "http://127.0.0.1:41000".to_owned())])
@@ -670,4 +672,135 @@ fn a_merged_name_does_not_name_a_unit_of_another_checkout() {
         matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "catalogue-api"),
         "{failure:?}"
     );
+}
+
+/// Returns the plan of [`MERGED`] when the shelf's starmap file holds
+/// `spec`, with every host port.
+fn shelf_plan(spec: &str) -> Built {
+    let dir = workspace_with(spec);
+    plan_in(dir.path(), &ports(), ProxyUrls::default()).unwrap()
+}
+
+#[test]
+fn an_optional_variable_bound_to_a_checkout_that_the_workspace_lacks_is_left_unset_with_one_note() {
+    let built = shelf_plan(&variable(
+        "LEDGER_URL",
+        r#"{ provided = "multiverse/url", app = "ledger/api" }"#,
+        true,
+    ));
+    let vars = resolved(&built, "shelf-web");
+    assert!(!vars.contains_key("LEDGER_URL"), "{vars:?}");
+    let notes = built.notes.get("shelf-web").cloned().unwrap_or_default();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    let crate::runs::ProcessNote::ProvidedSkipped {
+        variable,
+        checkout,
+        message,
+    } = &notes[0]
+    else {
+        panic!("{notes:?}");
+    };
+    assert_eq!(variable, "LEDGER_URL");
+    assert_eq!(checkout, "ledger");
+    assert_eq!(
+        message,
+        "left LEDGER_URL unset, because the workspace has no checkout `ledger`"
+    );
+    assert!(!notes[0].is_warning());
+}
+
+#[test]
+fn an_optional_variable_bound_to_a_checkout_that_the_workspace_has_resolves_to_its_host_port() {
+    let built = shelf_plan(&variable(
+        "CATALOGUE_URL",
+        r#"{ provided = "multiverse/url", app = "catalogue/api" }"#,
+        true,
+    ));
+    assert_eq!(
+        resolved(&built, "shelf-web")["CATALOGUE_URL"],
+        "http://127.0.0.1:41000"
+    );
+    assert!(built.notes.get("shelf-web").is_none_or(Vec::is_empty));
+}
+
+#[test]
+fn a_required_variable_bound_to_a_checkout_that_the_workspace_lacks_still_fails_with_provided_unknown()
+ {
+    let failure = shelf_failure(&variable(
+        "LEDGER_URL",
+        r#"{ provided = "multiverse/url", app = "ledger/api" }"#,
+        false,
+    ));
+    assert!(
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "ledger/api"),
+        "{failure:?}"
+    );
+}
+
+#[test]
+fn an_optional_bind_to_a_unit_that_a_present_checkout_lacks_still_fails_with_provided_unknown() {
+    let failure = shelf_failure(&variable(
+        "CATALOGUE_URL",
+        r#"{ provided = "multiverse/url", app = "catalogue/apii" }"#,
+        true,
+    ));
+    assert!(
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { app, .. } if app == "catalogue/apii"),
+        "{failure:?}"
+    );
+    let built = shelf_plan(&variable(
+        "CATALOGUE_URL",
+        r#"{ provided = "multiverse/url", app = "catalogue/api" }"#,
+        true,
+    ));
+    assert!(resolved(&built, "shelf-web").contains_key("CATALOGUE_URL"));
+}
+
+#[test]
+fn an_optional_bind_to_a_port_that_a_present_unit_lacks_still_fails_with_provided_unknown() {
+    let failure = shelf_failure(&variable(
+        "CATALOGUE_PORT",
+        r#"{ provided = "multiverse/port", app = "catalogue/api", port = "grpc" }"#,
+        true,
+    ));
+    assert!(
+        matches!(&failure.kind, UnrunnableKind::ProvidedUnknown { port, .. } if port == "grpc"),
+        "{failure:?}"
+    );
+    let built = shelf_plan(&variable(
+        "CATALOGUE_PORT",
+        r#"{ provided = "multiverse/port", app = "catalogue/api", port = "admin" }"#,
+        true,
+    ));
+    assert_eq!(resolved(&built, "shelf-web")["CATALOGUE_PORT"], "41001");
+}
+
+#[test]
+fn the_permissions_check_admits_an_optional_bind_to_a_missing_checkout_with_no_ports_given() {
+    let dir = workspace_with(&variable(
+        "LEDGER_URL",
+        r#"{ provided = "multiverse/url", app = "ledger/api" }"#,
+        true,
+    ));
+    let manifest = Manifest::parse(MERGED, Path::new("/repo/mxv.toml")).unwrap();
+    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    let none = BTreeMap::new();
+    let shelf = dir.path().join("shelf");
+    let inputs = Inputs {
+        manifest: &manifest,
+        workspace: &workspace,
+        id: &id,
+        checkout: &shelf,
+        roots: roots_of(dir.path()),
+        ports: &none,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &CallerEnvironment::default(),
+        own_command: None,
+        urls: ProxyUrls::default(),
+        read_starmaps: true,
+    };
+    let granted = permissions(&inputs, &["shelf-web".to_owned()]);
+    assert!(granted.is_ok(), "{:?}", granted.err());
 }

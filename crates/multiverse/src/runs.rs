@@ -212,17 +212,30 @@ pub enum ProcessNote {
         /// phase's sentence, which names the app and why.
         message: String,
     },
+    /// `up` or `restart` left a provided variable of the process's starmap
+    /// file unset, because the variable is optional and its bind names a
+    /// checkout that the workspace does not have.
+    ProvidedSkipped {
+        /// The variable, such as `CATALOGUE_URL`.
+        variable: String,
+        /// The checkout that the bind names, such as `catalogue`.
+        checkout: String,
+        /// mxv's sentence, which names the variable and the checkout.
+        message: String,
+    },
 }
 
 impl ProcessNote {
-    /// Returns phase's sentence.
+    /// Returns the note's sentence, which phase writes for each note but
+    /// [`ProcessNote::ProvidedSkipped`], whose sentence mxv writes.
     #[must_use]
     pub fn message(&self) -> &str {
         match self {
             Self::SecretsRewritten { message }
             | Self::SecretsKept { message }
             | Self::PlanChanged { message }
-            | Self::VolumeOwnerUnchecked { message } => message,
+            | Self::VolumeOwnerUnchecked { message }
+            | Self::ProvidedSkipped { message, .. } => message,
         }
     }
 

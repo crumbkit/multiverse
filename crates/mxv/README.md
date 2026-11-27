@@ -818,6 +818,20 @@ holds the bind, `variable`, `app`, the unit as the file writes it, and
 the unit and the port.
 `mxv status` lists the units and `mxv show` lists the ports. A variable that
 the file marks `optional` and whose port has no host port yet is left out.
+
+A variable that the file marks `optional` and whose bind names
+`<checkout>/<unit>` for a checkout the workspace does not have is left
+unset, and the process still starts. Services that use one another when
+they share a workspace can bind each other's URLs this way, and each one
+runs alone too. `up` and `restart` put one `info` note on the process's row
+for each skipped variable, such as ``left CATALOGUE_URL unset, because the
+workspace has no checkout `catalogue` ``, and `run` prints the same note on
+standard error, after the process's name, before the task starts. A
+required variable bound to a missing checkout still fails with
+`mxv::manifest::provided_unknown`, and so does an optional bind whose
+checkout is present and has no such unit or port. The skip is decided on
+each `up`, `restart` and `run`, so a process gets the variable from the
+`restart` after the checkout joins the workspace.
 A starmap file that does not parse fails with
 `mxv::manifest::starmap_invalid`, whose fields name the unit, the file and
 starmap's message.
