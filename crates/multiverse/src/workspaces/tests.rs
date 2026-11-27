@@ -878,6 +878,9 @@ impl Backend for Scripted {
     fn remote_default(&self, mirror: &Path, url: &str) -> Result<Option<String>, Error> {
         Git.remote_default(mirror, url)
     }
+    fn mirror_origin(&self, mirror: &Path) -> Result<Option<String>, Error> {
+        Git.mirror_origin(mirror)
+    }
     fn mirror_default(&self, mirror: &Path) -> Result<Option<String>, Error> {
         Git.mirror_default(mirror)
     }

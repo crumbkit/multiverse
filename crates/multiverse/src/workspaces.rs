@@ -195,11 +195,12 @@ impl Found {
     }
 
     /// Returns what a refusal names it by: the repository's top-level
-    /// directory, or the origin as the person gave it.
+    /// directory, or the origin as the person gave it without a user name
+    /// or password, so a token in a URL never reaches mxv's output.
     fn shown(&self) -> PathBuf {
         match self {
             Self::Repository(repository) => repository.root.clone(),
-            Self::Origin { origin, .. } => PathBuf::from(origin.as_str()),
+            Self::Origin { origin, .. } => PathBuf::from(crate::mirror::redacted(origin.as_str())),
         }
     }
 }
@@ -1382,7 +1383,8 @@ impl<B: Backend> Workspaces<B> {
 
     /// Returns the repository or the origin and mirror that `repo` names.
     /// An origin is fetched from the URL that names it, or, for the short
-    /// form, from the URL that its mirror last fetched from, or else over
+    /// form, from the URL that its mirror's config records from its last
+    /// fetch, with its SSH user name, or else over
     /// SSH.
     ///
     /// # Errors
@@ -1393,15 +1395,25 @@ impl<B: Backend> Workspaces<B> {
     /// no mirrors.
     fn found(&self, repo: &Repo) -> Result<Found, Error> {
         match &repo.source {
-            RepoSource::Path(path) => Ok(Found::Repository(self.backend.repository(path)?)),
+            // A path that names nothing is shown as the person gave it, which
+            // may be a URL with a password that names no origin.
+            RepoSource::Path(path) => match self.backend.repository(path) {
+                Ok(repository) => Ok(Found::Repository(repository)),
+                Err(Error::RepositoryNotFound { path }) => Err(Error::RepositoryNotFound {
+                    path: path.to_str().map_or(path.clone(), |text| {
+                        PathBuf::from(crate::mirror::redacted(text))
+                    }),
+                }),
+                Err(error) => Err(error),
+            },
             RepoSource::Origin(origin) => {
                 let Some(mirrors) = &self.mirrors else {
                     return Err(Error::RepositoryNotFound {
-                        path: PathBuf::from(origin.as_str()),
+                        path: PathBuf::from(crate::mirror::redacted(origin.as_str())),
                     });
                 };
                 let mirror = mirrors.join(origin.key());
-                let url = origin.url(crate::mirror::fetched_url(&mirror));
+                let url = origin.url(self.backend.mirror_origin(&mirror)?);
                 Ok(Found::Origin {
                     origin: origin.clone(),
                     url,

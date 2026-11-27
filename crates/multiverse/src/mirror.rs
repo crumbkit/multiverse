@@ -193,26 +193,15 @@ impl RepoOrigin {
     }
 
     /// Returns the URL to fetch: the URL that the person gave, or, for the
-    /// short form, `recorded`, the URL of the mirror's last fetch, or else
-    /// the SSH URL of the host and path.
+    /// short form, `recorded`, the URL that the mirror's config records from
+    /// its last fetch, with its SSH user name, or else the SSH URL of the
+    /// host and path.
     pub(crate) fn url(&self, recorded: Option<String>) -> String {
         match &self.url {
             Some(url) => url.clone(),
             None => recorded.unwrap_or_else(|| self.default_url.clone()),
         }
     }
-}
-
-/// Returns the URL that the mirror at `mirror` last fetched from, as git
-/// wrote it in the mirror's `FETCH_HEAD` without a user name or password,
-/// or `None` when the mirror records none.
-pub(crate) fn fetched_url(mirror: &Path) -> Option<String> {
-    let bytes = crate::store::read(mirror.join("FETCH_HEAD")).ok()?;
-    let text = String::from_utf8_lossy(&bytes);
-    let line = text.lines().next()?;
-    let note = line.splitn(3, '\t').nth(2)?;
-    let url = note.rsplit_once(" of ").map_or(note, |(_, url)| url).trim();
-    (!url.is_empty()).then(|| url.to_owned())
 }
 
 /// Returns `url` with the user name and password of each `scheme://`

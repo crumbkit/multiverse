@@ -906,3 +906,21 @@ fn add_of_an_origin_url_clones_it_into_a_folder_named_after_the_origin() {
     assert_eq!(exit, 1, "{document}");
     assert_eq!(document["code"], "mxv::checkout::name_taken", "{document}");
 }
+
+#[test]
+fn the_result_of_new_names_the_manifest_of_a_checkout_made_from_an_origin() {
+    let setup = Setup::new();
+    let web = setup.root().join("web");
+    write_text(
+        &web.join("mxv.toml"),
+        "[processes.server]\nargv = [\"true\"]\n",
+    );
+    git(&web, &["add", "mxv.toml"]);
+    git(&web, &["commit", "--quiet", "-m", "Add a manifest"]);
+    git(&web, &["push", "--quiet", "origin", "main"]);
+    let url = format!("file://{}", setup.root().join("web.git").display());
+    let (exit, document) = setup.json(&["new", "triage", "--repo", "api", "--repo", &url]);
+    assert_eq!(exit, 0, "{document}");
+    let row = &document["data"];
+    assert_eq!(row["manifest"], "merged", "{row}");
+}

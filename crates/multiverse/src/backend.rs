@@ -423,7 +423,9 @@ pub trait Backend {
     /// `mirror`, deletes the mirror's branches that the origin no longer
     /// has, and points the mirror's `HEAD` at its branch `default`. The
     /// fetch uses the person's own git config, so a credential helper
-    /// answers as it does for any other fetch.
+    /// answers as it does for any other fetch. It records `url` in the
+    /// mirror's config as `mxv.origin`, with the user name of an SSH URL and
+    /// never a password, which [`Backend::mirror_origin`] reads.
     ///
     /// # Errors
     ///
@@ -445,6 +447,17 @@ pub trait Backend {
     /// origin, and [`Error::MirrorFetchFailed`] when the read fails
     /// otherwise.
     fn remote_default(&self, mirror: &Path, url: &str) -> Result<Option<String>, Error>;
+
+    /// Returns the URL that the bare `mirror` last fetched from, as
+    /// [`Backend::fetch_mirror`] records it in the mirror's config: an SSH
+    /// URL keeps its user name and loses only a password, and every other URL
+    /// loses both. Returns `None` for a mirror that does not exist or records
+    /// no URL, as a mirror that an older mxv fetched does not.
+    ///
+    /// # Errors
+    ///
+    /// Returns the failure of the lookup.
+    fn mirror_origin(&self, mirror: &Path) -> Result<Option<String>, Error>;
 
     /// Returns the branch that the `HEAD` of the bare `mirror` names, such as
     /// `main`, when the mirror holds that branch, and `None` when the mirror

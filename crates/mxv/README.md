@@ -119,8 +119,9 @@ for the lock.
 this machine yet. A git URL, such as `https://github.com/acme/dispatcher` or
 `git@github.com:acme/dispatcher.git`, is fetched as it is written. The short
 form `github.com/acme/dispatcher` is fetched from the URL that the mirror of
-`github.com/acme/dispatcher.git` last fetched from, as its `FETCH_HEAD`
-records it, or else from `ssh://git@github.com/acme/dispatcher`, because ssh
+`github.com/acme/dispatcher.git` last fetched from, which the mirror's
+config keeps as `mxv.origin` with the user name of an SSH URL and without a
+password, or else from `ssh://git@github.com/acme/dispatcher`, because ssh
 with the person's key reaches a private repository without a prompt. Give
 the full `https` URL to fetch over `https`. A value that names an existing
 directory is always read as a path, so a directory named like a short form

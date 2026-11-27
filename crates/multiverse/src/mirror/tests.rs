@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{Origin, RepoOrigin, fetched_url, redacted};
+use super::{Origin, RepoOrigin, redacted};
 
 fn key(url: &str) -> String {
     Origin::parse(url, Path::new("/home/someone/app"))
@@ -228,20 +228,4 @@ fn a_value_that_is_neither_a_url_nor_a_short_form_names_no_origin() {
     ] {
         assert!(RepoOrigin::parse(text).is_none(), "{text}");
     }
-}
-
-#[test]
-fn a_mirror_records_the_url_of_its_last_fetch_in_fetch_head() {
-    let dir = tempfile::tempdir().unwrap();
-    assert_eq!(fetched_url(dir.path()), None);
-    crate::testing::write(
-        dir.path().join("FETCH_HEAD"),
-        "9e2c611609e78fca3630dc74c67f62c842e688c4\tnot-for-merge\tbranch 'main' of https://github.com/acme/dispatcher\n",
-    );
-    assert_eq!(
-        fetched_url(dir.path()).as_deref(),
-        Some("https://github.com/acme/dispatcher")
-    );
-    crate::testing::write(dir.path().join("FETCH_HEAD"), "");
-    assert_eq!(fetched_url(dir.path()), None);
 }

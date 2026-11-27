@@ -658,3 +658,42 @@ fn a_git_command_past_its_deadline_fails_as_timed_out_soon_after_the_deadline() 
         "took {took:?}"
     );
 }
+
+#[test]
+fn a_mirror_records_the_url_it_fetched_from_with_its_user_and_without_a_password() {
+    let fixture = fixture();
+    let ssh = fake_ssh(fixture.dir.path(), &fixture.origin);
+    let mirror = fixture.dir.path().join("mirror.git");
+    assert_eq!(Git.mirror_origin(&mirror).unwrap(), None);
+    Git.prepare_mirror(&mirror).unwrap();
+    assert_eq!(Git.mirror_origin(&mirror).unwrap(), None);
+    git(
+        &mirror,
+        &[
+            "--git-dir=.",
+            "config",
+            "core.sshCommand",
+            &ssh.command("accept"),
+        ],
+    );
+    Git.fetch_mirror(
+        &mirror,
+        "ssh://deploy:hunter2@example.invalid/acme/app.git",
+        "main",
+    )
+    .unwrap_or_else(|error| panic!("{error:?}\n{}", ssh.logged()));
+    assert_eq!(
+        Git.mirror_origin(&mirror).unwrap().as_deref(),
+        Some("ssh://deploy@example.invalid/acme/app.git")
+    );
+    Git.fetch_mirror(&mirror, "git@example.invalid:acme/app.git", "main")
+        .unwrap_or_else(|error| panic!("{error:?}\n{}", ssh.logged()));
+    assert_eq!(
+        Git.mirror_origin(&mirror).unwrap().as_deref(),
+        Some("git@example.invalid:acme/app.git")
+    );
+    let config = std::fs::read_to_string(mirror.join("config")).unwrap();
+    assert!(!config.contains("hunter2"), "{config}");
+    let fetch_head = std::fs::read_to_string(mirror.join("FETCH_HEAD")).unwrap();
+    assert!(!fetch_head.contains("hunter2"), "{fetch_head}");
+}
