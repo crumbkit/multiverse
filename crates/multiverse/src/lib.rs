@@ -74,7 +74,7 @@ pub use crate::error::{Error, SshRefusal};
 pub use crate::git::{CHECKOUT_DEADLINE, FETCH_DEADLINE, Git, LOCAL_DEADLINE, MOST_OUTPUT_BYTES};
 pub use crate::host::{BadHost, Host, HostName, MOST_HOST_NAME_BYTES, MOST_MANIFEST_FILE_BYTES};
 pub use crate::lifecycle::{
-    ArchiveDeleted, Archived, Finish, FinishDone, Finished, InUse, Lifecycle, RemovalDone,
+    ArchiveDeleted, Archived, Finish, FinishDone, Finished, Forget, InUse, Lifecycle, RemovalDone,
     RemoveAsked, Removed, RepairDone, Repairing, Restoration, RetireDone, VolumesAsked,
 };
 pub use crate::lookup::{ManifestInputs, ManifestSource, TaskHome, checkout_prefix, prefixed};
@@ -88,6 +88,10 @@ pub use crate::marker::{MARKER_FILE, Marker, ensure as ensure_marker};
 pub use crate::merged::{GitHub, HELPER_DEADLINE, PullRequests, Verdict, update_board_mount};
 pub use crate::mirror::RepoOrigin;
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
+pub use crate::phase_plan::secrets::{
+    AskedSecret, KEYCHAIN, KeychainItem, ONE_PASSWORD, SECRET_WAIT, SecretFailure, SecretProblem,
+    SecretSource, forget_keychain, keychain_service,
+};
 pub use crate::phase_plan::{
     CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, ProvidedBind, RefusedBind, RefusedBinds,
     Unrunnable, UnrunnableKind,
@@ -114,8 +118,8 @@ pub use crate::runs::{
     Admission, Asked, BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Exec, ExecEnd,
     ExecTarget, ExitReason, Footprint, Granting, Kind, LogOutput, MiseListing, MiseTaskName,
     Needed, PermissionAsk, Place, PreparedTask, ProcessNote, ProcessState, ProcessStatus,
-    RenamedVolume, Runs, STOP_GRACE, StillNeeded, TaskEnd, TaskServices, TaskStart, Toucher,
-    Unstoppable, UpOutcome, Volumes, Waited, WorkspaceLock,
+    RenamedVolume, Runs, STOP_GRACE, SecretAsk, StillNeeded, TaskEnd, TaskServices, TaskStart,
+    Toucher, Unstoppable, UpOutcome, Volumes, Waited, WorkspaceLock,
 };
 pub use crate::service::{
     ACCOUNT, AWS_PREFIX, AttributeType, Backend as ServiceBackend, COMMON_VARIABLES, HOST, Index,

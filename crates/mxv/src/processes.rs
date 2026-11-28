@@ -13,9 +13,10 @@ use std::process::ExitCode;
 use crumbkit::{Batch, Document, Listing, Run, Stream};
 use multiverse::phase::Growth;
 use multiverse::{
-    BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Error, Git, Granting, Manifest,
-    ManifestError, Marker, Needed, Reclaimed, Runs, Store, SyncMode, UpOutcome, Volumes, Workspace,
-    WorkspaceLock, WorkspaceName, WorkspaceState,
+    AskedSecret, BuildEnd, BuildStop, BuildsPassed, DownOutcome, DownResult, Error, Git, Granting,
+    Manifest, ManifestError, Marker, Needed, ProcessNote, ProcessStatus, Reclaimed, Runs,
+    SecretAsk, Store, SyncMode, UpOutcome, Volumes, Workspace, WorkspaceLock, WorkspaceName,
+    WorkspaceState,
 };
 use std::io::{BufRead, Write};
 use std::time::Duration;
@@ -32,12 +33,15 @@ use crate::verbs;
 #[cfg(test)]
 mod tests;
 
+/// The rows and failures that `mxv up` and `mxv restart` print.
+pub(crate) type Started = Batch<ProcessRow, RunFailure>;
+
 /// The document that `mxv up` prints.
-pub(crate) const UP: Document<Vec<ProcessRow>> = Document::new(
+pub(crate) const UP: Document<Started> = Document::new(
     "mxv",
     "up",
     1,
-    "The selected units and their dependencies, in the order they started, each running.",
+    "The selected units and their dependencies, in the order they started, each running, then each unit that did not start because a unit it depends on lacks a secret, and a failure for each unit that lacks a secret.",
 );
 
 /// The document that `mxv down` prints.
@@ -49,11 +53,11 @@ pub(crate) const DOWN: Document<Batch<ProcessRow, RunFailure>> = Document::new(
 );
 
 /// The document that `mxv restart` prints.
-pub(crate) const RESTART: Document<Vec<ProcessRow>> = Document::new(
+pub(crate) const RESTART: Document<Started> = Document::new(
     "mxv",
     "restart",
     1,
-    "The restarted units and their dependencies, in the order they started, each running.",
+    "The restarted units and their dependencies, in the order they started, each running, then each unit that did not start because a unit it depends on lacks a secret, and a failure for each unit that lacks a secret.",
 );
 
 /// The document that `mxv status` prints.
@@ -376,8 +380,8 @@ pub(crate) struct Interrupted {
 /// signal that interrupted the command's builds, and returns the exit code.
 pub(crate) fn finish_interruptible(
     output: Run,
-    document: Document<Vec<ProcessRow>>,
-    result: Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error>,
+    document: Document<Started>,
+    result: Result<Result<Started, Interrupted>, crumbkit::Error>,
 ) -> ExitCode {
     match result {
         Ok(Err(Interrupted { signal })) => {
@@ -385,7 +389,7 @@ pub(crate) fn finish_interruptible(
             crumbkit::events::ended(u8::try_from(128 + signal).unwrap_or(u8::MAX), None)
         }
         Ok(Ok(rows)) => crumbkit::finish(output, document, Ok::<_, crumbkit::Error>(rows)),
-        Err(error) => crumbkit::finish(output, document, Err::<Vec<ProcessRow>, _>(error)),
+        Err(error) => crumbkit::finish(output, document, Err::<Started, _>(error)),
     }
 }
 
@@ -482,9 +486,10 @@ fn selection(workspace: &Workspace, manifest: &Manifest, named: &[String]) -> Ve
 
 /// Asks the person at the terminal to grant the permissions that the units
 /// `units` returns for the workspace's manifest ask for beyond the grant of
-/// the workspace's repository, as [`ask_person`] does. Without a terminal,
-/// or with `--no-input`, it asks nothing, and the check under the lock
-/// refuses.
+/// the workspace's repository, and the secret references they read, as
+/// [`ask_person`] does. Without a terminal, or with `--no-input`, it asks
+/// nothing, and the check under the lock refuses the permissions and
+/// leaves out each unit whose required secret no person granted.
 ///
 /// # Errors
 ///
@@ -508,18 +513,22 @@ fn ask_first(
 /// Asks a person, by writing to `prompt` and reading `input`, to grant the
 /// permissions that the units `units` returns for the workspace's manifest
 /// ask for beyond the grant of the workspace's repository, and adds them
-/// to the grant on yes. It runs before the command takes the workspace's
-/// lock for its builds and starts, so a person who walks away from the
-/// question keeps no other command of the workspace waiting. A workspace
-/// whose record holds no stable id gets one first, saved under the lock,
-/// which it releases before it asks.
+/// to the grant on yes. Then it asks, in a second question, to let mxv
+/// read each secret reference of those units that no person granted, and
+/// adds them to the repository's secret grant on yes. It runs before the
+/// command takes the workspace's lock for its builds and starts, so a
+/// person who walks away from the question keeps no other command of the
+/// workspace waiting. A workspace whose record holds no stable id gets one
+/// first, saved under the lock, which it releases before it asks.
 ///
 /// # Errors
 ///
-/// Returns [`RunFailure::PermissionsNotGranted`] when the answer is not
-/// yes, [`MxvFailure::NotFound`] when the record is gone once it holds the
-/// lock, the other failures of taking the lock and saving the id, and the
-/// failures of reading or writing the grant.
+/// Returns [`RunFailure::PermissionsNotGranted`] when the answer to the
+/// permission question is not yes, [`MxvFailure::NotFound`] when the
+/// record is gone once it holds the lock, the other failures of taking the
+/// lock and saving the id, and the failures of reading or writing either
+/// grant. An answer to the secret question that is not yes fails nothing
+/// here; the units that need the secrets fail alone under the lock.
 fn ask_person(
     prompt: &mut dyn Write,
     input: &mut dyn BufRead,
@@ -546,16 +555,58 @@ fn ask_person(
         .runs
         .granting(&id, &context.workspace, &manifest, &names)
         .map_err(MxvFailure::from)?;
-    let Granting::Asks(ask) = granting else {
-        return Ok(());
-    };
-    let text = question(ask.repository(), ask.paths(), ask.growth());
-    if answer(&text, prompt, input) {
+    if let Granting::Asks(ask) = granting {
+        let text = question(ask.repository(), ask.paths(), ask.growth());
+        if !answer(&text, prompt, input) {
+            return Err(
+                RunFailure::not_granted(context.workspace.name.as_str(), &ask, true).into(),
+            );
+        }
         context.runs.grant(&ask).map_err(MxvFailure::from)?;
-        Ok(())
-    } else {
-        Err(RunFailure::not_granted(context.workspace.name.as_str(), &ask, true).into())
     }
+    if let Some(ask) = context
+        .runs
+        .secret_granting(&id, &context.workspace, &manifest, &names)
+    {
+        let text = secret_question(&ask);
+        if answer(&text, prompt, input) {
+            context.runs.grant_secrets(&ask).map_err(MxvFailure::from)?;
+        }
+    }
+    Ok(())
+}
+
+/// Returns the question that asks a person to let mxv read the secrets
+/// that `ask` names: the repository, then for each secret the unit, the
+/// variable, the store, the reference and the file that names it, and
+/// `Grant them? [y/N] `. It names no value.
+fn secret_question(ask: &SecretAsk) -> String {
+    let paths: Vec<String> = ask
+        .paths()
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect();
+    let mut text = format!(
+        "Repository {} ({}) asks mxv to read these secrets:\n",
+        ask.repository(),
+        paths.join(", ")
+    );
+    for AskedSecret {
+        unit,
+        variable,
+        store,
+        reference,
+        file,
+        ..
+    } in ask.secrets()
+    {
+        text.push_str(&format!(
+            "  {unit} reads {variable} from {reference} in {store}, as {} says\n",
+            file.display()
+        ));
+    }
+    text.push_str("Grant them? [y/N] ");
+    text
 }
 
 /// Returns the question that asks a person to grant `growth` to the
@@ -597,7 +648,7 @@ pub(crate) fn up(
     environment: &Environment,
     args: &ProcessesArgs,
     served: &mut Served,
-) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
+) -> Result<Result<Started, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     // The question names the units that `up` starts, which the reclaim
     // mark narrows when the command line names none.
@@ -613,7 +664,7 @@ pub(crate) fn up(
         Ok(passed) => passed,
         Err(interrupted) => return Ok(Err(interrupted)),
     };
-    let rows = start(&mut context, passed, &manifest, &args.processes)?;
+    let rows = start(&mut context, passed, &manifest, &args.processes, &["up"])?;
     sync_proxy(environment, &context, SyncMode::Start, served);
     Ok(Ok(rows))
 }
@@ -631,15 +682,19 @@ fn sync_proxy(environment: &Environment, context: &Context, mode: SyncMode, serv
 }
 
 /// Starts the context's processes, and returns their rows or the failure
-/// of the first one that does not start. `passed` proves that their builds
-/// passed. `named` is what the command line named, which narrows the
-/// reclaim mark once they start.
+/// of the first one that does not start. A unit that lacks a required
+/// secret is a failure of the batch, a unit that depends on it is a row
+/// whose note says why it did not start, and every other unit starts.
+/// `passed` proves that their builds passed. `named` is what the command
+/// line named, which narrows the reclaim mark once they start. `command`
+/// is the command that starts them, `up` or `restart`.
 fn start(
     context: &mut Context,
     passed: BuildsPassed<'_>,
     manifest: &Manifest,
     named: &[String],
-) -> Result<Vec<ProcessRow>, crumbkit::Error> {
+    command: &'static [&'static str],
+) -> Result<Started, crumbkit::Error> {
     let workspace = context.workspace.name.to_string();
     let mut earlier = Vec::new();
     let outcome = context.runs.up(
@@ -658,7 +713,19 @@ fn start(
     match outcome.map_err(MxvFailure::from)? {
         UpOutcome::Up(statuses) => {
             context.forget_reclaim(named)?;
-            Ok(statuses.iter().map(ProcessRow::from).collect())
+            Ok(started(command, &workspace, &statuses, Vec::new()))
+        }
+        UpOutcome::Withheld { statuses, withheld } => {
+            // The units that did not start stay in the reclaim mark.
+            let ran: Vec<String> = statuses
+                .iter()
+                .filter(|status| !not_started(status))
+                .map(|status| status.name.clone())
+                .collect();
+            if !ran.is_empty() {
+                context.forget_reclaim(&ran)?;
+            }
+            Ok(started(command, &workspace, &statuses, withheld))
         }
         UpOutcome::Left {
             unstoppable,
@@ -750,6 +817,40 @@ fn start(
         }
         .into()),
     }
+}
+
+/// Reports whether `status` is of a unit that did not start because a unit
+/// it depends on lacks a secret.
+fn not_started(status: &ProcessStatus) -> bool {
+    status
+        .notes
+        .iter()
+        .any(|note| matches!(note, ProcessNote::NotStarted { .. }))
+}
+
+/// Returns the batch of the command `command` in the workspace
+/// `workspace`: a row for each of `statuses`, in order, then a failure for
+/// each unit of `withheld`, keyed by the units' names.
+fn started(
+    command: &'static [&'static str],
+    workspace: &str,
+    statuses: &[ProcessStatus],
+    withheld: Vec<multiverse::SecretFailure>,
+) -> Started {
+    let keys: Vec<&str> = statuses
+        .iter()
+        .map(|status| status.name.as_str())
+        .chain(withheld.iter().map(|failure| failure.unit.as_str()))
+        .collect();
+    let mut batch = Batch::new(command, "processes", &keys);
+    batch.extend(statuses.iter().map(|status| Ok(ProcessRow::from(status))));
+    batch.extend(withheld.into_iter().map(|failure| {
+        Err(RunFailure::Secret {
+            workspace: workspace.to_owned(),
+            failure: Box::new(failure),
+        })
+    }));
+    batch
 }
 
 /// Stops the context's processes, and returns one result for each, in
@@ -870,7 +971,7 @@ pub(crate) fn restart(
     environment: &Environment,
     args: &ProcessesArgs,
     served: &mut Served,
-) -> Result<Result<Vec<ProcessRow>, Interrupted>, crumbkit::Error> {
+) -> Result<Result<Started, Interrupted>, crumbkit::Error> {
     let mut context = context(environment, args.workspace.as_ref(), &args.processes)?;
     let manifest = required_manifest(&context.workspace)?;
     if let Err(unknown) = manifest.start_order(&context.processes) {
@@ -901,9 +1002,9 @@ fn replace(
     passed: BuildsPassed<'_>,
     manifest: &Manifest,
     named: &[String],
-) -> Result<Vec<ProcessRow>, crumbkit::Error> {
+) -> Result<Started, crumbkit::Error> {
     stop_every(context, lock, Some(manifest))?;
-    start(context, passed, manifest, named)
+    start(context, passed, manifest, named, &["restart"])
 }
 
 /// Returns each process of the workspace that `args` names and its state.

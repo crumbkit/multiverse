@@ -15,8 +15,12 @@
 //! process receives, and [`ManifestEnvironment`] resolves each name. A host
 //! process receives its manifest `env`, its port variables, the provided
 //! variables of its starmap file, which the `provided` module resolves, and
-//! the variables of [`PASSED_THROUGH`] that the caller's environment holds. A
-//! container receives only its manifest `env`. The plan declares every
+//! the variables of [`PASSED_THROUGH`] that the caller's environment holds.
+//! The plan also names the secret and generated variables of its starmap
+//! file, which the `secrets` module reads, and gives them no value: `up`
+//! reads their values before phase starts the process, and the source that
+//! adds them hands them to phase. A container receives only its manifest
+//! `env`. The plan declares every
 //! variable of [`PASSED_THROUGH`] for each host process, and marks each one
 //! that the manifest does not set as optional, so phase starts the process
 //! without the ones that the caller's environment lacks. The plan, and its
@@ -55,6 +59,7 @@ use crate::runs::ProcessNote;
 use crate::service::Service;
 
 mod provided;
+pub(crate) mod secrets;
 mod services;
 #[cfg(test)]
 mod tests;
@@ -151,8 +156,11 @@ fn passes(name: &str) -> bool {
 /// The environment that mxv's `main` read, which phase's keepers and the
 /// processes they start receive part of: `PATH` and `HOME`, and the
 /// variables of [`PASSED_THROUGH`]. It also keeps the variables whose names
-/// start with `DOCKER_`, which only phase's `docker exec` receives. A
-/// variable whose name or value is not UTF-8 is left out.
+/// start with `DOCKER_`, which only phase's `docker exec` receives, and
+/// `OP_ACCOUNT`, `OP_SERVICE_ACCOUNT_TOKEN` and the `OP_SESSION_`
+/// variables, which only decide whether `up` reads 1Password through
+/// starmap's agent, and which no process receives. A variable whose name
+/// or value is not UTF-8 is left out.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct CallerEnvironment {
     /// The variables, by name.
@@ -176,7 +184,10 @@ impl CallerEnvironment {
             .into_iter()
             .filter_map(|(name, value)| Some((name.into_string().ok()?, value.into_string().ok()?)))
             .filter(|(name, _)| {
-                passes(name) || chooses_docker(name) || PHASE_SETS.contains(&name.as_str())
+                passes(name)
+                    || chooses_docker(name)
+                    || secrets::reads_one_password(name)
+                    || PHASE_SETS.contains(&name.as_str())
             })
             .map(|(name, value)| (name, Redacted::new(value)))
             .collect();
@@ -212,6 +223,15 @@ impl CallerEnvironment {
             .filter(|(name, _)| chooses_docker(name) || PHASE_SETS.contains(&name.as_str()))
             .map(|(name, value)| (name.clone(), value.reveal().to_owned()))
             .collect()
+    }
+
+    /// Returns the variables that tell `op` and starmap's agent which
+    /// 1Password account to use or that `op` need not prompt, by name.
+    pub(crate) fn one_password(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.vars
+            .iter()
+            .filter(|(name, _)| secrets::reads_one_password(name))
+            .map(|(name, value)| (name.as_str(), value.reveal()))
     }
 
     /// Returns the variables that a host process receives, by name.
@@ -766,6 +786,13 @@ fn permission(
             Held::Unrunnable(failure)
         }
     })?);
+    let secret_names = secrets::names(inputs, name, process).map_err(|failure| {
+        if matches!(failure.kind, UnrunnableKind::StarmapInvalid { .. }) {
+            Held::Invalid(failure)
+        } else {
+            Held::Unrunnable(failure)
+        }
+    })?;
     let permissions = process
         .permissions
         .as_ref()
@@ -774,6 +801,7 @@ fn permission(
             granted
                 .connect
                 .extend(service_connects(inputs.manifest, process));
+            granted.secrets.extend(secret_names);
             Ok(granted)
         })
         .transpose()
@@ -922,6 +950,14 @@ fn host_app(
     for (variable, value) in &process.env {
         vars.insert(variable.clone(), value.render(inputs.ports));
     }
+    // The secret and generated variables get no value here: `up` reads
+    // them, and the source that adds them hands them to phase when it
+    // starts the process. They replace a passed-through or proxy variable
+    // of the same name, and the manifest's own variables replace them.
+    let secret_names = secrets::names(inputs, name, process)?;
+    for variable in &secret_names {
+        vars.remove(variable);
+    }
     // No variable of the caller's environment whose name starts with
     // `AWS_` passes, so a process that needs a service receives only the
     // AWS variables that mxv sets here.
@@ -968,6 +1004,10 @@ fn host_app(
         .filter(|name| !set.contains(**name))
         .map(|name| (*name).to_owned())
         .collect();
+    // Each secret is optional in the plan, so a build, `exec` or task,
+    // which receives no secret, starts without it, and `up` leaves out a
+    // unit whose required secret has no value before phase starts it.
+    main.optional_env.extend(secret_names.iter().cloned());
     main.env = vars
         .keys()
         .cloned()
@@ -996,6 +1036,7 @@ fn host_app(
         granted
             .connect
             .extend(service_connects(inputs.manifest, process));
+        granted.secrets.extend(secret_names);
     }
     Ok(HostApp {
         plan,

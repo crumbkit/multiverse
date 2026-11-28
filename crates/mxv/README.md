@@ -893,6 +893,94 @@ part of the plan it started from, and prints an `info:` line that says so.
 A failed `up` leaves every process that it restarted running and prints a
 `warning:` line for each.
 
+#### Secret variables
+
+A host process also receives each variable of its starmap file whose
+`source` is `secret` or `generated`. mxv reads the values when `up` or
+`restart` starts the process, after the builds pass, and gives them only to
+that process:
+
+- A secret whose bind names a 1Password reference, such as
+  `bind = { one-password = "op://acme-staging/auth-client-dispatcher/credential" }`,
+  is read through the starmap agent when it runs and the `OP_ACCOUNT`
+  variable names an account, and with the `op` program on mxv's `PATH`
+  otherwise. mxv never starts the agent. `op` receives mxv's own
+  environment, so `OP_ACCOUNT`, `OP_SERVICE_ACCOUNT_TOKEN` and a session
+  that `op signin` printed reach it; no process receives them.
+- A secret without a bind is read from the login Keychain, where a person
+  saves it once for each workspace. The item is a generic password whose
+  service is `starmap.mxv-<workspace id>` and whose account is
+  `<unit>/<NAME>`. When the Keychain lacks it, `up` fails the unit with
+  `mxv::secret::unavailable`, whose fields `keychain_service` and
+  `keychain_account` name the item and whose recovery names the command
+  that saves it:
+
+  ```sh
+  security add-generic-password -U -s starmap.mxv-<workspace id> -a <unit>/<NAME> -w
+  ```
+
+  `security` asks for the value because `-w` comes last, so the value never
+  appears on a command line. The Keychain asks once whether mxv may read an
+  item that `security` saved; allow it. A unit whose name is not already
+  lower case letters, digits and hyphens, such as `web_api`, has an account
+  of its name in those characters with a short hash of the name after it,
+  so two units whose names differ only in such characters keep separate
+  values; the recovery names the exact account.
+- A generated variable is created in the login Keychain on first use and
+  read from there afterwards.
+
+The Keychain keeps each workspace's values under the service
+`starmap.mxv-<workspace id>`, where the id is the workspace's stable id, so
+two workspaces of one repository hold separate values. `mxv remove` deletes
+the items before it deletes the record, and a Keychain that refuses fails
+the removal with `mxv::keychain::refused` and keeps the workspace, so the
+removal can run again. `mxv archive` keeps the items, so `mxv restore`
+finds them, and `mxv remove --archived` deletes them before it deletes the
+archive, in the same way. A repeat `mxv up` reads no secret of a unit that
+already runs from the current plan, because phase leaves that unit as it
+is. The Keychain exists only on macOS; elsewhere a secret without a
+bind and a generated variable are unavailable.
+
+mxv reads a 1Password reference for a unit only after a person granted it.
+At a terminal, `up` and `restart` ask after the permission question, naming
+each unit, variable, store, reference and the starmap file that names it,
+and end with `Grant them? [y/N]`. A yes records the grant for the
+repository, the unit and the reference in
+`$XDG_STATE_HOME/mxv/phase/grants/<repository>-<hash>.secrets.json`, beside
+the permission grant. The file holds the references and the time of each
+yes, and never a value. The grant covers every workspace of the repository,
+and a changed reference asks again. Generated and Keychain values need no
+grant, because mxv reads no reference for them.
+
+Each unit's secrets have 20 seconds to be read, which includes the time a
+person takes to answer 1Password's own unlock prompt. A secret that no
+person granted, that the store cannot give, or that passes the 20 seconds
+affects only its unit:
+
+- A variable whose `unset` is `optional` stays unset, and the unit starts
+  with a `warning:` line that names the variable and why.
+- Any other variable keeps the unit from starting. The unit is a failure of
+  the document, `mxv::secret::not_granted` or `mxv::secret::unavailable`,
+  whose fields name the unit, the variable, the store, the reference, the
+  file and the `sign_in` of the manifest's `[secrets.*]` table whose name
+  is the variable's, in any case, or whose `check` names the reference.
+  The recovery of `not_granted` is `mxv up` at a terminal, and the
+  recovery of `unavailable` is that `sign_in` and then `mxv up`.
+- A unit that depends on such a unit does not start either. Its row says
+  which unit it needed, in a `warning:` note.
+
+Every other unit starts, and the command exits with 1. Without a terminal,
+or with `--no-input`, mxv asks nothing, so a unit with an ungranted
+reference fails as `not_granted`.
+
+The values never enter phase's plan, the run record, the logs or the
+document that `up` prints. The plan names each secret variable as
+optional, and a sandboxed process's `permissions.secrets` names each one,
+so phase delivers it as it delivers other secrets. A changed value alone
+does not restart a running process; `mxv restart` starts it with the value
+that it reads then. Builds, tasks, `mxv run` and `mxv exec` receive no
+secret variable.
+
 #### Containers
 
 phase runs each container as a Docker Compose project of its own, so it

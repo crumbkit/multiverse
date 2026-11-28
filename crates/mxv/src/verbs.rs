@@ -934,6 +934,7 @@ pub(crate) fn remove(
     let asked = RemoveAsked::new(args.force, names.clone());
     let outcome = Lifecycle::new(&workspaces, &archives, &runs)
         .with_in_use(crate::archive::outside_reason)
+        .with_forget(multiverse::forget_keychain)
         .remove(removal, &asked)
         .map_err(MxvFailure::from)?;
     match outcome {

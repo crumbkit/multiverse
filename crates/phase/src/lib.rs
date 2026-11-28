@@ -55,7 +55,7 @@ pub use crate::env::{
     AppliedEnvironment, DigestKey, EnvDigest, EnvironmentError, EnvironmentSource,
 };
 pub use crate::error::{NotRunnable, Operation, PhaseError, VolumeOwnerProblem};
-pub use crate::grants::{Asked, Grant, GrantScope, Grants, Growth};
+pub use crate::grants::{Asked, Grant, GrantScope, Grants, Growth, SecretGrants, SecretRead};
 pub use crate::logs::{LineSink, LogLine, LogNote, LogRequest, LogStream, MOST_TAIL_BYTES, tail};
 pub use crate::name::{
     AppName, BadName, MOST_NAME_BYTES, PortName, ProcessName, VariableName, VolumeName,

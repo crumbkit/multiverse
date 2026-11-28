@@ -188,7 +188,7 @@
           ]
         },
         "notes": {
-          "description": "What `up` and `restart` found about the unit beside its state:\na warning when the unit's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, and an info line when `up` restarted a\nrunning host process because its part of the plan changed. Every\nother command prints none.",
+          "description": "What `up` and `restart` found about the unit beside its state:\na warning when the unit's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, an info line when `up` restarted a\nrunning host process because its part of the plan changed, a\nwarning for each secret variable that could not be read and that\nthe unit started without, and a warning on a unit that did not\nstart because a unit it depends on lacks a secret. Every other\ncommand prints none.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/NoteRow"

@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "mxv/restart/v1",
-  "description": "The restarted units and their dependencies, in the order they started, each running.",
+  "description": "The restarted units and their dependencies, in the order they started, each running, then each unit that did not start because a unit it depends on lacks a secret, and a failure for each unit that lacks a secret.",
   "type": "object",
   "properties": {
     "schema": {
@@ -13,36 +13,626 @@
       "const": true
     },
     "data": {
-      "description": "The rows, in order.",
+      "description": "The rows for the ids that worked, in the order the caller gave the ids.",
       "type": "array",
       "items": {
         "$ref": "#/$defs/ProcessRow"
       }
     },
-    "cut": {
-      "description": "Present when the output budget cut the result short, so data holds only its first rows.",
-      "type": "object",
-      "properties": {
-        "code": {
-          "description": "The over-budget code.",
-          "type": "string"
+    "failures": {
+      "description": "The failures of the ids that did not work. It is empty when every id worked.",
+      "type": "array",
+      "items": {
+        "description": "A failure of some of the ids: the fields of the failure document without schema.",
+        "type": "object",
+        "properties": {
+          "sentence": {
+            "description": "A fixed sentence that a person reviewed, safe to show to anyone. It is present only when the failure has one.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The key that the caller gave for the answer that failed, when the failure is one answer of a batch.",
+            "type": "string"
+          },
+          "index": {
+            "description": "The position of key among the keys that the caller gave, counted from 0, so two failures of the same key differ. It is present only with key.",
+            "type": "integer",
+            "minimum": 0
+          },
+          "code": {
+            "description": "The failure's stable code, such as shelf::books::not_found. It is one or more printable ASCII characters without spaces, from ! to ~.",
+            "type": "string",
+            "pattern": "^[!-~]+$"
+          },
+          "message": {
+            "description": "What went wrong.",
+            "type": "string"
+          },
+          "cause": {
+            "description": "The errors that led to the failure, joined with \": \". It is present only when the failure has a cause.",
+            "type": "string"
+          },
+          "causes": {
+            "description": "The reasons the failure lists side by side, in order, one sentence each. It is present only when the failure lists at least one.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "fields": {
+            "description": "The values at fault, in the order the failure gives them, each under a name of one or more lowercase ASCII letters, digits and underscores. A value is a string, an integer, a boolean, null, or an array or object of such values, and an object holds each key once. It is present only when the failure names at least one.",
+            "type": "object",
+            "propertyNames": {
+              "pattern": "^[a-z0-9_]+$"
+            },
+            "additionalProperties": {
+              "type": [
+                "string",
+                "integer",
+                "boolean",
+                "null",
+                "array",
+                "object"
+              ],
+              "$anchor": "field_value",
+              "items": {
+                "$ref": "#field_value"
+              },
+              "additionalProperties": {
+                "$ref": "#field_value"
+              }
+            }
+          },
+          "labels": {
+            "description": "The places in a source, such as a file, that the failure points at, in the order the failure gives them. It is present only when the failure has at least one label.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "offset": {
+                  "description": "The byte offset of the start of the span from the start of the source.",
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "length": {
+                  "description": "The length of the span in bytes.",
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "name": {
+                  "description": "The name of the source, such as a file name. It is present only when the span could be read and the source has a name.",
+                  "type": "string"
+                },
+                "line": {
+                  "description": "The 1-based line that holds the start of the span. It is present only when the span could be read.",
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "column": {
+                  "description": "The 1-based column of the start of the span, counted in characters of its line. It is present only when the span could be read.",
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "excerpt": {
+                  "description": "The lines of the source that the span covers, with one line before and one after where the source has them. It is present only when the span could be read.",
+                  "type": "object",
+                  "properties": {
+                    "line": {
+                      "description": "The 1-based number of the first line of the excerpt.",
+                      "type": "integer",
+                      "minimum": 1
+                    },
+                    "text": {
+                      "description": "The lines, joined by the line breaks of the source, without a line break at the end.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "line",
+                    "text"
+                  ]
+                },
+                "text": {
+                  "description": "What the label says about the span. It is present only when the label has text.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "offset",
+                "length"
+              ]
+            }
+          },
+          "related": {
+            "description": "The diagnostics that the failure's diagnostic relates to it, in the order it gives them. It is present only when there is at least one.",
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "description": "What the related diagnostic says.",
+                  "type": "string"
+                },
+                "code": {
+                  "description": "The related diagnostic's own code, which is free text. It is present only when the diagnostic has one.",
+                  "type": "string"
+                },
+                "severity": {
+                  "description": "How severe the related diagnostic is. A diagnostic that gives no severity is an error.",
+                  "enum": [
+                    "error",
+                    "warning",
+                    "advice"
+                  ]
+                },
+                "cause": {
+                  "description": "The errors below the related diagnostic, joined with \": \". It is present only when there is one.",
+                  "type": "string"
+                },
+                "labels": {
+                  "description": "The places in a source, such as a file, that the failure points at, in the order the failure gives them. It is present only when the failure has at least one label.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "offset": {
+                        "description": "The byte offset of the start of the span from the start of the source.",
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "length": {
+                        "description": "The length of the span in bytes.",
+                        "type": "integer",
+                        "minimum": 0
+                      },
+                      "name": {
+                        "description": "The name of the source, such as a file name. It is present only when the span could be read and the source has a name.",
+                        "type": "string"
+                      },
+                      "line": {
+                        "description": "The 1-based line that holds the start of the span. It is present only when the span could be read.",
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "column": {
+                        "description": "The 1-based column of the start of the span, counted in characters of its line. It is present only when the span could be read.",
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "excerpt": {
+                        "description": "The lines of the source that the span covers, with one line before and one after where the source has them. It is present only when the span could be read.",
+                        "type": "object",
+                        "properties": {
+                          "line": {
+                            "description": "The 1-based number of the first line of the excerpt.",
+                            "type": "integer",
+                            "minimum": 1
+                          },
+                          "text": {
+                            "description": "The lines, joined by the line breaks of the source, without a line break at the end.",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "line",
+                          "text"
+                        ]
+                      },
+                      "text": {
+                        "description": "What the label says about the span. It is present only when the label has text.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "offset",
+                      "length"
+                    ]
+                  }
+                },
+                "help": {
+                  "description": "The related diagnostic's advice. It is present only when it gives some.",
+                  "type": "string"
+                },
+                "url": {
+                  "description": "A page that explains the related diagnostic. It is present only when it has one.",
+                  "type": "string"
+                },
+                "related": {
+                  "description": "The diagnostics related to this one, in the same shape, to at most eight levels below the failure.",
+                  "type": "array",
+                  "items": {
+                    "$ref": "#related"
+                  }
+                }
+              },
+              "$anchor": "related",
+              "required": [
+                "message",
+                "severity"
+              ]
+            }
+          },
+          "recovery": {
+            "description": "What the caller can do next, tagged by kind.",
+            "oneOf": [
+              {
+                "description": "Run this command. With `all`, run it once with every value of the failure's field that `all` names in place of the argument's placeholder, such as `<ID>...`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "run"
+                  },
+                  "call": {
+                    "type": "string"
+                  },
+                  "all": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "call"
+                ]
+              },
+              {
+                "description": "A person must run this command in a terminal, so a program should hand the step to a person.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "terminal"
+                  },
+                  "call": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "call"
+                ]
+              },
+              {
+                "description": "Run this command of another program. `run` is the quoted command line that the text output prints.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "program"
+                  },
+                  "program": {
+                    "type": "string"
+                  },
+                  "args": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  "run": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "program",
+                  "args",
+                  "run"
+                ]
+              },
+              {
+                "description": "Run the same command again later.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "retry"
+                  }
+                },
+                "required": [
+                  "kind"
+                ]
+              },
+              {
+                "description": "Make this repair, then take the step `then`.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "after"
+                  },
+                  "repair": {
+                    "type": "string"
+                  },
+                  "then": {
+                    "description": "The step that follows the repair.",
+                    "oneOf": [
+                      {
+                        "description": "Run this command. With `all`, run it once with every value of the failure's field that `all` names in place of the argument's placeholder, such as `<ID>...`.",
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "run"
+                          },
+                          "call": {
+                            "type": "string"
+                          },
+                          "all": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "call"
+                        ]
+                      },
+                      {
+                        "description": "A person must run this command in a terminal, so a program should hand the step to a person.",
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "terminal"
+                          },
+                          "call": {
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "kind",
+                          "call"
+                        ]
+                      },
+                      {
+                        "description": "Run the same command again later.",
+                        "type": "object",
+                        "properties": {
+                          "kind": {
+                            "const": "retry"
+                          }
+                        },
+                        "required": [
+                          "kind"
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "kind",
+                  "repair",
+                  "then"
+                ]
+              },
+              {
+                "description": "Follow this advice.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "hint"
+                  },
+                  "text": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "text"
+                ]
+              },
+              {
+                "description": "There is no next step, for this reason.",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "none"
+                  },
+                  "reason": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "reason"
+                ]
+              }
+            ]
+          },
+          "alternatives": {
+            "description": "Other repairs the caller can try, in order of preference, each in the shape of recovery. It is present only when the failure offers at least one.",
+            "type": "array",
+            "items": {
+              "description": "A repair the caller can try instead, tagged by kind.",
+              "oneOf": [
+                {
+                  "description": "Run this command. With `all`, run it once with every value of the failure's field that `all` names in place of the argument's placeholder, such as `<ID>...`.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "run"
+                    },
+                    "call": {
+                      "type": "string"
+                    },
+                    "all": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "call"
+                  ]
+                },
+                {
+                  "description": "A person must run this command in a terminal, so a program should hand the step to a person.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "terminal"
+                    },
+                    "call": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "call"
+                  ]
+                },
+                {
+                  "description": "Run this command of another program. `run` is the quoted command line that the text output prints.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "program"
+                    },
+                    "program": {
+                      "type": "string"
+                    },
+                    "args": {
+                      "type": "array",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "run": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "program",
+                    "args",
+                    "run"
+                  ]
+                },
+                {
+                  "description": "Run the same command again later.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "retry"
+                    }
+                  },
+                  "required": [
+                    "kind"
+                  ]
+                },
+                {
+                  "description": "Make this repair, then take the step `then`.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "after"
+                    },
+                    "repair": {
+                      "type": "string"
+                    },
+                    "then": {
+                      "description": "The step that follows the repair.",
+                      "oneOf": [
+                        {
+                          "description": "Run this command. With `all`, run it once with every value of the failure's field that `all` names in place of the argument's placeholder, such as `<ID>...`.",
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "run"
+                            },
+                            "call": {
+                              "type": "string"
+                            },
+                            "all": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "call"
+                          ]
+                        },
+                        {
+                          "description": "A person must run this command in a terminal, so a program should hand the step to a person.",
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "terminal"
+                            },
+                            "call": {
+                              "type": "string"
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "call"
+                          ]
+                        },
+                        {
+                          "description": "Run the same command again later.",
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "const": "retry"
+                            }
+                          },
+                          "required": [
+                            "kind"
+                          ]
+                        }
+                      ]
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "repair",
+                    "then"
+                  ]
+                },
+                {
+                  "description": "Follow this advice.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "hint"
+                    },
+                    "text": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "text"
+                  ]
+                },
+                {
+                  "description": "There is no next step, for this reason.",
+                  "type": "object",
+                  "properties": {
+                    "kind": {
+                      "const": "none"
+                    },
+                    "reason": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "reason"
+                  ]
+                }
+              ]
+            }
+          },
+          "url": {
+            "description": "A page that explains the failure. It is present only when the failure has one.",
+            "type": "string"
+          }
         },
-        "budget": {
-          "description": "The most bytes that the run printed on standard output.",
-          "type": "integer",
-          "minimum": 0
-        }
-      },
-      "required": [
-        "code",
-        "budget"
-      ],
-      "additionalProperties": false
+        "required": [
+          "code",
+          "message",
+          "recovery"
+        ]
+      }
     }
   },
   "required": [
     "schema",
-    "data"
+    "data",
+    "failures"
   ],
   "$defs": {
     "ProcessRow": {
@@ -122,7 +712,7 @@
           ]
         },
         "notes": {
-          "description": "What `up` and `restart` found about the unit beside its state:\na warning when the unit's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, and an info line when `up` restarted a\nrunning host process because its part of the plan changed. Every\nother command prints none.",
+          "description": "What `up` and `restart` found about the unit beside its state:\na warning when the unit's running container still has its\nearlier secret files, because `up` could not rewrite them, an info\nline when `up` rewrote them, an info line when `up` restarted a\nrunning host process because its part of the plan changed, a\nwarning for each secret variable that could not be read and that\nthe unit started without, and a warning on a unit that did not\nstart because a unit it depends on lacks a secret. Every other\ncommand prints none.",
           "type": "array",
           "items": {
             "$ref": "#/$defs/NoteRow"

@@ -593,6 +593,7 @@ fn record_path(error: &Error) -> Option<&Path> {
         | Error::UnsupportedOs { .. }
         | Error::Busy { .. }
         | Error::GrantsBusy { .. }
+        | Error::KeychainRefused { .. }
         | Error::DatedNamesTaken { .. }
         | Error::StoppedRestoreHoldsOtherFiles { .. }
         | Error::MirrorBusy { .. }

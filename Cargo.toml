@@ -18,11 +18,12 @@ repository = "https://github.com/crumbkit/multiverse"
 # no feature.
 starmap = { version = "0.4.3", default-features = false }
 
-# starmap-resolve resolves the provided variables of a process's
-# `starmap.toml`: multiverse implements its `Provider` trait for the kinds
-# `multiverse/port` and `multiverse/url` and resolves with `resolve`. Its
-# features add 1Password, Keychain and agent resolvers, which multiverse does
-# not use, so the workspace entry turns off its default features.
+# starmap-resolve resolves the variables of a process's `starmap.toml`:
+# multiverse implements its `Provider` trait for the kinds `multiverse/port`
+# and `multiverse/url`, and resolves a process's secret and generated
+# variables with its 1Password, Keychain and agent resolvers. The workspace
+# entry turns off its default features, and multiverse turns on the three
+# resolvers it uses.
 starmap-resolve = { version = "0.4.3", default-features = false }
 
 # clap parses the `mxv` command line. The workspace entry enables only

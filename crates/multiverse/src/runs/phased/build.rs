@@ -40,9 +40,10 @@
 //!   reported as unable to start. A status that only the launcher can give
 //!   would replace this.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, PipeReader, Read as _, Write};
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -50,18 +51,23 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use phase::keeper::SANDBOX_REFUSED;
-use phase::{Cancel, ExecIo, ExecRequest, PhaseError, VariableName, WorkspaceId};
+use phase::{
+    AppName, Cancel, ExecIo, ExecRequest, GrantScope, PhaseError, SecretRead, VariableName,
+    WorkspaceId,
+};
 
 use super::exec::EXEC_WAIT;
-use super::{app, main_process};
+use super::{app, grant_scope, main_process};
 use crate::clock;
 use crate::error::Error;
 use crate::manifest::{Command, Manifest};
 use crate::name::WorkspaceName;
+use crate::phase_plan::secrets::{
+    AskedSecret, Resolved, SECRET_WAIT, SecretFailure, SecretValues, UnitSecrets,
+};
 use crate::phase_plan::{self, Built, Unrunnable};
 use crate::record::Workspace;
-use crate::runs::Runs;
-use crate::runs::WorkspaceLock;
+use crate::runs::{ProcessNote, Runs, WorkspaceLock};
 use crate::store::Store;
 
 #[cfg(test)]
@@ -129,6 +135,10 @@ pub struct BuildsPassed<'lock> {
     /// The workspace's lock, which the proof borrows so that the proof
     /// cannot outlive it and so that `up` can check its name.
     pub(super) lock: &'lock WorkspaceLock,
+    /// The units that the check under the lock left out, because a
+    /// required secret of each has no grant. Neither they nor the units
+    /// that depend on them were built, and `up` starts none of them.
+    pub(super) withheld: Vec<SecretFailure>,
 }
 
 /// How [`Runs::build`] ended.
@@ -470,8 +480,17 @@ impl Runs {
             Ok(Some(ask)) => return Ok(BuildEnd::NotGranted(ask)),
             Err(unrunnable) => return Ok(BuildEnd::Unrunnable(unrunnable)),
         }
+        // The secret grants are checked again under the lock, so a unit
+        // whose required secret no person granted is neither built nor
+        // started, and neither is a unit that depends on it.
+        let withheld = self.secrets_withheld(workspace, &id, manifest, &order);
+        let blocked = blocked(manifest, &order, &withheld);
         let steps: Vec<Step<'_>> = order
             .iter()
+            .filter(|name| {
+                !blocked.contains_key(*name)
+                    && !withheld.iter().any(|failure| &failure.unit == *name)
+            })
             .filter_map(|name| {
                 let command = manifest.processes.get(name)?.build.as_ref()?;
                 Some(Step {
@@ -481,7 +500,7 @@ impl Runs {
             })
             .collect();
         let Some(first) = steps.first() else {
-            return Ok(BuildEnd::Passed(BuildsPassed { lock }));
+            return Ok(BuildEnd::Passed(BuildsPassed { lock, withheld }));
         };
         let (id, built) = self.prepared(store, workspace, manifest)?;
         let built = match built {
@@ -540,6 +559,303 @@ impl Runs {
                 why,
             });
         }
-        Ok(BuildEnd::Passed(BuildsPassed { lock }))
+        Ok(BuildEnd::Passed(BuildsPassed { lock, withheld }))
     }
+}
+
+/// The secrets that the host units of a repository read and that no
+/// person has granted, which [`Runs::secret_granting`] returns. Only
+/// [`Runs::grant_secrets`] adds them to the repository's secret grant.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretAsk {
+    /// The repositories whose grant the units share.
+    scope: GrantScope,
+    /// The repository's name as a person knows it, such as its folder.
+    repository: String,
+    /// The reads that a yes grants, by app.
+    reads: BTreeMap<AppName, Vec<SecretRead>>,
+    /// Each secret, for the question, in the units' start order.
+    secrets: Vec<AskedSecret>,
+}
+
+impl SecretAsk {
+    /// Returns the repository's name, such as its folder name.
+    #[must_use]
+    pub fn repository(&self) -> &str {
+        &self.repository
+    }
+
+    /// Returns the source directories of the repositories, sorted.
+    #[must_use]
+    pub fn paths(&self) -> &[PathBuf] {
+        self.scope.paths()
+    }
+
+    /// Returns each secret that the question names: the unit, the
+    /// variable, the store, the reference and the file that names it.
+    #[must_use]
+    pub fn secrets(&self) -> &[AskedSecret] {
+        &self.secrets
+    }
+}
+
+/// Returns each unit of `order` that does not start because a unit it
+/// depends on, directly or through others, is one of `withheld`, with the
+/// withheld unit it needs. A unit of `withheld` is never in the result. `order` is a start order, so a unit comes after
+/// the units it depends on.
+pub(super) fn blocked(
+    manifest: &Manifest,
+    order: &[String],
+    withheld: &[SecretFailure],
+) -> BTreeMap<String, String> {
+    let mut blocked: BTreeMap<String, String> = BTreeMap::new();
+    for name in order {
+        // A unit that lacks a secret of its own fails as itself.
+        if withheld.iter().any(|failure| &failure.unit == name) {
+            continue;
+        }
+        let Some(unit) = manifest.unit(name) else {
+            continue;
+        };
+        let needs = unit.depends_on().iter().find_map(|dependency| {
+            if withheld.iter().any(|failure| &failure.unit == dependency) {
+                Some(dependency.clone())
+            } else {
+                blocked.get(dependency).cloned()
+            }
+        });
+        if let Some(needs) = needs {
+            blocked.insert(name.clone(), needs);
+        }
+    }
+    blocked
+}
+
+impl Runs {
+    /// Returns the secret and generated variables of each host unit of
+    /// `order` in `workspace`'s `manifest`. A unit whose starmap file
+    /// cannot be read is left out, because the plan reports it.
+    fn unit_secrets(
+        &self,
+        workspace: &Workspace,
+        id: &WorkspaceId,
+        manifest: &Manifest,
+        order: &[String],
+    ) -> Vec<UnitSecrets> {
+        let inputs = self.inputs(workspace, id, manifest);
+        order
+            .iter()
+            .filter_map(|name| {
+                let process = manifest.processes.get(name)?;
+                phase_plan::secrets::of_unit(&inputs, name, process)
+                    .ok()
+                    .flatten()
+            })
+            .collect()
+    }
+
+    /// Returns the secrets that the host units `names` of `workspace`'s
+    /// `manifest` select, with their dependencies, or every unit when
+    /// `names` is empty, read and no person has granted, or `None` when
+    /// the grant covers them. `id` is the workspace's stable id. It writes
+    /// nothing. A manifest whose unit names are unknown, or a secret grant
+    /// file that cannot be read, asks nothing here, so the check under the
+    /// lock reports it, and `up` fails only the units that read a
+    /// reference.
+    #[must_use]
+    pub fn secret_granting(
+        &self,
+        id: &WorkspaceId,
+        workspace: &Workspace,
+        manifest: &Manifest,
+        names: &[String],
+    ) -> Option<SecretAsk> {
+        let order = manifest.start_order(names).ok()?;
+        let units = self.unit_secrets(workspace, id, manifest, &order);
+        if units.iter().all(|unit| unit.reads().is_empty()) {
+            return None;
+        }
+        let (scope, repository) = grant_scope(workspace, id);
+        let granted = self.phase.secrets_granted(&scope).ok()?;
+        let granted = granted.unwrap_or_default();
+        let mut reads = BTreeMap::new();
+        let mut secrets = Vec::new();
+        for unit in &units {
+            let Some(app) = app(unit.unit()) else {
+                continue;
+            };
+            let requested = BTreeMap::from([(app.clone(), unit.reads())]);
+            if let Some(missing) = granted.missing(&requested).remove(&app) {
+                secrets.extend(unit.asked(&missing));
+                reads.insert(app, missing);
+            }
+        }
+        (!reads.is_empty()).then_some(SecretAsk {
+            scope,
+            repository,
+            reads,
+            secrets,
+        })
+    }
+
+    /// Adds what `ask` names to the secret grant of its repository, which
+    /// mxv calls only after a person at a terminal answered yes. It covers
+    /// every workspace of the repository, for the unit and the reference
+    /// that each entry names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::GrantsBusy`] when another grant holds the secret
+    /// grant file's lock, [`Error::Unwritable`] when it cannot be written,
+    /// and [`Error::Phase`] when it cannot be read.
+    pub fn grant_secrets(&self, ask: &SecretAsk) -> Result<(), Error> {
+        self.phase
+            .grant_secrets(&ask.scope, &ask.reads, clock::wall_now())
+            .map(drop)
+            .map_err(|error| Error::of_phase(error, PathBuf::new()))
+    }
+
+    /// Returns the failure of each host unit of `order` whose required
+    /// secret no person granted, or every unit that reads a reference when
+    /// the secret grant file cannot be read. It writes nothing.
+    pub(super) fn secrets_withheld(
+        &self,
+        workspace: &Workspace,
+        id: &WorkspaceId,
+        manifest: &Manifest,
+        order: &[String],
+    ) -> Vec<SecretFailure> {
+        let units = self.unit_secrets(workspace, id, manifest, order);
+        if units.iter().all(|unit| unit.reads().is_empty()) {
+            return Vec::new();
+        }
+        let (scope, _) = grant_scope(workspace, id);
+        let granted = match self.phase.secrets_granted(&scope) {
+            Ok(granted) => granted.unwrap_or_default(),
+            Err(error) => {
+                let reason = format!("the secret grant file cannot be read: {error}");
+                return units
+                    .iter()
+                    .filter_map(|unit| unit.unreadable(&reason, manifest))
+                    .collect();
+            }
+        };
+        units
+            .iter()
+            .filter_map(|unit| {
+                let app = app(unit.unit())?;
+                let requested = BTreeMap::from([(app.clone(), unit.reads())]);
+                let missing = granted.missing(&requested).remove(&app)?;
+                unit.not_granted(&missing, manifest)
+            })
+            .collect()
+    }
+
+    /// Reads the secret and generated variables of each host unit of
+    /// `order`, the full start order, that `withheld` does not name, each
+    /// unit under its own deadline of [`SECRET_WAIT`], and returns their
+    /// values. A unit whose required secret cannot be read is added to
+    /// `withheld`, and each variable that fell back adds a warning under
+    /// its unit. A unit that depends on a withheld unit, directly or
+    /// through other units of `order`, will not start, so its secrets are
+    /// not read. A unit whose app `left_alone` names is not read either,
+    /// because phase leaves it running, and the result names it as unread.
+    pub(super) fn read_secrets(
+        &self,
+        workspace: &Workspace,
+        id: &WorkspaceId,
+        manifest: &Manifest,
+        order: &[String],
+        left_alone: &BTreeSet<AppName>,
+        withheld: &mut Vec<SecretFailure>,
+    ) -> ReadSecrets {
+        let mut values = SecretValues::default();
+        let mut notes: BTreeMap<String, Vec<ProcessNote>> = BTreeMap::new();
+        let mut unread = BTreeMap::new();
+        let units: Vec<UnitSecrets> = self
+            .unit_secrets(workspace, id, manifest, order)
+            .into_iter()
+            .filter(|unit| !withheld.iter().any(|failure| failure.unit == unit.unit()))
+            .collect();
+        if units.is_empty() {
+            return ReadSecrets::default();
+        }
+        let (scope, _) = grant_scope(workspace, id);
+        let granted = self.phase.secrets_granted(&scope);
+        let stores = self.stores.resolvers(&self.caller);
+        let resolvers: Vec<&dyn starmap_resolve::Resolver> =
+            stores.iter().map(AsRef::as_ref).collect();
+        for unit in &units {
+            let Some(app) = app(unit.unit()) else {
+                continue;
+            };
+            if left_alone.contains(&app) {
+                if let Some(variable) = unit.names().next() {
+                    unread.insert(app, variable.to_owned());
+                }
+                continue;
+            }
+            // The units are in start order, so `withheld` already names
+            // each unit that this one depends on and that lacks a secret.
+            if blocked(manifest, order, withheld).contains_key(unit.unit()) {
+                continue;
+            }
+            let reads = unit.reads();
+            let allowed: Vec<SecretRead> = match &granted {
+                Ok(granted) => {
+                    let requested = BTreeMap::from([(app.clone(), reads.clone())]);
+                    let missing = granted
+                        .as_ref()
+                        .map_or_else(|| requested.clone(), |granted| granted.missing(&requested))
+                        .remove(&app)
+                        .unwrap_or_default();
+                    reads
+                        .into_iter()
+                        .filter(|read| !missing.contains(read))
+                        .collect()
+                }
+                Err(error) => {
+                    let reason = format!("the secret grant file cannot be read: {error}");
+                    if let Some(failure) = unit.unreadable(&reason, manifest) {
+                        withheld.push(failure);
+                        continue;
+                    }
+                    Vec::new()
+                }
+            };
+            let deadline = clock::now() + SECRET_WAIT;
+            match unit.resolve(id, &resolvers, &allowed, deadline, manifest) {
+                Resolved::Ready {
+                    values: found,
+                    notes: fell_back,
+                } => {
+                    if !fell_back.is_empty() {
+                        notes
+                            .entry(unit.unit().to_owned())
+                            .or_default()
+                            .extend(fell_back);
+                    }
+                    values.insert(app, found);
+                }
+                Resolved::Failed(failure) => withheld.push(failure),
+            }
+        }
+        ReadSecrets {
+            values,
+            notes,
+            unread,
+        }
+    }
+}
+
+/// What [`Runs::read_secrets`] read for one `up`.
+#[derive(Default)]
+pub(super) struct ReadSecrets {
+    /// The values of each unit that was read.
+    pub(super) values: SecretValues,
+    /// A warning for each variable that fell back, under its unit.
+    pub(super) notes: BTreeMap<String, Vec<ProcessNote>>,
+    /// The apps whose secrets were not read because phase leaves them
+    /// running, each with one secret variable it declares.
+    pub(super) unread: BTreeMap<AppName, String>,
 }

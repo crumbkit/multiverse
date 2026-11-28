@@ -472,7 +472,7 @@ fn file_of(inputs: &Inputs<'_>, process: &Process) -> (PathBuf, bool) {
 ///
 /// Returns [`Unrunnable`] of [`UnrunnableKind::StarmapInvalid`] when the
 /// file cannot be read or does not parse.
-fn spec_of(
+pub(super) fn spec_of(
     inputs: &Inputs<'_>,
     name: &str,
     process: &Process,

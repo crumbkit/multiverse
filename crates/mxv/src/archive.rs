@@ -1921,7 +1921,10 @@ pub(crate) fn remove(
         .into());
     }
     let runs = environment.runs()?;
-    let lifecycle = Lifecycle::new(&workspaces, &records, &runs);
+    // The archive's record holds the last copy of the workspace's stable
+    // id, so its deletion deletes the workspace's Keychain items too.
+    let lifecycle =
+        Lifecycle::new(&workspaces, &records, &runs).with_forget(multiverse::forget_keychain);
     // A stopped restore whose directory holds the person's files refuses
     // before the question and in a dry run, as the removal itself would.
     lifecycle

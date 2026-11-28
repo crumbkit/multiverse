@@ -208,6 +208,79 @@ fn remove_fails_busy_while_another_command_holds_the_lock_and_deletes_nothing() 
     drop(held);
 }
 
+thread_local! {
+    /// What the record held when the test's forget ran: the id it was
+    /// given, and whether the workspace's record still existed.
+    static FORGOTTEN: RefCell<Vec<(phase::WorkspaceId, bool)>> = const { RefCell::new(Vec::new()) };
+    /// The store that the test's forget reads the record from.
+    static FORGET_STORE: RefCell<Option<Store>> = const { RefCell::new(None) };
+}
+
+/// Notes the id it is given and whether the record still exists.
+fn note_forget(id: &phase::WorkspaceId) -> Result<usize, Error> {
+    let exists = FORGET_STORE.with(|store| {
+        store
+            .borrow()
+            .as_ref()
+            .is_some_and(|store| store.read(&name()).unwrap().is_some())
+    });
+    FORGOTTEN.with(|seen| seen.borrow_mut().push((id.clone(), exists)));
+    Ok(1)
+}
+
+/// Refuses as a locked Keychain would.
+fn refuse_forget(_: &phase::WorkspaceId) -> Result<usize, Error> {
+    Err(Error::KeychainRefused {
+        service: "starmap.mxv-test".to_owned(),
+        reason: "the keychain is locked".to_owned(),
+    })
+}
+
+#[test]
+fn remove_deletes_the_workspaces_secrets_by_its_stable_id_before_its_record() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let id = workspace
+        .id
+        .clone()
+        .expect("a new workspace has a stable id");
+    FORGET_STORE.with(|store| *store.borrow_mut() = Some(Store::new(setup.base.join("state"))));
+    FORGOTTEN.with(|seen| seen.borrow_mut().clear());
+
+    let outcome = setup
+        .lifecycle()
+        .with_forget(note_forget)
+        .remove(setup.removal(), &RemoveAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, Removed::Done(_)), "{outcome:?}");
+    assert_eq!(FORGOTTEN.with(|seen| seen.borrow().clone()), [(id, true)]);
+    assert!(!setup.record_exists());
+}
+
+#[test]
+fn a_keychain_that_refuses_keeps_the_record_and_the_checkouts_so_remove_can_run_again() {
+    let setup = fresh();
+    let workspace = setup.create();
+
+    let outcome = setup
+        .lifecycle()
+        .with_forget(refuse_forget)
+        .remove(setup.removal(), &RemoveAsked::default());
+
+    assert!(
+        matches!(outcome, Err(Error::KeychainRefused { .. })),
+        "{outcome:?}"
+    );
+    assert!(setup.record_exists());
+    assert!(workspace.checkouts[0].path.is_dir());
+    let again = setup
+        .lifecycle()
+        .remove(setup.removal(), &RemoveAsked::default())
+        .unwrap();
+    assert!(matches!(again, Removed::Done(_)), "{again:?}");
+}
+
 #[test]
 fn remove_holds_the_lock_at_every_step() {
     let setup = fresh();
@@ -506,6 +579,120 @@ fn deleting_an_archive_whose_state_is_not_archived_changes_nothing() {
 
     assert!(matches!(outcome, ArchiveDeleted::Changed), "{outcome:?}");
     assert_eq!(setup.archive_record().as_ref(), Some(&retired));
+    assert!(!setup.pins_of(&archive).is_empty());
+}
+
+thread_local! {
+    /// The ids that the test's archive forget was given, each with whether
+    /// the archive's record still existed when it ran.
+    static ARCHIVE_FORGOTTEN: RefCell<Vec<(phase::WorkspaceId, bool)>> = const { RefCell::new(Vec::new()) };
+    /// The archives that the test's archive forget reads the record from.
+    static FORGET_ARCHIVES: RefCell<Option<Archives>> = const { RefCell::new(None) };
+}
+
+/// Notes the id it is given and whether the archive's record still exists.
+fn note_archive_forget(id: &phase::WorkspaceId) -> Result<usize, Error> {
+    let exists = FORGET_ARCHIVES.with(|archives| {
+        archives
+            .borrow()
+            .as_ref()
+            .is_some_and(|archives| archives.read(&name()).unwrap().is_some())
+    });
+    ARCHIVE_FORGOTTEN.with(|seen| seen.borrow_mut().push((id.clone(), exists)));
+    Ok(1)
+}
+
+impl Setup {
+    /// Makes the test's archive forget read this setup's archives.
+    fn watch_archive_forget(&self) {
+        FORGET_ARCHIVES.with(|archives| {
+            *archives.borrow_mut() = Some(Archives::new(
+                self.base.join("archives"),
+                self.base.join("data/archives"),
+            ));
+        });
+        ARCHIVE_FORGOTTEN.with(|seen| seen.borrow_mut().clear());
+    }
+}
+
+#[test]
+fn deleting_an_archive_deletes_the_workspaces_secrets_by_its_stable_id_before_its_record() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let id = workspace
+        .id
+        .clone()
+        .expect("a new workspace has a stable id");
+    let archive = setup.archive();
+    setup.watch_archive_forget();
+
+    let outcome = setup
+        .lifecycle()
+        .with_forget(note_archive_forget)
+        .delete_archive(&archive, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
+    assert_eq!(
+        ARCHIVE_FORGOTTEN.with(|seen| seen.borrow().clone()),
+        [(id, true)]
+    );
+    assert_eq!(setup.archive_record(), None);
+}
+
+#[test]
+fn deleting_the_archive_that_a_finished_restore_left_keeps_the_restored_workspaces_secrets() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    // A restore that stops after it writes the workspace's record leaves
+    // the archive's record, which `mxv restore` then deletes as stale.
+    let planned = setup
+        .workspaces
+        .plan_restore(&setup.archives, &name(), RestoreOptions::default())
+        .unwrap();
+    let RestorePlanned::Ready(plan) = planned else {
+        panic!("{planned:?}");
+    };
+    stop_at("record");
+    let stopped = setup
+        .workspaces
+        .restore(&setup.archives, *plan, &setup.runs);
+    assert!(stopped.is_err(), "{stopped:?}");
+    HOOK.with(|hook| *hook.borrow_mut() = None);
+    assert!(setup.workspaces.store.read(&name()).unwrap().is_some());
+    let stale = setup.archive_record().expect("the stale archive stays");
+    assert_eq!(stale.id, archive.id);
+    setup.watch_archive_forget();
+    let lock = setup.runs.lock(&name()).unwrap();
+
+    let outcome = setup
+        .lifecycle()
+        .with_forget(note_archive_forget)
+        .delete_archive_held(&lock, &stale, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
+    assert_eq!(ARCHIVE_FORGOTTEN.with(|seen| seen.borrow().clone()), []);
+    drop(lock);
+}
+
+#[test]
+fn a_keychain_that_refuses_keeps_the_archive_so_its_deletion_can_run_again() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+
+    let outcome = setup
+        .lifecycle()
+        .with_forget(refuse_forget)
+        .delete_archive(&archive, &VolumesAsked::default());
+
+    assert!(
+        matches!(outcome, Err(Error::KeychainRefused { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
     assert!(!setup.pins_of(&archive).is_empty());
 }
 

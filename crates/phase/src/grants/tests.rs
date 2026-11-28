@@ -2,7 +2,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use super::{Asked, Grant, GrantScope, Grants, Growth, grant, path, read};
+use super::{
+    Asked, Grant, GrantScope, Grants, Growth, SecretGrants, SecretRead, grant, grant_secrets, path,
+    read, read_secrets, secrets_path,
+};
 use crate::error::PhaseError;
 use crate::name::AppName;
 use crate::plan::Permissions;
@@ -265,4 +268,203 @@ fn the_lines_name_each_unit_in_plain_words_and_hold_no_hash() {
             "    run outside the sandbox, with everything your account can reach",
         ]
     );
+}
+
+fn secret(variable: &str, reference: &str) -> SecretRead {
+    SecretRead::new(variable, "1password", reference)
+}
+
+fn reads(entries: &[(&str, SecretRead)]) -> BTreeMap<AppName, Vec<SecretRead>> {
+    let mut reads: BTreeMap<AppName, Vec<SecretRead>> = BTreeMap::new();
+    for (name, read) in entries {
+        reads.entry(app(name)).or_default().push(read.clone());
+    }
+    reads
+}
+
+/// 2026-11-27T21:00:00Z, as seconds since the Unix epoch.
+const GRANTED_AT: Duration = Duration::from_secs(1_795_813_200);
+
+#[test]
+fn a_scope_without_a_secret_grant_file_covers_no_secret() {
+    let state = tempfile::tempdir().unwrap();
+
+    let grants = read_secrets(state.path(), &scope()).unwrap();
+
+    assert_eq!(grants, None);
+    let missing = SecretGrants::default().missing(&reads(&[(
+        "dispatcher",
+        secret("CLIENT_SECRET", "op://acme-staging/auth/credential"),
+    )]));
+    assert_eq!(missing.len(), 1);
+}
+
+#[test]
+fn a_secret_grant_is_written_beside_the_permission_grant_and_holds_no_value() {
+    let state = tempfile::tempdir().unwrap();
+    let asked = reads(&[(
+        "dispatcher",
+        secret("CLIENT_SECRET", "op://acme-staging/auth/credential"),
+    )]);
+
+    grant_secrets(
+        state.path(),
+        &scope(),
+        &asked,
+        std::time::UNIX_EPOCH + GRANTED_AT,
+        WAIT,
+    )
+    .unwrap();
+
+    let file = secrets_path(state.path(), &scope());
+    assert_eq!(
+        file.parent(),
+        path(state.path(), &scope()).parent(),
+        "the secret grant sits beside the permission grant"
+    );
+    assert!(
+        file.file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".secrets.json")
+    );
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test reads the grant file that the code under test wrote"
+    )]
+    let text = std::fs::read_to_string(&file).unwrap();
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(json["schema"], "phase/secret-grants/v1");
+    assert_eq!(
+        json["apps"]["dispatcher"][0],
+        serde_json::json!({
+            "variable": "CLIENT_SECRET",
+            "store": "1password",
+            "reference": "op://acme-staging/auth/credential",
+            "granted_at": "2026-11-27T21:00:00Z",
+        })
+    );
+    let grants = read_secrets(state.path(), &scope()).unwrap().unwrap();
+    assert!(grants.missing(&asked).is_empty());
+}
+
+#[test]
+fn a_changed_reference_asks_again_and_the_old_reference_stays_granted() {
+    let state = tempfile::tempdir().unwrap();
+    let old = secret("CLIENT_SECRET", "op://acme-staging/auth/credential");
+    let new = secret("CLIENT_SECRET", "op://acme-staging/auth-v2/credential");
+    grant_secrets(
+        state.path(),
+        &scope(),
+        &reads(&[("dispatcher", old.clone())]),
+        std::time::UNIX_EPOCH + GRANTED_AT,
+        WAIT,
+    )
+    .unwrap();
+    let grants = read_secrets(state.path(), &scope()).unwrap().unwrap();
+
+    let missing = grants.missing(&reads(&[("dispatcher", new.clone())]));
+    assert_eq!(missing, reads(&[("dispatcher", new.clone())]));
+    grant_secrets(
+        state.path(),
+        &scope(),
+        &missing,
+        std::time::UNIX_EPOCH + GRANTED_AT,
+        WAIT,
+    )
+    .unwrap();
+
+    let grants = read_secrets(state.path(), &scope()).unwrap().unwrap();
+    assert!(grants.missing(&reads(&[("dispatcher", old)])).is_empty());
+    assert!(grants.missing(&reads(&[("dispatcher", new)])).is_empty());
+}
+
+#[test]
+fn a_secret_grant_covers_only_the_unit_it_names() {
+    let state = tempfile::tempdir().unwrap();
+    let read = secret("CLIENT_SECRET", "op://acme-staging/auth/credential");
+    grant_secrets(
+        state.path(),
+        &scope(),
+        &reads(&[("dispatcher", read.clone())]),
+        std::time::UNIX_EPOCH + GRANTED_AT,
+        WAIT,
+    )
+    .unwrap();
+
+    let grants = read_secrets(state.path(), &scope()).unwrap().unwrap();
+
+    assert_eq!(
+        grants.missing(&reads(&[("worker", read.clone())])),
+        reads(&[("worker", read)])
+    );
+}
+
+#[test]
+fn two_concurrent_secret_grants_keep_both_additions() {
+    let state = tempfile::tempdir().unwrap();
+    let dir = state.path().to_path_buf();
+    let threads: Vec<_> = ["api", "web"]
+        .into_iter()
+        .map(|name| {
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let asked = reads(&[(name, secret("TOKEN", "op://acme/token/credential"))]);
+                grant_secrets(
+                    &dir,
+                    &scope(),
+                    &asked,
+                    std::time::UNIX_EPOCH + GRANTED_AT,
+                    WAIT,
+                )
+                .unwrap();
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    let grants = read_secrets(&dir, &scope()).unwrap().unwrap();
+    let both = reads(&[
+        ("api", secret("TOKEN", "op://acme/token/credential")),
+        ("web", secret("TOKEN", "op://acme/token/credential")),
+    ]);
+    assert!(grants.missing(&both).is_empty());
+}
+
+#[test]
+fn a_newer_secret_grant_file_fails_with_its_own_code() {
+    let state = tempfile::tempdir().unwrap();
+    let file = secrets_path(state.path(), &scope());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test plants a secret grant file that a newer phase wrote"
+    )]
+    std::fs::write(
+        &file,
+        r#"{"schema":"phase/secret-grants/v2","future":true}"#,
+    )
+    .unwrap();
+
+    let error = read_secrets(state.path(), &scope()).unwrap_err();
+
+    assert_eq!(error.code(), "phase::grants::newer");
+}
+
+#[test]
+fn a_corrupt_secret_grant_file_fails_as_unreadable() {
+    let state = tempfile::tempdir().unwrap();
+    let file = secrets_path(state.path(), &scope());
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the test plants a corrupt secret grant file"
+    )]
+    std::fs::write(&file, "{ not json").unwrap();
+
+    let error = read_secrets(state.path(), &scope()).unwrap_err();
+
+    assert_eq!(error.code(), "phase::grants::unreadable");
 }

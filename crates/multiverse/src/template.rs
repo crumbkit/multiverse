@@ -168,6 +168,7 @@ pub fn find(dir: &Path, url: &str, repository: &Path, root: &Path) -> Result<Fou
                 | Error::UnsupportedOs { .. }
                 | Error::Busy { .. }
                 | Error::GrantsBusy { .. }
+                | Error::KeychainRefused { .. }
                 | Error::DatedNamesTaken { .. }
                 | Error::StoppedRestoreHoldsOtherFiles { .. }
                 | Error::MirrorBusy { .. }

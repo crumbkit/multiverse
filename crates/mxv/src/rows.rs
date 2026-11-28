@@ -1280,9 +1280,12 @@ pub(crate) struct ProcessRow {
     /// What `up` and `restart` found about the unit beside its state:
     /// a warning when the unit's running container still has its
     /// earlier secret files, because `up` could not rewrite them, an info
-    /// line when `up` rewrote them, and an info line when `up` restarted a
-    /// running host process because its part of the plan changed. Every
-    /// other command prints none.
+    /// line when `up` rewrote them, an info line when `up` restarted a
+    /// running host process because its part of the plan changed, a
+    /// warning for each secret variable that could not be read and that
+    /// the unit started without, and a warning on a unit that did not
+    /// start because a unit it depends on lacks a secret. Every other
+    /// command prints none.
     notes: Vec<NoteRow>,
 }
 

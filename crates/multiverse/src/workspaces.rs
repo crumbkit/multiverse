@@ -2424,6 +2424,7 @@ impl<B: Backend> Workspaces<B> {
             | Error::ProcessTable { .. }
             | Error::UnsupportedOs { .. }
             | Error::GrantsBusy { .. }
+            | Error::KeychainRefused { .. }
             | Error::DatedNamesTaken { .. }
             | Error::StoppedRestoreHoldsOtherFiles { .. }
             | Error::MirrorBusy { .. }

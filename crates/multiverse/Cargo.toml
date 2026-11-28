@@ -38,9 +38,15 @@ sha2 = { workspace = true }
 # and link targets.
 tar = { workspace = true }
 # starmap parses each host process's `starmap.toml`, and starmap-resolve
-# resolves its variables whose bind is `multiverse/port` or `multiverse/url`.
+# resolves its variables whose bind is `multiverse/port` or `multiverse/url`
+# and its secret and generated variables. `one-password` reads a secret's
+# 1Password reference with `op`, `agent` reads it from the person's starmap
+# agent when one runs and from `op` otherwise, and `keychain` keeps each
+# generated value, and each secret without a bind, in the macOS Keychain
+# under the workspace's stable id and deletes them when `mxv remove` deletes
+# the workspace.
 starmap = { workspace = true }
-starmap-resolve = { workspace = true }
+starmap-resolve = { workspace = true, features = ["one-password", "keychain", "agent"] }
 # phase holds the container engine that `up`, `down`, `status`, `logs` and
 # `remove` run a manifest's containers with, the run directory's paths, and
 # the rules of workspace and unit names. phase never depends on multiverse.
