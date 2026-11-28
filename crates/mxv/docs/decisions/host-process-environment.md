@@ -56,6 +56,36 @@ variable of the `mxv` command's environment, so that `DOCKER_HOST` and
 does anything else, and both the plan and the docker environment come
 from that one snapshot.
 
+### Secret and generated variables
+
+Amended 27 November 2026. A host process also receives each variable of
+its starmap file whose `source` is `secret` or `generated`, and a manifest
+`env` still holds only a literal or a port placeholder, so a secret's text
+never has to sit in a manifest.
+
+- The plan names each such variable as optional and holds no value, so
+  the plan is the same whether or not the value can be read. A sandboxed
+  process's `permissions.secrets` names each one.
+- mxv reads the values through starmap-resolve when `up` or `restart`
+  starts the process, after the builds pass, with 20 seconds for each
+  unit. A second environment source gives them to phase with the
+  manifest's values, and they never enter the plan, the run record, the
+  logs or `ManifestEnvironment`.
+- mxv keeps the variables `OP_ACCOUNT`, `OP_SERVICE_ACCOUNT_TOKEN` and
+  `OP_SESSION_*` of its own environment for `op` and the starmap agent.
+  They are not in the allowlist, so no process receives them.
+- mxv reads a 1Password reference for a unit only after a person at a
+  terminal granted that reference to that unit of the repository. The
+  grant lives beside the permission grant and holds no value.
+- A secret that cannot be read affects only its unit: an optional
+  variable stays unset with a warning, and any other one keeps the unit
+  and the units that depend on it from starting, while every other unit
+  starts.
+
+A starmap file cannot declare a default for a secret or generated
+variable, because starmap refuses one, so mxv has no default to start a
+unit with.
+
 ## Why
 
 An allowlist keeps credentials and build overrides of the user's shell out

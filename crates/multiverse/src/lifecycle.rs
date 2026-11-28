@@ -30,6 +30,19 @@ pub struct Lifecycle<'a, B> {
     runs: &'a Runs,
     /// The check for a process outside phase that works in a workspace.
     in_use: InUse,
+    /// The deletion of a workspace's generated and saved secrets.
+    forget: Forget,
+}
+
+/// Deletes the Keychain items of the workspace whose stable id it is
+/// given, such as [`crate::forget_keychain`], and returns how many it
+/// deleted.
+pub type Forget = fn(&phase::WorkspaceId) -> Result<usize, Error>;
+
+/// The deletion of a [`Lifecycle`] that its caller gave none: no secret is
+/// deleted.
+const fn keep(_id: &phase::WorkspaceId) -> Result<usize, Error> {
+    Ok(0)
 }
 
 /// Returns why a process outside phase keeps `workspace` from being
@@ -264,7 +277,8 @@ impl<'a, B> Lifecycle<'a, B> {
     /// Returns the destructive commands of `workspaces` and `archives`,
     /// whose run files, volumes and locks `runs` holds. An archive or a
     /// removal checks no process outside phase until
-    /// [`Lifecycle::with_in_use`] gives it the check.
+    /// [`Lifecycle::with_in_use`] gives it the check, and a removal deletes
+    /// no secret until [`Lifecycle::with_forget`] gives it the deletion.
     #[must_use]
     pub const fn new(
         workspaces: &'a Workspaces<B>,
@@ -276,7 +290,18 @@ impl<'a, B> Lifecycle<'a, B> {
             archives,
             runs,
             in_use: nobody,
+            forget: keep,
         }
+    }
+
+    /// Returns these commands with `forget` as the deletion of a removed
+    /// workspace's generated and saved secrets, such as
+    /// [`crate::forget_keychain`]. A removal calls it after it stops the
+    /// units and before it deletes the checkouts and the record.
+    #[must_use]
+    pub const fn with_forget(mut self, forget: Forget) -> Self {
+        self.forget = forget;
+        self
     }
 
     /// Returns these commands with `in_use` as the check for a process
@@ -292,9 +317,9 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// Removes the workspace that `confirmed` planned. It takes the lock of
     /// the workspace's name, reads the record again, and compares it with
     /// `confirmed` before it stops or deletes anything. Then it stops the
-    /// units, deletes the checkouts and the record, deletes the run files,
-    /// and deletes the docker volumes, and it holds the lock through the
-    /// last deletion.
+    /// units, deletes the workspace's generated and saved secrets, deletes
+    /// the checkouts and the record, deletes the run files, and deletes the
+    /// docker volumes, and it holds the lock through the last deletion.
     ///
     /// The record that differs from the confirmed one, running units that
     /// `asked` did not allow, a process outside phase that works in the
@@ -304,9 +329,11 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// # Errors
     ///
     /// Returns [`Error::Busy`] when another command holds the lock for the
-    /// whole lock wait, and the errors of [`Workspaces::remove`] and of the
-    /// run files and docker. The steps before a failure stay done, and the
-    /// lock is released, so the command can run again.
+    /// whole lock wait, the error of the deletion of the secrets, such as
+    /// [`Error::KeychainRefused`], which keeps the record, and the errors of
+    /// [`Workspaces::remove`] and of the run files and docker. The steps
+    /// before a failure stay done, and the lock is released, so the command
+    /// can run again.
     pub fn remove(&self, confirmed: Removal, asked: &RemoveAsked) -> Result<Removed, Error> {
         let name = &confirmed.workspace.name;
         let lock = self.runs.lock(name)?;
@@ -344,6 +371,11 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
             }
         }
         (self.workspaces.checkpoint)("stopped")?;
+        // The secrets go before the record, so a Keychain that refuses
+        // keeps the record, and the removal can run again.
+        if let Some(id) = &record.id {
+            (self.forget)(id)?;
+        }
         let removal = match self.workspaces.remove(confirmed)? {
             RemovalOutcome::Done(removal) => removal,
             RemovalOutcome::Changed(RemovalPlan::NotFound) => return Ok(Removed::Unchanged),

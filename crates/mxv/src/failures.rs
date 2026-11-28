@@ -4,7 +4,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
+use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery, Then};
 use multiverse::{Allow, BadName, Error, SshRefusal};
 
 #[cfg(test)]
@@ -166,6 +166,9 @@ pub const WORKSPACE_BUSY: Code = Code::from_spelling("mxv::workspace::busy");
 /// holds, such as one that grants the permissions of the same repository's
 /// units.
 pub const GRANTS_BUSY: Code = Code::from_spelling("mxv::grants::busy");
+/// The code of an `mxv remove` that the Keychain refused to delete the
+/// workspace's secrets for, which keeps the workspace.
+pub const KEYCHAIN_REFUSED: Code = Code::from_spelling("mxv::keychain::refused");
 /// The code of a workspace that `mxv new` did not finish, for a command
 /// that needs a finished one.
 pub const WORKSPACE_CREATING: Code = Code::from_spelling("mxv::workspace::creating");
@@ -592,6 +595,7 @@ impl From<Error> for MxvFailure {
             | Error::DockerUnavailable { .. }
             | Error::DockerFailed { .. }
             | Error::DockerForeign { .. }
+            | Error::KeychainRefused { .. }
             | Error::Phase { .. } => Self::Library(error),
             _ => Self::Library(error),
         }
@@ -654,6 +658,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     PORT_EXHAUSTED,
     WORKSPACE_BUSY,
     GRANTS_BUSY,
+    KEYCHAIN_REFUSED,
     WORKSPACE_CREATING,
     WORKSPACE_STATE_CHANGED,
     WORKSPACE_TRANSITION_REFUSED,
@@ -808,6 +813,7 @@ impl Failure for MxvFailure {
                 Error::NoFreePort { .. } => PORT_EXHAUSTED,
                 Error::Busy { .. } => WORKSPACE_BUSY,
                 Error::GrantsBusy { .. } => GRANTS_BUSY,
+                Error::KeychainRefused { .. } => KEYCHAIN_REFUSED,
                 Error::StateChanged { .. } => WORKSPACE_STATE_CHANGED,
                 Error::TransitionRefused { .. } => WORKSPACE_TRANSITION_REFUSED,
                 Error::MismatchedCheckout { .. } => WORKSPACE_MISMATCHED_CHECKOUT,
@@ -1272,12 +1278,9 @@ fn library_recovery(error: &Error) -> Recovery {
             "read {}, copy it to a file of your own outside every git repository and outside the workspaces' root, such as a template in the config directory's `mxv/templates`, and pass that file to `--manifest`",
             shown(path)
         )),
-        Error::Busy { .. } => Recovery::hint(
-            "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a unit to be ready, and run the command again",
-        ),
-        Error::GrantsBusy { .. } => Recovery::hint(
-            "another mxv command is granting permissions to this repository; run the command again when it finishes",
-        ),
+        Error::Busy { .. } | Error::GrantsBusy { .. } | Error::KeychainRefused { .. } => {
+            lock_recovery(error)
+        }
         Error::DatedNamesTaken { name, last } => Recovery::hint(format!(
             "rename or remove a workspace or archive that holds a dated name of {name}, such as {last}, then run `mxv repair {name}` again"
         )),
@@ -1339,6 +1342,39 @@ fn library_recovery(error: &Error) -> Recovery {
     }
 }
 
+/// Returns the recovery of a lock that another command holds, or of a
+/// Keychain that refused to delete a workspace's items.
+fn lock_recovery(error: &Error) -> Recovery {
+    if let Error::KeychainRefused { service, .. } = error {
+        Recovery::after(
+            format!(
+                "unlock the login keychain, or delete the items of the service {service} in Keychain Access"
+            ),
+            Then::Retry,
+        )
+    } else if let Error::GrantsBusy { .. } = error {
+        Recovery::hint(
+            "another mxv command is granting permissions to this repository; run the command again when it finishes",
+        )
+    } else {
+        Recovery::hint(
+            "wait for the other mxv command on this workspace to finish, such as an `mxv up` that waits for a unit to be ready, and run the command again",
+        )
+    }
+}
+
+/// Returns the values at fault in a failure of [`lock_recovery`]: the lock
+/// file, or the Keychain service and why it refused.
+fn lock_fields(error: &Error) -> Vec<Field<'_>> {
+    if let Error::KeychainRefused { service, reason } = error {
+        vec![Field::new("service", service), Field::new("reason", reason)]
+    } else if let Error::Busy { path } | Error::GrantsBusy { path } = error {
+        vec![Field::new("path", shown(path))]
+    } else {
+        Vec::new()
+    }
+}
+
 /// Returns the values at fault in a failure that names the origin `origin`
 /// and its mirror `mirror`.
 fn origin_fields<'a>(origin: &'a str, mirror: &std::path::Path) -> Vec<Field<'a>> {
@@ -1382,9 +1418,9 @@ fn library_fields(error: &Error) -> Vec<Field<'_>> {
         }
         Error::StateUnreadable { path, .. }
         | Error::CorruptRecord { path, .. }
-        | Error::Unwritable { path, .. }
-        | Error::Busy { path }
-        | Error::GrantsBusy { path } => vec![Field::new("path", shown(path))],
+        | Error::Unwritable { path, .. } => vec![Field::new("path", shown(path))],
+        Error::Busy { .. } | Error::GrantsBusy { .. } => lock_fields(error),
+        Error::KeychainRefused { .. } => lock_fields(error),
         Error::StateChanged { name } | Error::ArchiveUnfinished { name, .. } => {
             vec![Field::new("name", name.as_str())]
         }

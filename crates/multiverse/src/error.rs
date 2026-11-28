@@ -291,6 +291,18 @@ pub enum Error {
         /// The grant file's lock file.
         path: PathBuf,
     },
+    /// The Keychain refused to delete the generated and saved secrets of a
+    /// workspace that `mxv remove` deletes, such as when it is locked or
+    /// the person refused its prompt, so the removal kept the workspace's
+    /// record. Some of the secrets may be gone, and running the removal
+    /// again deletes the rest.
+    KeychainRefused {
+        /// The Keychain service that holds the secrets, such as
+        /// `starmap.mxv-<id>`.
+        service: String,
+        /// The Keychain's reason, which holds no value.
+        reason: String,
+    },
     /// Every dated name that a repair tries for an older archive, from
     /// `NAME-<date>` to `NAME-<date>-<most>`, is taken by a workspace, an
     /// archive or a directory, so the repair changed nothing.
@@ -502,6 +514,7 @@ impl Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::GrantsBusy { .. }
+            | Self::KeychainRefused { .. }
             | Self::DatedNamesTaken { .. }
             | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::MirrorBusy { .. }
@@ -625,6 +638,7 @@ impl Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::GrantsBusy { .. }
+            | Self::KeychainRefused { .. }
             | Self::DatedNamesTaken { .. }
             | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::TemplateInvalid { .. }
@@ -744,6 +758,7 @@ impl Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::GrantsBusy { .. }
+            | Self::KeychainRefused { .. }
             | Self::DatedNamesTaken { .. }
             | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::MirrorBusy { .. }
@@ -806,6 +821,7 @@ impl Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::GrantsBusy { .. }
+            | Self::KeychainRefused { .. }
             | Self::MirrorBusy { .. }
             | Self::MirrorFetchFailed { .. }
             | Self::SshRefused { .. }
@@ -879,6 +895,7 @@ impl Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::GrantsBusy { .. }
+            | Self::KeychainRefused { .. }
             | Self::DatedNamesTaken { .. }
             | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::MirrorBusy { .. }
@@ -964,6 +981,7 @@ impl Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::GrantsBusy { .. }
+            | Self::KeychainRefused { .. }
             | Self::DatedNamesTaken { .. }
             | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::MirrorBusy { .. }
@@ -1136,16 +1154,9 @@ impl fmt::Display for Error {
                 formatter,
                 "mxv cannot read this operating system's process table: {message}"
             ),
-            Self::Busy { path } => write!(
-                formatter,
-                "another mxv command holds the lock {} and has not released it",
-                path.display()
-            ),
-            Self::GrantsBusy { path } => write!(
-                formatter,
-                "another mxv command holds the grant lock {} and has not released it",
-                path.display()
-            ),
+            Self::Busy { path } => fmt_busy(formatter, "lock", path),
+            Self::GrantsBusy { path } => fmt_busy(formatter, "grant lock", path),
+            Self::KeychainRefused { service, reason } => fmt_keychain(formatter, service, reason),
             Self::DatedNamesTaken { .. } | Self::StoppedRestoreHoldsOtherFiles { .. } => {
                 self.fmt_repair(formatter)
             }
@@ -1170,6 +1181,25 @@ impl fmt::Display for Error {
             }
         }
     }
+}
+
+/// Writes the text of [`Error::Busy`] or [`Error::GrantsBusy`] for the
+/// lock file `path`, which `lock` names, such as `grant lock`.
+fn fmt_busy(formatter: &mut fmt::Formatter<'_>, lock: &str, path: &std::path::Path) -> fmt::Result {
+    write!(
+        formatter,
+        "another mxv command holds the {lock} {} and has not released it",
+        path.display()
+    )
+}
+
+/// Writes the text of [`Error::KeychainRefused`] for the Keychain service
+/// `service`, which refused for `reason`.
+fn fmt_keychain(formatter: &mut fmt::Formatter<'_>, service: &str, reason: &str) -> fmt::Result {
+    write!(
+        formatter,
+        "the Keychain refused to delete the secrets of the service {service}, so mxv kept the workspace's record: {reason}"
+    )
 }
 
 /// A failure of phase's container engine is the docker failure of the same
@@ -1324,6 +1354,7 @@ impl Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::GrantsBusy { .. }
+            | Self::KeychainRefused { .. }
             | Self::DatedNamesTaken { .. }
             | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::MirrorBusy { .. }
@@ -1465,6 +1496,7 @@ impl std::error::Error for Error {
             | Self::UnsupportedOs { .. }
             | Self::Busy { .. }
             | Self::GrantsBusy { .. }
+            | Self::KeychainRefused { .. }
             | Self::DatedNamesTaken { .. }
             | Self::StoppedRestoreHoldsOtherFiles { .. }
             | Self::MirrorBusy { .. }

@@ -28,6 +28,7 @@ use crate::clock;
 use crate::error::Error;
 use crate::manifest::{Manifest, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
+use crate::phase_plan::secrets::WithSecrets;
 use crate::phase_plan::{self, Built, Inputs, MAIN, Unrunnable};
 use crate::record::Workspace;
 use crate::service::{Backend, PROVISION_APP, SERVICES_APP};
@@ -58,7 +59,7 @@ mod task;
 #[cfg(test)]
 mod tests;
 
-pub use build::{Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Place};
+pub use build::{Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Place, SecretAsk};
 pub use exec::{Exec, ExecEnd, ExecTarget};
 pub use task::{MiseListing, MiseTaskName, PreparedTask, TaskEnd, TaskServices, TaskStart};
 
@@ -931,8 +932,9 @@ impl Runs {
     ) -> Result<UpOutcome, Error> {
         // The token says that the builds passed, and it borrows the lock
         // that `up` holds until it returns.
-        passed.lock.check(&workspace.name)?;
-        drop(passed);
+        let BuildsPassed { lock, withheld } = passed;
+        lock.check(&workspace.name)?;
+        let mut withheld = withheld;
         let order = match manifest.start_order(names) {
             Ok(order) => order,
             Err(unknown) => return Ok(UpOutcome::UnknownProcess(unknown)),
@@ -941,6 +943,52 @@ impl Runs {
         let built = match built {
             Ok(built) => built,
             Err(unrunnable) => return Ok(UpOutcome::Unrunnable(unrunnable)),
+        };
+        // Each unit's secrets are read before phase starts anything, so a
+        // unit whose required secret has no value is left out, with the
+        // units that depend on it, and every other unit starts.
+        let mut fell_back = BTreeMap::new();
+        let secrets = self.read_secrets(
+            workspace,
+            &id,
+            manifest,
+            &order,
+            &mut withheld,
+            &mut fell_back,
+        );
+        let blocked = build::blocked(manifest, &order, &withheld);
+        let left_out = |name: &String| {
+            blocked.contains_key(name) || withheld.iter().any(|failure| &failure.unit == name)
+        };
+        let starting: Vec<String> = order
+            .iter()
+            .filter(|name| !left_out(name))
+            .cloned()
+            .collect();
+        // A command line that names no unit starts mxv's own apps too, as
+        // `Selection::All` would.
+        let mut chosen = starting.clone();
+        if names.is_empty() {
+            chosen.extend(manifest.service_apps());
+        }
+        let selected = if withheld.is_empty() {
+            selection(names)
+        } else {
+            selection(&chosen)
+        };
+        // An empty selection means every unit to phase, so when every unit
+        // that could start lacks a secret or needs one that does, nothing
+        // goes to phase.
+        if chosen.is_empty() && !withheld.is_empty() {
+            let rows = self.phase_rows(workspace, Some(manifest))?;
+            return Ok(UpOutcome::Withheld {
+                statuses: Self::blocked_statuses(workspace, manifest, &order, &blocked, &rows),
+                withheld,
+            });
+        }
+        let environment = WithSecrets {
+            manifest: &built.environment,
+            secrets: &secrets,
         };
         let containers = built
             .plan
@@ -952,7 +1000,7 @@ impl Runs {
             // write creates it.
             self.remember_containers(&workspace.name)?;
         }
-        let ready_wait: Duration = order
+        let ready_wait: Duration = starting
             .iter()
             .filter_map(|name| manifest.unit(name).and_then(Unit::ready))
             .map(|ready| ready.timeout)
@@ -971,8 +1019,8 @@ impl Runs {
             .phase
             .up(
                 &built.plan,
-                &selection(names),
-                &built.environment,
+                &selected,
+                &environment,
                 deadlines,
                 &Cancel::new(),
             )
@@ -982,9 +1030,12 @@ impl Runs {
         let mut planned: BTreeMap<String, Vec<ProcessNote>> = built
             .notes
             .iter()
-            .filter(|(name, _)| order.contains(name))
+            .filter(|(name, _)| starting.contains(name))
             .map(|(name, notes)| (name.clone(), notes.clone()))
             .collect();
+        for (name, notes) in fell_back {
+            planned.entry(name).or_default().extend(notes);
+        }
         match self.failure(workspace, manifest, &id, &report) {
             Ok(None) => {}
             Ok(Some(outcome)) => {
@@ -1009,19 +1060,50 @@ impl Runs {
             .into_iter()
             .filter(|name| reached.contains(name.as_str()))
             .collect();
-        shown.extend(order);
-        Ok(UpOutcome::Up(
-            shown
-                .iter()
-                .map(|name| {
-                    let mut status =
-                        Self::phase_unit_status(workspace, Some(manifest), name, rows.get(name));
-                    status.notes = planned.remove(name).unwrap_or_default();
-                    status.notes.extend(notes.remove(name).unwrap_or_default());
-                    status
-                })
-                .collect(),
-        ))
+        shown.extend(starting);
+        let mut statuses: Vec<ProcessStatus> = shown
+            .iter()
+            .map(|name| {
+                let mut status =
+                    Self::phase_unit_status(workspace, Some(manifest), name, rows.get(name));
+                status.notes = planned.remove(name).unwrap_or_default();
+                status.notes.extend(notes.remove(name).unwrap_or_default());
+                status
+            })
+            .collect();
+        if withheld.is_empty() {
+            return Ok(UpOutcome::Up(statuses));
+        }
+        statuses.extend(Self::blocked_statuses(
+            workspace, manifest, &order, &blocked, &rows,
+        ));
+        Ok(UpOutcome::Withheld { statuses, withheld })
+    }
+
+    /// Returns the status of each unit of `order` that `blocked` names,
+    /// from `rows`, with a note that names the withheld unit it needs.
+    fn blocked_statuses(
+        workspace: &Workspace,
+        manifest: &Manifest,
+        order: &[String],
+        blocked: &BTreeMap<String, String>,
+        rows: &BTreeMap<String, StatusRow>,
+    ) -> Vec<ProcessStatus> {
+        order
+            .iter()
+            .filter_map(|name| {
+                let needs = blocked.get(name)?;
+                let mut status =
+                    Self::phase_unit_status(workspace, Some(manifest), name, rows.get(name));
+                status.notes.push(ProcessNote::NotStarted {
+                    needs: needs.clone(),
+                    message: format!(
+                        "did not start, because it depends on {needs}, which did not start for want of a secret"
+                    ),
+                });
+                Some(status)
+            })
+            .collect()
     }
 
     /// Gives `workspace` a stable id and a host port for each named port,

@@ -241,6 +241,9 @@ codes that no start provokes:
   mxv::port::taken: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::permissions::not_granted: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::process::still_needed: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
+  mxv::secret::not_granted: Only `mxv up` of a live checkout whose process's starmap file names a secret reference that no person granted provokes it; tests/secrets.rs provokes it.
+  mxv::secret::unavailable: Only `mxv up` of a live checkout whose granted secret reference its store cannot read provokes it; tests/secrets.rs provokes it with an `op` that fails.
+  mxv::keychain::refused: Only a Keychain that refuses to delete a workspace's items, such as a locked one, provokes it, which a test cannot make on demand; the library's lifecycle tests provoke it with a removal whose deletion fails.
   mxv::process::unstartable: Only a manifest process whose cwd is missing from a live checkout provokes it; the library's process tests provoke it.
   mxv::process::table_unreadable: Only a PATH without ps, during a run that has started processes, provokes it, which the fixture cannot hold.
   mxv::port::exhausted: Only a port range whose every port is held or taken provokes it.

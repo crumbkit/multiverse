@@ -19,8 +19,43 @@ workspace may need to act on.
   still read as a path. Such a checkout gets no ignored directories and no
   `.git/info/exclude` copied in, and an origin without a default branch
   fails with `mxv::origin::no_default_branch`, which names the origin.
+- `mxv up` and `mxv restart` give a host process each variable of its
+  starmap file whose `source` is `secret` or `generated`. A 1Password
+  reference is read through the starmap agent when it runs and with `op`
+  otherwise, a secret without a bind is read from the login Keychain, and a
+  generated value is created there on first use, with 20 seconds for each
+  unit's secrets. The Keychain keeps them under `starmap.mxv-<workspace
+  id>`, so two workspaces of one repository hold separate values, and
+  `mxv remove` deletes them before the record; a Keychain that refuses
+  fails the removal with `mxv::keychain::refused` and keeps the workspace.
+  `mxv archive` keeps them.
+- mxv reads a 1Password reference for a unit only after a person at a
+  terminal answered yes to a question that names the unit, the variable,
+  the store, the reference and the file. The grant is kept per repository,
+  unit and reference in `<phase state>/grants/<repository>-<hash>.secrets.json`
+  (`phase/secret-grants/v1`), which holds no value, and a changed reference
+  asks again. A secret that no person granted, or that its store cannot
+  give in time, affects only its unit: an optional variable stays unset
+  with a warning, and any other one fails the unit with
+  `mxv::secret::not_granted` or `mxv::secret::unavailable`, with the
+  `sign_in` of a matching `[secrets.*]` table. The units that depend on it
+  do not start and their rows say why, and every other unit starts.
+- In the multiverse library, `SecretFailure`, `SecretProblem`,
+  `SecretSource`, `AskedSecret`, `SecretAsk`, `Runs::secret_granting`,
+  `Runs::grant_secrets`, `UpOutcome::Withheld`, `ProcessNote::SecretDefaulted`,
+  `ProcessNote::NotStarted`, `Error::KeychainRefused`, `forget_keychain`,
+  `keychain_service` and `Lifecycle::with_forget`; in phase,
+  `SecretGrants`, `SecretRead`, `Phase::secrets_granted` and
+  `Phase::grant_secrets`.
 
 ### Changed
+
+- `mxv up` and `mxv restart` print a batch: the `mxv/up/v1` and
+  `mxv/restart/v1` documents gain a `failures` list beside `data`, which
+  holds a failure for each unit that lacks a secret, and the command exits
+  with 1 when the list is not empty. `data` is unchanged when every unit
+  starts. A unit that did not start because a unit it depends on lacks a
+  secret has a row with a `warning` note that names that unit.
 
 - `mxv up`, `restart` and `run` check the starmap file of every selected
   host process before they report a wrong provided bind, and

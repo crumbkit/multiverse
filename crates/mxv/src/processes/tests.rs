@@ -323,3 +323,69 @@ fn a_command_whose_workspace_gained_a_stable_id_while_it_waited_for_the_lock_tak
     assert!(saved.id.is_some());
     assert_eq!(workspace.id, saved.id);
 }
+
+/// The starmap file of the unit `api`: one required secret from
+/// 1Password.
+const SECRET_SPEC: &str = "[variables.CLIENT_SECRET]\npurpose = \"The client secret.\"\ntype = \"string\"\nunset = \"required\"\nshow = \"withheld\"\nsource = \"secret\"\nbind = { one-password = \"op://acme-staging/client/credential\" }\n";
+
+/// Returns the place, whose unit `api` reads [`SECRET_SPEC`], and the
+/// context of a command that read its record.
+fn with_secret() -> (Place, Context) {
+    let place = Place::new();
+    write(place.dir.path().join("triage/starmap.toml"), SECRET_SPEC);
+    let context = place.context();
+    (place, context)
+}
+
+/// Reports whether the secret of [`with_secret`] still asks for a grant.
+fn secret_asks(context: &Context) -> bool {
+    let id = context.workspace.id.clone().unwrap();
+    let manifest = context.workspace.manifest().unwrap().unwrap();
+    context
+        .runs
+        .secret_granting(&id, &context.workspace, &manifest, &[])
+        .is_some()
+}
+
+#[test]
+fn a_yes_to_the_secret_question_after_the_permission_question_grants_the_reference() {
+    let (_place, context) = with_secret();
+    assert!(secret_asks(&context));
+
+    let mut prompt = Vec::new();
+    let asked = ask_person(&mut prompt, &mut "y\ny\n".as_bytes(), &context, |_| {
+        Vec::new()
+    });
+
+    assert!(asked.is_ok(), "{asked:?}");
+    let prompt = String::from_utf8(prompt).unwrap();
+    let secrets = prompt
+        .split_once("asks mxv to read these secrets:\n")
+        .map(|(_, rest)| rest)
+        .unwrap_or_else(|| panic!("no secret question: {prompt}"));
+    assert!(
+        secrets.starts_with(
+            "  api reads CLIENT_SECRET from op://acme-staging/client/credential in 1password, as "
+        ),
+        "{prompt}"
+    );
+    assert!(
+        secrets.ends_with("starmap.toml says\nGrant them? [y/N] "),
+        "{prompt}"
+    );
+    assert!(!secret_asks(&context));
+}
+
+#[test]
+fn a_no_to_the_secret_question_fails_nothing_and_grants_nothing() {
+    let (_place, context) = with_secret();
+
+    let mut prompt = Vec::new();
+    let asked = ask_person(&mut prompt, &mut "y\nn\n".as_bytes(), &context, |_| {
+        Vec::new()
+    });
+
+    assert!(asked.is_ok(), "{asked:?}");
+    assert!(String::from_utf8(prompt).unwrap().contains("these secrets"));
+    assert!(secret_asks(&context));
+}

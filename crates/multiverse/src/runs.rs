@@ -24,6 +24,7 @@ use crate::host::Host;
 use crate::manifest::{Manifest, Process};
 use crate::name::WorkspaceName;
 use crate::phase_plan::CallerEnvironment;
+use crate::phase_plan::secrets::{SecretFailure, SecretStores};
 use crate::ports::{self, DEFAULT_PORT_RANGE};
 use crate::record::Workspace;
 use crate::store::{self, LOCK_WAIT, Lock, Store};
@@ -36,7 +37,7 @@ pub(crate) use phased::Forgotten;
 
 pub use phased::{
     Admission, Asked, BuildEnd, BuildStop, BuildsPassed, Exec, ExecEnd, ExecTarget, Granting,
-    LogOutput, MiseListing, MiseTaskName, PermissionAsk, Place, PreparedTask, TaskEnd,
+    LogOutput, MiseListing, MiseTaskName, PermissionAsk, Place, PreparedTask, SecretAsk, TaskEnd,
     TaskServices, TaskStart, Volumes,
 };
 
@@ -223,6 +224,24 @@ pub enum ProcessNote {
         /// mxv's sentence, which names the variable and the checkout.
         message: String,
     },
+    /// `up` or `restart` started the process with the default of a secret
+    /// variable of its starmap file, or left an optional one unset,
+    /// because the secret could not be read.
+    SecretDefaulted {
+        /// The variable, such as `CLIENT_SECRET`.
+        variable: String,
+        /// mxv's sentence, which names the variable, the store or the
+        /// reference, and why, and holds no value.
+        message: String,
+    },
+    /// `up` or `restart` did not start the unit, because a unit it
+    /// depends on did not start for want of a secret.
+    NotStarted {
+        /// The unit it depends on, which did not start.
+        needs: String,
+        /// mxv's sentence, which names that unit.
+        message: String,
+    },
 }
 
 impl ProcessNote {
@@ -235,7 +254,9 @@ impl ProcessNote {
             | Self::SecretsKept { message }
             | Self::PlanChanged { message }
             | Self::VolumeOwnerUnchecked { message }
-            | Self::ProvidedSkipped { message, .. } => message,
+            | Self::ProvidedSkipped { message, .. }
+            | Self::SecretDefaulted { message, .. }
+            | Self::NotStarted { message, .. } => message,
         }
     }
 
@@ -245,7 +266,10 @@ impl ProcessNote {
     pub const fn is_warning(&self) -> bool {
         matches!(
             self,
-            Self::SecretsKept { .. } | Self::VolumeOwnerUnchecked { .. }
+            Self::SecretsKept { .. }
+                | Self::VolumeOwnerUnchecked { .. }
+                | Self::SecretDefaulted { .. }
+                | Self::NotStarted { .. }
         )
     }
 }
@@ -275,6 +299,17 @@ pub enum UpOutcome {
     /// Every selected process runs. It holds the selected processes in the
     /// order they started.
     Up(Vec<ProcessStatus>),
+    /// Every selected process runs but those that `withheld` names, which
+    /// did not start for want of a secret, and those that depend on them,
+    /// whose statuses say so in a note. phase started nothing of the
+    /// withheld units, and every other unit started as `Up` would have.
+    Withheld {
+        /// The processes that started, in the order they started, and the
+        /// ones that depend on a withheld unit.
+        statuses: Vec<ProcessStatus>,
+        /// Each unit that did not start, with the secret that kept it.
+        withheld: Vec<SecretFailure>,
+    },
     /// The manifest declares no process with the name.
     UnknownProcess(String),
     /// Something outside the workspace holds a port that a process
@@ -524,6 +559,8 @@ pub struct Runs {
     /// from which plans name the proxy's routes, or `None` until
     /// [`Runs::with_proxy_urls`] names them.
     proxy_urls: Option<(PathBuf, std::net::SocketAddr)>,
+    /// The stores that [`Runs::up`] reads the units' secrets from.
+    stores: SecretStores,
 }
 
 impl Runs {
@@ -546,6 +583,7 @@ impl Runs {
             own_command: None,
             proxy_urls: None,
             host: Host::mxv(),
+            stores: SecretStores::system(),
         }
     }
 

@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::cancel::Cancel;
 use crate::engine::container::{ComposeRunner, DockerCli, LabelPrefix};
@@ -13,7 +13,7 @@ use crate::engine::keeper::KeeperCommand;
 use crate::engine::run::{Engine, Settings};
 use crate::env::EnvironmentSource;
 use crate::error::PhaseError;
-use crate::grants::{GrantScope, Grants, Growth};
+use crate::grants::{GrantScope, Grants, Growth, SecretGrants, SecretRead};
 use crate::logs::{LineSink, LogRequest};
 use crate::name::{AppName, ProcessName, WorkspaceId};
 use crate::plan::Plan;
@@ -392,6 +392,39 @@ impl Phase {
     /// [`PhaseError::StateUnwritable`] when the file cannot be written.
     pub fn grant(&self, scope: &GrantScope, growth: &Growth) -> Result<Grants, PhaseError> {
         crate::grants::grant(&self.state_dir, scope, growth, self.lock_wait)
+    }
+
+    /// Returns the secrets that a person let a host read for the apps of
+    /// `scope`, or `None` when the scope has no secret grant file. A host
+    /// compares it with the secrets its apps read through
+    /// [`SecretGrants::missing`] before it reads any. It takes no lock.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Phase::granted`], for the secret grant file.
+    pub fn secrets_granted(&self, scope: &GrantScope) -> Result<Option<SecretGrants>, PhaseError> {
+        crate::grants::read_secrets(&self.state_dir, scope)
+    }
+
+    /// Adds each read of `asked` to the secret grants of `scope`, granted
+    /// at `now`, which a host calls only after a person agreed to them, and
+    /// returns the grants as written. It holds the secret grant file's
+    /// lock, waiting up to the lock wait, reads the file again and writes
+    /// the union with a rename, as [`Phase::grant`] does.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of [`Phase::secrets_granted`],
+    /// [`PhaseError::GrantsBusy`] when another grant holds the lock for all
+    /// of the lock wait, and [`PhaseError::StateUnwritable`] when the file
+    /// cannot be written.
+    pub fn grant_secrets(
+        &self,
+        scope: &GrantScope,
+        asked: &BTreeMap<AppName, Vec<SecretRead>>,
+        now: SystemTime,
+    ) -> Result<SecretGrants, PhaseError> {
+        crate::grants::grant_secrets(&self.state_dir, scope, asked, now, self.lock_wait)
     }
 
     /// Returns, for each app of the run record of the workspace whose

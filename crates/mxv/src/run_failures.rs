@@ -5,10 +5,10 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery};
+use crumbkit::{Call, Code, Failure, Field, FieldValue, Recovery, Then};
 use multiverse::{
-    Allow, MANIFEST_FILE, ManifestError, ManifestProblem, ProvidedBind, RefusedBind,
-    UnrunnableKind, Waited,
+    Allow, MANIFEST_FILE, ManifestError, ManifestProblem, ProvidedBind, RefusedBind, SecretFailure,
+    SecretProblem, UnrunnableKind, Waited,
 };
 
 use crate::failures::{remove_volumes_line, shown};
@@ -86,6 +86,12 @@ pub const PORT_NOT_FOUND: Code = Code::from_spelling("mxv::port::not_found");
 pub const PERMISSIONS_NOT_GRANTED: Code = Code::from_spelling("mxv::permissions::not_granted");
 /// The code of a unit that `mxv down` kept, because running units need it.
 pub const PROCESS_STILL_NEEDED: Code = Code::from_spelling("mxv::process::still_needed");
+/// The code of a unit that did not start, because no person granted it a
+/// secret reference that its starmap file names.
+pub const SECRET_NOT_GRANTED: Code = Code::from_spelling("mxv::secret::not_granted");
+/// The code of a unit that did not start, because the store of one of its
+/// secrets could not give the value in time.
+pub const SECRET_UNAVAILABLE: Code = Code::from_spelling("mxv::secret::unavailable");
 
 /// Every code that a [`RunFailure`] or a `mxv run` failure returns.
 pub(crate) const CODES: &[Code<'static>] = &[
@@ -120,6 +126,8 @@ pub(crate) const CODES: &[Code<'static>] = &[
     PORT_NOT_FOUND,
     PERMISSIONS_NOT_GRANTED,
     PROCESS_STILL_NEEDED,
+    SECRET_NOT_GRANTED,
+    SECRET_UNAVAILABLE,
 ];
 
 /// A failure of a process verb.
@@ -326,6 +334,16 @@ pub(crate) enum RunFailure {
         /// Those of `by` whose state phase cannot tell.
         unknown: Vec<String>,
     },
+    /// `up` or `restart` left a unit out, because a required secret
+    /// variable of its starmap file has no value: no person granted its
+    /// reference, or its store could not give it. Every other unit
+    /// started.
+    Secret {
+        /// The workspace's name.
+        workspace: String,
+        /// The unit, the variable and why, which holds no value.
+        failure: Box<SecretFailure>,
+    },
     /// The workspace has docker volumes, which may hold data, so `remove`
     /// keeps the workspace unless `--delete-volumes` allows deleting them.
     Volumes {
@@ -434,6 +452,12 @@ impl Failure for RunFailure {
             Self::UnknownPort { .. } => PORT_NOT_FOUND,
             Self::PermissionsNotGranted { .. } => PERMISSIONS_NOT_GRANTED,
             Self::StillNeeded { .. } => PROCESS_STILL_NEEDED,
+            Self::Secret { failure, .. } => match failure.problem {
+                SecretProblem::NotGranted => SECRET_NOT_GRANTED,
+                // The library marks the problem non-exhaustive, so a
+                // problem that a later version adds reads as unavailable.
+                SecretProblem::Unavailable { .. } | _ => SECRET_UNAVAILABLE,
+            },
         }
     }
 
@@ -560,6 +584,7 @@ impl Failure for RunFailure {
             Self::StillNeeded {
                 workspace, unit, by, ..
             } => down_all(workspace, unit, by),
+            Self::Secret { workspace, failure } => secret_recovery(workspace, failure),
         }
     }
 
@@ -696,6 +721,7 @@ impl Failure for RunFailure {
                 vec![Field::new("workspace", workspace), Field::new("port", port)]
             }
             Self::PermissionsNotGranted { .. } | Self::StillNeeded { .. } => self.grant_fields(),
+            Self::Secret { workspace, failure } => secret_fields(workspace, failure),
         }
     }
 }
@@ -754,6 +780,7 @@ impl RunFailure {
             | Self::Running { .. }
             | Self::VolumeRenamed { .. }
             | Self::Unrunnable { .. }
+            | Self::Secret { .. }
             | Self::Volumes { .. } => Vec::new(),
         }
     }
@@ -1143,6 +1170,7 @@ impl fmt::Display for RunFailure {
             Self::StillNeeded {
                 unit, by, unknown, ..
             } => fmt_still_needed(formatter, unit, by, unknown),
+            Self::Secret { failure, .. } => fmt_secret(formatter, failure),
         }
     }
 }
@@ -1184,6 +1212,81 @@ fn fmt_not_granted(
             paths.join(", "),
             asks.join("; ")
         )
+    }
+}
+
+/// Returns the recovery of [`RunFailure::Secret`] for `failure` in the
+/// workspace `workspace`. Only a person at a terminal can grant a
+/// reference, because `up` asks there. A store that could not give the
+/// value is signed in to with the `sign_in` of the matching `[secrets.*]`
+/// table when there is one.
+fn secret_recovery(workspace: &str, failure: &SecretFailure) -> Recovery {
+    let up = Call::new(&["up"])
+        .value("workspace", workspace)
+        .value("processes", &failure.unit);
+    match (&failure.problem, &failure.sign_in) {
+        (SecretProblem::NotGranted, _) => Recovery::Terminal(up),
+        (_, Some(sign_in)) => Recovery::after(format!("sign in with `{sign_in}`"), Then::Run(up)),
+        (_, None) => Recovery::after(
+            format!(
+                "make {} give the value of {}",
+                failure.source.store(),
+                failure.variable
+            ),
+            Then::Run(up),
+        ),
+    }
+}
+
+/// Returns the fields of [`RunFailure::Secret`]: the workspace, the unit,
+/// the variable, its store and reference, the file that declares it, and
+/// the matching `sign_in` when there is one. None holds a value.
+fn secret_fields<'a>(workspace: &'a str, failure: &'a SecretFailure) -> Vec<Field<'a>> {
+    let mut fields = vec![
+        Field::new("workspace", workspace),
+        Field::new("unit", &failure.unit),
+        Field::new("variable", &failure.variable),
+        Field::new("store", failure.source.store()),
+    ];
+    if let Some(reference) = failure.source.reference() {
+        fields.push(Field::new("reference", reference));
+    }
+    fields.push(Field::new("file", shown(&failure.file)));
+    if let Some(sign_in) = &failure.sign_in {
+        fields.push(Field::new("sign_in", sign_in));
+    }
+    fields
+}
+
+/// Writes the message of [`RunFailure::Secret`].
+fn fmt_secret(formatter: &mut fmt::Formatter<'_>, failure: &SecretFailure) -> fmt::Result {
+    let SecretFailure {
+        unit,
+        variable,
+        source,
+        file,
+        problem,
+        ..
+    } = failure;
+    let from = source.reference().map_or_else(
+        || format!("the Keychain item of {variable}"),
+        |reference| format!("{reference} in {}", source.store()),
+    );
+    match problem {
+        SecretProblem::NotGranted => write!(
+            formatter,
+            "no person granted the unit {unit} the secret {variable} from {from}, which {} declares, so mxv did not start {unit}",
+            shown(file)
+        ),
+        SecretProblem::Unavailable { reason } => write!(
+            formatter,
+            "mxv could not read the secret {variable} of the unit {unit} from {from}, which {} declares, because {reason}, so mxv did not start {unit}",
+            shown(file)
+        ),
+        _ => write!(
+            formatter,
+            "mxv could not read the secret {variable} of the unit {unit} from {from}, so mxv did not start {unit}"
+        ),
     }
 }
 
@@ -1303,6 +1406,7 @@ impl RunFailure {
             | Self::Running { .. }
             | Self::PermissionsNotGranted { .. }
             | Self::StillNeeded { .. }
+            | Self::Secret { .. }
             | Self::Volumes { .. } => Vec::new(),
         }
     }
@@ -1388,6 +1492,7 @@ impl RunFailure {
             | Self::Running { .. }
             | Self::PermissionsNotGranted { .. }
             | Self::StillNeeded { .. }
+            | Self::Secret { .. }
             | Self::Volumes { .. } => Ok(()),
         }
     }

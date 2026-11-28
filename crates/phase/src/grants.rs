@@ -15,6 +15,15 @@
 //! it renames over the grant, so a crash leaves the old grant or the new
 //! one. [`Grants::growth`] compares and writes nothing.
 //!
+//! A secret grant file is `<state_dir>/grants/<label>-<hash>.secrets.json`
+//! beside the grant file of the same scope. It holds, for each app, each
+//! secret that a person let the host read for it: the variable, the store,
+//! such as `1password`, the reference, such as
+//! `op://acme-staging/auth/credential`, and the time of the yes. It never
+//! holds a value. A changed reference is a new entry, so the old reference
+//! stays granted and the new one is asked about. It is written as the grant
+//! file is, under its own `.lock` and with a rename.
+//!
 //! phase keeps the grants under its own state directory, which the sandbox
 //! never lets a sandboxed app read or write. A process outside the sandbox
 //! runs with the person's own access and can edit the file, so a grant
@@ -24,7 +33,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
@@ -45,6 +54,15 @@ const SCHEMA_PREFIX: &str = "phase/grants/v";
 
 /// The version of the grant file that this phase writes.
 const GRANTS_VERSION: u32 = 1;
+
+/// The schema prefix of every version of the secret grant file.
+const SECRETS_SCHEMA_PREFIX: &str = "phase/secret-grants/v";
+
+/// The version of the secret grant file that this phase writes.
+const SECRETS_VERSION: u32 = 1;
+
+/// The extension of a secret grant file, after the scope's stem.
+const SECRETS_EXTENSION: &str = "secrets.json";
 
 /// The most bytes of a grant file that phase reads. A larger file is
 /// unreadable.
@@ -435,50 +453,78 @@ fn path(state_dir: &Path, scope: &GrantScope) -> PathBuf {
 /// newer phase wrote it.
 pub(crate) fn read(state_dir: &Path, scope: &GrantScope) -> Result<Option<Grants>, PhaseError> {
     let path = path(state_dir, scope);
-    let unreadable = |reason: String| PhaseError::GrantsUnreadable {
-        path: path.clone(),
-        reason,
+    let Some(bytes) = read_versioned(&path, SCHEMA_PREFIX, GRANTS_VERSION)? else {
+        return Ok(None);
     };
-    let file = match store::open(&path) {
+    let record: GrantsRecord =
+        serde_json::from_slice(&bytes).map_err(|error| unreadable(&path, error.to_string()))?;
+    if record.paths != scope.paths {
+        return Err(other_repositories(&path));
+    }
+    Ok(Some(Grants { apps: record.apps }))
+}
+
+/// Returns the failure of the grant file `path`, which cannot be read for
+/// `reason`.
+fn unreadable(path: &Path, reason: String) -> PhaseError {
+    PhaseError::GrantsUnreadable {
+        path: path.to_path_buf(),
+        reason,
+    }
+}
+
+/// Returns the failure of the grant file `path`, which names other
+/// repositories than the ones its name was made from.
+fn other_repositories(path: &Path) -> PhaseError {
+    unreadable(
+        path,
+        "it names other repositories than the ones its name was made from".to_owned(),
+    )
+}
+
+/// Returns the bytes of the file `path`, whose schema is `prefix` and a
+/// version no later than `version`, or `None` when it does not exist.
+///
+/// # Errors
+///
+/// Returns [`PhaseError::GrantsUnreadable`] when the file cannot be read,
+/// holds more than [`MOST_GRANTS_BYTES`] or has another schema, and
+/// [`PhaseError::NewerGrants`] when its version is later than `version`.
+fn read_versioned(path: &Path, prefix: &str, version: u32) -> Result<Option<Vec<u8>>, PhaseError> {
+    let file = match store::open(path) {
         Ok(file) => file,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(unreadable(error.to_string())),
+        Err(error) => return Err(unreadable(path, error.to_string())),
     };
     let mut bytes = Vec::new();
     file.take(MOST_GRANTS_BYTES + 1)
         .read_to_end(&mut bytes)
-        .map_err(|error| unreadable(error.to_string()))?;
+        .map_err(|error| unreadable(path, error.to_string()))?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MOST_GRANTS_BYTES {
-        return Err(unreadable(format!(
-            "it holds more than {MOST_GRANTS_BYTES} bytes"
-        )));
+        return Err(unreadable(
+            path,
+            format!("it holds more than {MOST_GRANTS_BYTES} bytes"),
+        ));
     }
     let versioned: Versioned =
-        serde_json::from_slice(&bytes).map_err(|error| unreadable(error.to_string()))?;
-    let version = versioned
+        serde_json::from_slice(&bytes).map_err(|error| unreadable(path, error.to_string()))?;
+    let found = versioned
         .schema
-        .strip_prefix(SCHEMA_PREFIX)
+        .strip_prefix(prefix)
         .and_then(|version| version.parse::<u32>().ok())
         .ok_or_else(|| {
-            unreadable(format!(
-                "its schema {:?} is no grant file",
-                versioned.schema
-            ))
+            unreadable(
+                path,
+                format!("its schema {:?} is no grant file", versioned.schema),
+            )
         })?;
-    if version > GRANTS_VERSION {
+    if found > version {
         return Err(PhaseError::NewerGrants {
-            path,
+            path: path.to_path_buf(),
             schema: versioned.schema,
         });
     }
-    let record: GrantsRecord =
-        serde_json::from_slice(&bytes).map_err(|error| unreadable(error.to_string()))?;
-    if record.paths != scope.paths {
-        return Err(unreadable(
-            "it names other repositories than the ones its name was made from".to_owned(),
-        ));
-    }
-    Ok(Some(Grants { apps: record.apps }))
+    Ok(Some(bytes))
 }
 
 /// Adds `growth` to the grants of `scope` under `state_dir`, while it
@@ -528,4 +574,219 @@ pub(crate) fn grant(
     bytes.push(b'\n');
     replace_file(&target, &bytes).map_err(Unreplaced::into_error)?;
     Ok(grants)
+}
+
+/// One secret that a host reads for an app: the variable that receives
+/// it, the store that holds it, such as `1password`, and the reference the
+/// store reads, such as `op://acme-staging/auth/credential`. It never holds
+/// a value.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct SecretRead {
+    /// The variable that receives the secret.
+    variable: String,
+    /// The store that holds it.
+    store: String,
+    /// The reference the store reads.
+    reference: String,
+}
+
+impl SecretRead {
+    /// Returns the read of `reference` from `store` into `variable`.
+    #[must_use]
+    pub fn new(variable: &str, store: &str, reference: &str) -> Self {
+        Self {
+            variable: variable.to_owned(),
+            store: store.to_owned(),
+            reference: reference.to_owned(),
+        }
+    }
+
+    /// Returns the variable that receives the secret.
+    #[must_use]
+    pub fn variable(&self) -> &str {
+        &self.variable
+    }
+
+    /// Returns the store that holds the secret.
+    #[must_use]
+    pub fn store(&self) -> &str {
+        &self.store
+    }
+
+    /// Returns the reference that the store reads.
+    #[must_use]
+    pub fn reference(&self) -> &str {
+        &self.reference
+    }
+}
+
+/// One entry of a secret grant file: a read and when a person granted it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretEntry {
+    /// The variable that receives the secret.
+    variable: String,
+    /// The store that holds it.
+    store: String,
+    /// The reference the store reads.
+    reference: String,
+    /// When the person answered yes, in UTC, such as
+    /// `2026-11-27T21:00:00Z`.
+    granted_at: String,
+}
+
+impl SecretEntry {
+    /// Reports whether the entry grants `read`.
+    fn grants(&self, read: &SecretRead) -> bool {
+        self.variable == read.variable
+            && self.store == read.store
+            && self.reference == read.reference
+    }
+}
+
+/// The secrets that a person let a host read for the apps of one scope.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SecretGrants {
+    /// Each app's entries, in the order they were granted.
+    apps: BTreeMap<AppName, Vec<SecretEntry>>,
+}
+
+impl SecretGrants {
+    /// Returns each read of `requested` that no entry grants, by app. A
+    /// read is granted only to the app that its entry names, and only for
+    /// the same variable, store and reference, so a changed reference is
+    /// not granted. It writes nothing.
+    #[must_use]
+    pub fn missing(
+        &self,
+        requested: &BTreeMap<AppName, Vec<SecretRead>>,
+    ) -> BTreeMap<AppName, Vec<SecretRead>> {
+        requested
+            .iter()
+            .filter_map(|(app, reads)| {
+                let granted = self.apps.get(app).map_or(&[][..], Vec::as_slice);
+                let missing: Vec<SecretRead> = reads
+                    .iter()
+                    .filter(|read| !granted.iter().any(|entry| entry.grants(read)))
+                    .cloned()
+                    .collect();
+                (!missing.is_empty()).then(|| (app.clone(), missing))
+            })
+            .collect()
+    }
+}
+
+/// The secret grant file as JSON.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SecretGrantsRecord {
+    /// The schema, `phase/secret-grants/v1`.
+    schema: String,
+    /// The scope's source directories.
+    paths: Vec<PathBuf>,
+    /// Each app's entries.
+    apps: BTreeMap<AppName, Vec<SecretEntry>>,
+}
+
+/// Returns the path of the secret grant file of `scope` under `state_dir`.
+pub(crate) fn secrets_path(state_dir: &Path, scope: &GrantScope) -> PathBuf {
+    state_dir
+        .join(GRANTS_DIR)
+        .join(format!("{}.{SECRETS_EXTENSION}", scope.stem()))
+}
+
+/// Returns the secret grants of `scope` under `state_dir`, or `None` when
+/// it has no secret grant file.
+///
+/// # Errors
+///
+/// Returns the errors of [`read`], for the secret grant file.
+pub(crate) fn read_secrets(
+    state_dir: &Path,
+    scope: &GrantScope,
+) -> Result<Option<SecretGrants>, PhaseError> {
+    let path = secrets_path(state_dir, scope);
+    let Some(bytes) = read_versioned(&path, SECRETS_SCHEMA_PREFIX, SECRETS_VERSION)? else {
+        return Ok(None);
+    };
+    let record: SecretGrantsRecord =
+        serde_json::from_slice(&bytes).map_err(|error| unreadable(&path, error.to_string()))?;
+    if record.paths != scope.paths {
+        return Err(other_repositories(&path));
+    }
+    Ok(Some(SecretGrants { apps: record.apps }))
+}
+
+/// Adds each read of `asked` to the secret grants of `scope` under
+/// `state_dir`, granted at `now`, while it holds the file's lock, waiting
+/// at most `wait`, and returns the grants as written. It reads the file
+/// again under the lock, so two grants at once keep both additions, and a
+/// read that is already granted keeps its first entry.
+///
+/// # Errors
+///
+/// Returns the errors of [`read_secrets`], [`PhaseError::GrantsBusy`] when
+/// another grant holds the lock for all of `wait`, and
+/// [`PhaseError::StateUnwritable`] when the file cannot be written.
+pub(crate) fn grant_secrets(
+    state_dir: &Path,
+    scope: &GrantScope,
+    asked: &BTreeMap<AppName, Vec<SecretRead>>,
+    now: SystemTime,
+    wait: Duration,
+) -> Result<SecretGrants, PhaseError> {
+    let dir = state_dir.join(GRANTS_DIR);
+    secure_dir(&dir)?;
+    let target = secrets_path(state_dir, scope);
+    let lock_path = dir.join(format!("{}.{SECRETS_EXTENSION}.lock", scope.stem()));
+    let Some(_lock) = take_lock(&lock_path, wait, &|| false)? else {
+        return Err(PhaseError::GrantsBusy {
+            path: lock_path,
+            waited: wait,
+        });
+    };
+    let mut grants = read_secrets(state_dir, scope)?.unwrap_or_default();
+    let granted_at = utc_text(now);
+    for (app, reads) in grants.missing(asked) {
+        grants
+            .apps
+            .entry(app)
+            .or_default()
+            .extend(reads.into_iter().map(|read| SecretEntry {
+                variable: read.variable,
+                store: read.store,
+                reference: read.reference,
+                granted_at: granted_at.clone(),
+            }));
+    }
+    let record = SecretGrantsRecord {
+        schema: format!("{SECRETS_SCHEMA_PREFIX}{SECRETS_VERSION}"),
+        paths: scope.paths.clone(),
+        apps: grants.apps.clone(),
+    };
+    let mut bytes =
+        serde_json::to_vec_pretty(&record).map_err(|error| PhaseError::StateUnwritable {
+            path: target.clone(),
+            source: io::Error::other(error),
+        })?;
+    bytes.push(b'\n');
+    replace_file(&target, &bytes).map_err(Unreplaced::into_error)?;
+    Ok(grants)
+}
+
+/// Returns `time` in UTC to the second, such as `2026-11-27T21:00:00Z`. A
+/// time before 1970 reads as 1970-01-01T00:00:00Z.
+fn utc_text(time: SystemTime) -> String {
+    let seconds = time
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let seconds = i64::try_from(seconds).unwrap_or(i64::MAX);
+    let (year, month, day) = crate::calendar::civil_from_days(seconds.div_euclid(86_400));
+    let of_day = seconds.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        of_day / 3600,
+        of_day % 3600 / 60,
+        of_day % 60
+    )
 }
