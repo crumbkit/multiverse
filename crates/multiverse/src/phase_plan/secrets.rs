@@ -169,8 +169,9 @@ pub struct SecretFailure {
 pub struct KeychainItem {
     /// The service, `starmap.mxv-<workspace id>`.
     pub service: String,
-    /// The account, `<app>/<NAME>`, where the app is
-    /// [`keychain_app`]'s name of the unit.
+    /// The account, `<app>/<NAME>`, where the app is the unit's name when
+    /// it is already lower case letters, digits and hyphens, and otherwise
+    /// starmap's form of the name with a short hash of it after it.
     pub account: String,
 }
 
