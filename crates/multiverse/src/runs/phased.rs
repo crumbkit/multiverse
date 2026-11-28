@@ -951,20 +951,11 @@ impl Runs {
         // its secrets are not read. When phase cannot say which units it
         // leaves running, every unit's secrets are read.
         let left_alone = self.phase.left_alone(&built.plan).unwrap_or_default();
-        let to_read: Vec<String> = order
-            .iter()
-            .filter(|name| app(name).is_none_or(|app| !left_alone.contains(&app)))
-            .cloned()
-            .collect();
-        let mut fell_back = BTreeMap::new();
-        let secrets = self.read_secrets(
-            workspace,
-            &id,
-            manifest,
-            &to_read,
-            &mut withheld,
-            &mut fell_back,
-        );
+        let build::ReadSecrets {
+            values: secrets,
+            notes: fell_back,
+            unread,
+        } = self.read_secrets(workspace, &id, manifest, &order, &left_alone, &mut withheld);
         let blocked = build::blocked(manifest, &order, &withheld);
         let left_out = |name: &String| {
             blocked.contains_key(name) || withheld.iter().any(|failure| &failure.unit == name)
@@ -998,6 +989,7 @@ impl Runs {
         let environment = WithSecrets {
             manifest: &built.environment,
             secrets: &secrets,
+            unread: &unread,
         };
         let containers = built
             .plan

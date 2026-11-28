@@ -40,7 +40,7 @@
 //!   reported as unable to start. A status that only the launcher can give
 //!   would replace this.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, PipeReader, Read as _, Write};
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
@@ -752,30 +752,33 @@ impl Runs {
     }
 
     /// Reads the secret and generated variables of each host unit of
-    /// `order` that `withheld` does not name, each unit under its own
-    /// deadline of [`SECRET_WAIT`], and returns their values. A unit whose
-    /// required secret cannot be read is added to `withheld`, and each
-    /// variable that fell back adds a warning to `notes` under its unit. A
-    /// unit that depends on a withheld unit will not start, so its secrets
-    /// are not read. The caller leaves out of `order` the units that phase
-    /// leaves running, whose values phase does not read.
+    /// `order`, the full start order, that `withheld` does not name, each
+    /// unit under its own deadline of [`SECRET_WAIT`], and returns their
+    /// values. A unit whose required secret cannot be read is added to
+    /// `withheld`, and each variable that fell back adds a warning under
+    /// its unit. A unit that depends on a withheld unit, directly or
+    /// through other units of `order`, will not start, so its secrets are
+    /// not read. A unit whose app `left_alone` names is not read either,
+    /// because phase leaves it running, and the result names it as unread.
     pub(super) fn read_secrets(
         &self,
         workspace: &Workspace,
         id: &WorkspaceId,
         manifest: &Manifest,
         order: &[String],
+        left_alone: &BTreeSet<AppName>,
         withheld: &mut Vec<SecretFailure>,
-        notes: &mut BTreeMap<String, Vec<ProcessNote>>,
-    ) -> SecretValues {
+    ) -> ReadSecrets {
         let mut values = SecretValues::default();
+        let mut notes: BTreeMap<String, Vec<ProcessNote>> = BTreeMap::new();
+        let mut unread = BTreeMap::new();
         let units: Vec<UnitSecrets> = self
             .unit_secrets(workspace, id, manifest, order)
             .into_iter()
             .filter(|unit| !withheld.iter().any(|failure| failure.unit == unit.unit()))
             .collect();
         if units.is_empty() {
-            return values;
+            return ReadSecrets::default();
         }
         let (scope, _) = grant_scope(workspace, id);
         let granted = self.phase.secrets_granted(&scope);
@@ -783,14 +786,20 @@ impl Runs {
         let resolvers: Vec<&dyn starmap_resolve::Resolver> =
             stores.iter().map(AsRef::as_ref).collect();
         for unit in &units {
+            let Some(app) = app(unit.unit()) else {
+                continue;
+            };
+            if left_alone.contains(&app) {
+                if let Some(variable) = unit.names().next() {
+                    unread.insert(app, variable.to_owned());
+                }
+                continue;
+            }
             // The units are in start order, so `withheld` already names
             // each unit that this one depends on and that lacks a secret.
             if blocked(manifest, order, withheld).contains_key(unit.unit()) {
                 continue;
             }
-            let Some(app) = app(unit.unit()) else {
-                continue;
-            };
             let reads = unit.reads();
             let allowed: Vec<SecretRead> = match &granted {
                 Ok(granted) => {
@@ -817,7 +826,7 @@ impl Runs {
             let deadline = clock::now() + SECRET_WAIT;
             match unit.resolve(id, &resolvers, &allowed, deadline, manifest) {
                 Resolved::Ready {
-                    values: read,
+                    values: found,
                     notes: fell_back,
                 } => {
                     if !fell_back.is_empty() {
@@ -826,11 +835,27 @@ impl Runs {
                             .or_default()
                             .extend(fell_back);
                     }
-                    values.insert(app, read);
+                    values.insert(app, found);
                 }
                 Resolved::Failed(failure) => withheld.push(failure),
             }
         }
-        values
+        ReadSecrets {
+            values,
+            notes,
+            unread,
+        }
     }
+}
+
+/// What [`Runs::read_secrets`] read for one `up`.
+#[derive(Default)]
+pub(super) struct ReadSecrets {
+    /// The values of each unit that was read.
+    pub(super) values: SecretValues,
+    /// A warning for each variable that fell back, under its unit.
+    pub(super) notes: BTreeMap<String, Vec<ProcessNote>>,
+    /// The apps whose secrets were not read because phase leaves them
+    /// running, each with one secret variable it declares.
+    pub(super) unread: BTreeMap<AppName, String>,
 }

@@ -279,6 +279,7 @@ fn the_plan_names_each_secret_and_generated_variable_as_optional_and_gives_it_no
         &WithSecrets {
             manifest: &built.environment,
             secrets: &SecretValues::default(),
+            unread: &BTreeMap::new(),
         },
         "dispatcher",
     );
@@ -350,6 +351,7 @@ fn a_granted_reference_is_read_and_reaches_the_process_through_the_source() {
     let environment = WithSecrets {
         manifest: &built.environment,
         secrets: &secrets,
+        unread: &BTreeMap::new(),
     };
     let applied = applied(&environment, "dispatcher");
     assert_eq!(
@@ -489,6 +491,7 @@ fn the_digest_of_a_process_changes_with_a_secret_value() {
         WithSecrets {
             manifest: &built.environment,
             secrets: &secrets,
+            unread: &BTreeMap::new(),
         }
         .resolve(&app, &process, Instant::now())
         .unwrap()
@@ -543,4 +546,27 @@ fn units_whose_names_starmap_writes_alike_keep_separate_keychain_accounts() {
     assert_ne!(keychain_app("Web"), keychain_app("web"));
     assert!(keychain_app("web_api").as_str().starts_with("web-api-"));
     assert!(keychain_app("2fa").as_str().starts_with("app-2fa-"));
+}
+
+#[test]
+fn an_app_whose_secrets_mxv_did_not_read_is_refused_an_environment() {
+    let built = plan(&dispatcher_spec());
+    let app = AppName::try_from("dispatcher".to_owned()).unwrap();
+    let process = ProcessName::try_from(MAIN.to_owned()).unwrap();
+    let unread = BTreeMap::from([(app.clone(), "CLIENT_SECRET".to_owned())]);
+    let environment = WithSecrets {
+        manifest: &built.environment,
+        secrets: &SecretValues::default(),
+        unread: &unread,
+    };
+
+    let refused = environment.resolve(&app, &process, Instant::now());
+
+    let Err(error) = refused else {
+        panic!("phase would start the app without its secrets");
+    };
+    assert_eq!(error.resolver(), "mxv");
+    assert_eq!(error.variable(), "CLIENT_SECRET");
+    let why = std::error::Error::source(&error).unwrap().to_string();
+    assert!(why.contains("run `mxv up` again"), "{why}");
 }

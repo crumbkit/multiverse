@@ -818,6 +818,12 @@ pub(crate) struct WithSecrets<'a> {
     pub(crate) manifest: &'a ManifestEnvironment,
     /// The secrets.
     pub(crate) secrets: &'a SecretValues,
+    /// The apps whose secrets mxv did not read, because phase was to leave
+    /// them running, each with one secret variable it declares. phase
+    /// resolves an environment for such an app only when its process ended
+    /// after mxv asked, and then the app is refused, so that `up` fails and
+    /// the next `up` reads its secrets.
+    pub(crate) unread: &'a BTreeMap<AppName, String>,
 }
 
 impl EnvironmentSource for WithSecrets<'_> {
@@ -827,6 +833,16 @@ impl EnvironmentSource for WithSecrets<'_> {
         process: &ProcessName,
         deadline: Instant,
     ) -> Result<Box<dyn AppliedEnvironment>, EnvironmentError> {
+        if let Some(variable) = self.unread.get(app) {
+            return Err(EnvironmentError::new(
+                variable.clone(),
+                "mxv".to_owned(),
+                format!(
+                    "mxv read no secret of {app}, because it was running when `up` began; run `mxv up` again to read them"
+                )
+                .into(),
+            ));
+        }
         let base = self.manifest.resolve(app, process, deadline)?;
         let secrets = self
             .secrets
