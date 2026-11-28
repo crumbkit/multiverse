@@ -946,13 +946,22 @@ impl Runs {
         };
         // Each unit's secrets are read before phase starts anything, so a
         // unit whose required secret has no value is left out, with the
-        // units that depend on it, and every other unit starts.
+        // units that depend on it, and every other unit starts. phase
+        // resolves no environment for a unit that it leaves running, so
+        // its secrets are not read. When phase cannot say which units it
+        // leaves running, every unit's secrets are read.
+        let left_alone = self.phase.left_alone(&built.plan).unwrap_or_default();
+        let to_read: Vec<String> = order
+            .iter()
+            .filter(|name| app(name).is_none_or(|app| !left_alone.contains(&app)))
+            .cloned()
+            .collect();
         let mut fell_back = BTreeMap::new();
         let secrets = self.read_secrets(
             workspace,
             &id,
             manifest,
-            &order,
+            &to_read,
             &mut withheld,
             &mut fell_back,
         );
@@ -1093,13 +1102,22 @@ impl Runs {
             .iter()
             .filter_map(|name| {
                 let needs = blocked.get(name)?;
-                let mut status =
-                    Self::phase_unit_status(workspace, Some(manifest), name, rows.get(name));
+                let row = rows.get(name);
+                let mut status = Self::phase_unit_status(workspace, Some(manifest), name, row);
+                // A unit that already ran is left as it was, and keeps
+                // running.
+                let message = if row.is_some_and(|row| row.state.may_run()) {
+                    format!(
+                        "kept running as it was, because it depends on {needs}, which did not start for want of a secret"
+                    )
+                } else {
+                    format!(
+                        "did not start, because it depends on {needs}, which did not start for want of a secret"
+                    )
+                };
                 status.notes.push(ProcessNote::NotStarted {
                     needs: needs.clone(),
-                    message: format!(
-                        "did not start, because it depends on {needs}, which did not start for want of a secret"
-                    ),
+                    message,
                 });
                 Some(status)
             })

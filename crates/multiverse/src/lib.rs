@@ -89,8 +89,8 @@ pub use crate::merged::{GitHub, HELPER_DEADLINE, PullRequests, Verdict, update_b
 pub use crate::mirror::RepoOrigin;
 pub use crate::name::{BadName, MOST_NAME_BYTES, WorkspaceName};
 pub use crate::phase_plan::secrets::{
-    AskedSecret, KEYCHAIN, ONE_PASSWORD, SECRET_WAIT, SecretFailure, SecretProblem, SecretSource,
-    forget_keychain, keychain_service,
+    AskedSecret, KEYCHAIN, KeychainItem, ONE_PASSWORD, SECRET_WAIT, SecretFailure, SecretProblem,
+    SecretSource, forget_keychain, keychain_service,
 };
 pub use crate::phase_plan::{
     CallerEnvironment, MAIN, PASSED_THROUGH, PHASE_SETS, ProvidedBind, RefusedBind, RefusedBinds,

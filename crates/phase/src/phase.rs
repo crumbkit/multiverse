@@ -312,6 +312,23 @@ impl Phase {
             .up(plan, select, env, deadlines, cancel)
     }
 
+    /// Returns the host apps of `plan` that [`Phase::up`] would leave
+    /// alone, because each of their processes runs as phase's own from the
+    /// current part of the plan. `up` resolves no environment for them, so
+    /// a host program can skip reading their secrets. A process that ends
+    /// between this call and `up` makes `up` start it, and resolve its
+    /// environment then. It takes the lifecycle lock while it reads and
+    /// writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PhaseError::Busy`] when another operation holds the lock,
+    /// the errors of reading the run record, and
+    /// [`PhaseError::ProcessTable`] when phase cannot read processes.
+    pub fn left_alone(&self, plan: &Plan) -> Result<BTreeSet<AppName>, PhaseError> {
+        self.engine(&self.containers()).left_alone(plan)
+    }
+
     /// Resolves the environment of the selected processes of `plan` that
     /// run again through `env`, then stops each one and starts it with its
     /// new environment, before `deadline`. A selected app with no running

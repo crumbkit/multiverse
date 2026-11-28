@@ -1219,7 +1219,9 @@ fn fmt_not_granted(
 /// workspace `workspace`. Only a person at a terminal can grant a
 /// reference, because `up` asks there. A store that could not give the
 /// value is signed in to with the `sign_in` of the matching `[secrets.*]`
-/// table when there is one.
+/// table when there is one. A secret without a bind is saved in the login
+/// Keychain with the `security` command that names its service and
+/// account, which asks for the value.
 fn secret_recovery(workspace: &str, failure: &SecretFailure) -> Recovery {
     let up = Call::new(&["up"])
         .value("workspace", workspace)
@@ -1227,6 +1229,20 @@ fn secret_recovery(workspace: &str, failure: &SecretFailure) -> Recovery {
     match (&failure.problem, &failure.sign_in) {
         (SecretProblem::NotGranted, _) => Recovery::Terminal(up),
         (_, Some(sign_in)) => Recovery::after(format!("sign in with `{sign_in}`"), Then::Run(up)),
+        (_, None) if failure.keychain.is_some() => {
+            let save = failure
+                .keychain
+                .as_ref()
+                .map(multiverse::KeychainItem::save_command)
+                .unwrap_or_default();
+            Recovery::after(
+                format!(
+                    "save the value of {} in the login Keychain with `{save}`, which asks for it, and allow mxv to read it if the Keychain asks",
+                    failure.variable
+                ),
+                Then::Run(up),
+            )
+        }
         (_, None) => Recovery::after(
             format!(
                 "make {} give the value of {}",
@@ -1240,7 +1256,8 @@ fn secret_recovery(workspace: &str, failure: &SecretFailure) -> Recovery {
 
 /// Returns the fields of [`RunFailure::Secret`]: the workspace, the unit,
 /// the variable, its store and reference, the file that declares it, and
-/// the matching `sign_in` when there is one. None holds a value.
+/// the matching `sign_in` when there is one, and the Keychain service and
+/// account of a secret without a bind. None holds a value.
 fn secret_fields<'a>(workspace: &'a str, failure: &'a SecretFailure) -> Vec<Field<'a>> {
     let mut fields = vec![
         Field::new("workspace", workspace),
@@ -1255,6 +1272,10 @@ fn secret_fields<'a>(workspace: &'a str, failure: &'a SecretFailure) -> Vec<Fiel
     if let Some(sign_in) = &failure.sign_in {
         fields.push(Field::new("sign_in", sign_in));
     }
+    if let Some(item) = &failure.keychain {
+        fields.push(Field::new("keychain_service", &item.service));
+        fields.push(Field::new("keychain_account", &item.account));
+    }
     fields
 }
 
@@ -1268,10 +1289,14 @@ fn fmt_secret(formatter: &mut fmt::Formatter<'_>, failure: &SecretFailure) -> fm
         problem,
         ..
     } = failure;
-    let from = source.reference().map_or_else(
-        || format!("the Keychain item of {variable}"),
-        |reference| format!("{reference} in {}", source.store()),
-    );
+    let from = match (source.reference(), &failure.keychain) {
+        (Some(reference), _) => format!("{reference} in {}", source.store()),
+        (None, Some(item)) => format!(
+            "the login Keychain item of service {} and account {}",
+            item.service, item.account
+        ),
+        (None, None) => format!("the Keychain item of {variable}"),
+    };
     match problem {
         SecretProblem::NotGranted => write!(
             formatter,

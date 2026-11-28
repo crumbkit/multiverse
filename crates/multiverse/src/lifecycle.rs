@@ -297,7 +297,9 @@ impl<'a, B> Lifecycle<'a, B> {
     /// Returns these commands with `forget` as the deletion of a removed
     /// workspace's generated and saved secrets, such as
     /// [`crate::forget_keychain`]. A removal calls it after it stops the
-    /// units and before it deletes the checkouts and the record.
+    /// units and before it deletes the checkouts and the record, and an
+    /// archive's deletion calls it before it deletes the archive's record,
+    /// unless a live workspace has the archive's stable id.
     #[must_use]
     pub const fn with_forget(mut self, forget: Forget) -> Self {
         self.forget = forget;
@@ -439,9 +441,13 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// When `asked` names docker volumes, it refuses while a live workspace
     /// has the archive's stable id, and refuses when docker holds a volume of
     /// the archive that `asked` did not name. Then it deletes those volumes,
-    /// the pins and the record, in that order, so the record that holds the
-    /// volumes' stable id stays until they are gone, and a failure can be
-    /// tried again. An archive that holds the mark of a restore that died,
+    /// the workspace's generated and saved secrets through the deletion that
+    /// [`Lifecycle::with_forget`] gave, the pins and the record, in that
+    /// order, so the record that holds the stable id stays until the
+    /// volumes and the secrets are gone, and a failure can be tried again.
+    /// The secrets stay when a live workspace has the archive's stable id,
+    /// as after a restore that left its archive's record, because they are
+    /// that workspace's. An archive that holds the mark of a restore that died,
     /// with no workspace of the name, has what that restore made deleted
     /// before its record goes, because the mark goes with the record.
     ///
@@ -455,8 +461,10 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
     /// anything, when the archive holds the mark of a stopped restore whose
     /// directory holds an entry that the mark does not account for, as
     /// [`Lifecycle::check_stopped_restore`] says. Returns the errors of the
-    /// archive's record, of docker, and of [`Workspaces::remove_archive`];
-    /// when one of those fails, the deletions before it stay done.
+    /// archive's record, of docker, of the deletion of the secrets, such as
+    /// [`Error::KeychainRefused`], which keeps the archive, and of
+    /// [`Workspaces::remove_archive`]; when one of those fails, the
+    /// deletions before it stay done.
     pub fn delete_archive_held(
         &self,
         lock: &WorkspaceLock,
@@ -502,6 +510,13 @@ impl<B: crate::backend::Backend> Lifecycle<'_, B> {
             }
         }
         (self.workspaces.checkpoint)("volumes")?;
+        // The record holds the only copy of the stable id, so the secrets go
+        // before it, and a Keychain that refuses keeps the archive.
+        if let Some(id) = &archive.workspace_id
+            && self.volumes_in_use(&archive)?.is_none()
+        {
+            (self.forget)(id)?;
+        }
         // A restore that died leaves what its mark lists, and the mark goes
         // with the record, so it is undone first. A workspace that holds the
         // name means the restore finished, and the mark is stale.

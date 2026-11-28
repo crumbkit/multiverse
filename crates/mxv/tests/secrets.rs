@@ -6,7 +6,9 @@
 //! The tests read no real store. A fake `op` program, first on `PATH`,
 //! answers each 1Password read with a fake value or fails, and logs each
 //! run, so a test can tell that mxv never ran it. No test declares a
-//! generated variable, which would write to the login Keychain.
+//! generated variable, which would write to the login Keychain. One test
+//! declares a secret without a bind, which mxv only reads from the
+//! Keychain, under the service of a new workspace that holds no item.
 
 #![cfg(test)]
 #![expect(
@@ -92,6 +94,12 @@ impl Setup {
     /// Returns the setup, whose fake `op` gives [`FAKE_VALUE`] when `works`
     /// and otherwise fails as an `op` that is not signed in does.
     fn new(works: bool) -> Self {
+        Self::with_spec(works, SPEC)
+    }
+
+    /// Returns the setup of [`Setup::new`] whose dispatcher's starmap file
+    /// is `spec`.
+    fn with_spec(works: bool, spec: &str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let setup = Self {
             dir,
@@ -102,7 +110,7 @@ impl Setup {
         fs::create_dir_all(config.parent().unwrap()).unwrap();
         write_text(&config, &setup.ports.config_line());
         setup.fake_op(works);
-        setup.repository();
+        setup.repository(spec);
         let (exit, document) = setup.json(&["new", "triage", "--repo", "dispatch"]);
         assert_eq!(exit, 0, "{document}");
         setup
@@ -146,13 +154,13 @@ impl Setup {
 
     /// Makes the clone `dispatch` of a bare origin `dispatch.git`, whose
     /// one commit on `main` holds the manifest and the dispatcher's starmap
-    /// file.
-    fn repository(&self) {
+    /// file `spec`.
+    fn repository(&self, spec: &str) {
         let root = self.root();
         let seed = root.join("dispatch-seed");
         fs::create_dir_all(&seed).unwrap();
         git(&seed, &["init", "--quiet", "--initial-branch=main"]);
-        for (path, text) in [("mxv.toml", MANIFEST), ("dispatcher/starmap.toml", SPEC)] {
+        for (path, text) in [("mxv.toml", MANIFEST), ("dispatcher/starmap.toml", spec)] {
             fs::create_dir_all(seed.join(path).parent().unwrap()).unwrap();
             write_text(&seed.join(path), text);
             git(&seed, &["add", path]);
@@ -383,4 +391,74 @@ fn a_store_that_cannot_read_a_granted_secret_fails_its_unit_with_the_sign_in_of_
     );
     assert_eq!(row(&document, "notes")["state"], "running", "{document}");
     assert!(setup.op_log().exists(), "mxv did not run op");
+}
+
+#[test]
+fn a_repeat_up_reads_no_secret_of_a_unit_that_runs_and_reports_it_running() {
+    let setup = Setup::new(true);
+    setup.grant_secrets();
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+    assert_eq!(exit, 0, "{document}");
+    // The store signs out, and the log starts again, so a second read
+    // would show and would fail.
+    setup.fake_op(false);
+    fs::remove_file(setup.op_log()).unwrap();
+
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 0, "{document}");
+    assert_eq!(document["failures"], Value::Array(Vec::new()), "{document}");
+    for name in ["dispatcher", "web", "notes"] {
+        let row = row(&document, name);
+        assert_eq!(row["state"], "running", "{document}");
+        assert!(
+            !row["notes"].to_string().contains("did not start"),
+            "{document}"
+        );
+    }
+    assert!(
+        !setup.op_log().exists(),
+        "mxv ran op for a unit that already runs"
+    );
+}
+
+/// A dispatcher's starmap file whose one variable is a required secret
+/// without a bind, which only the login Keychain can hold.
+const SAVED_SPEC: &str = r#"[variables.API_TOKEN]
+purpose = "The token that the dispatcher calls its partner with."
+type = "string"
+unset = "required"
+show = "withheld"
+source = "secret"
+"#;
+
+#[test]
+fn a_saved_secret_that_the_keychain_lacks_names_the_security_command_that_saves_it() {
+    // The workspace's stable id is new, so the Keychain holds no item of
+    // its service, and the test only reads.
+    let setup = Setup::with_spec(true, SAVED_SPEC);
+
+    let (exit, document) = setup.json(&["up", "-w", "triage"]);
+
+    assert_eq!(exit, 1, "{document}");
+    let failure = failure(&document);
+    assert_eq!(failure["code"], "mxv::secret::unavailable", "{document}");
+    assert_eq!(failure["fields"]["store"], "keychain", "{document}");
+    let service = failure["fields"]["keychain_service"].as_str().unwrap();
+    assert!(service.starts_with("starmap.mxv-"), "{document}");
+    assert_eq!(
+        failure["fields"]["keychain_account"], "dispatcher/API_TOKEN",
+        "{document}"
+    );
+    let save = format!("security add-generic-password -U -s {service} -a dispatcher/API_TOKEN -w");
+    assert!(
+        failure["recovery"].to_string().contains(&save),
+        "{document}"
+    );
+    assert!(
+        !failure["message"].to_string().contains("starmap run"),
+        "{document}"
+    );
+    assert_eq!(row(&document, "notes")["state"], "running", "{document}");
+    assert!(!setup.op_log().exists(), "mxv ran op for a saved secret");
 }

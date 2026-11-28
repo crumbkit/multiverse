@@ -12,8 +12,8 @@ use starmap_resolve::{Lookup, Resolver, SecretError};
 use tempfile::TempDir;
 
 use super::{
-    ProcessNote, Resolved, SecretProblem, SecretSource, SecretValues, UnitSecrets, WithSecrets,
-    keychain_service, of_unit,
+    KeychainItem, ProcessNote, Resolved, SecretProblem, SecretSource, SecretValues, UnitSecrets,
+    WithSecrets, keychain_app, keychain_service, of_unit,
 };
 use crate::manifest::Manifest;
 use crate::name::WorkspaceName;
@@ -497,4 +497,50 @@ fn the_digest_of_a_process_changes_with_a_secret_value() {
 
     assert_ne!(digest("fake-one"), digest("fake-two"));
     assert_eq!(digest("fake-one"), digest("fake-one"));
+}
+
+#[test]
+fn a_saved_secret_that_the_keychain_lacks_names_the_item_and_the_command_that_saves_it() {
+    let spec = variable("API_TOKEN", "source = \"secret\"", "\"required\"");
+    let (unit, _dir) = dispatcher(&spec);
+
+    let Resolved::Failed(failure) = resolve_with(&unit, &Fake::default(), &[]) else {
+        panic!("the Keychain holds no saved value");
+    };
+
+    assert_eq!(failure.source, SecretSource::Saved);
+    let service = keychain_service(&id());
+    let item = KeychainItem {
+        service: service.clone(),
+        account: "dispatcher/API_TOKEN".to_owned(),
+    };
+    assert_eq!(failure.keychain.as_ref(), Some(&item));
+    assert_eq!(
+        item.save_command(),
+        format!("security add-generic-password -U -s {service} -a dispatcher/API_TOKEN -w")
+    );
+}
+
+#[test]
+fn a_secret_from_a_reference_names_no_keychain_item() {
+    let (unit, _dir) = dispatcher(&dispatcher_spec());
+    let fake = Fake {
+        failing: true,
+        ..Fake::default()
+    };
+
+    let Resolved::Failed(failure) = resolve_with(&unit, &fake, &granted()) else {
+        panic!("the store is locked");
+    };
+
+    assert_eq!(failure.keychain, None);
+}
+
+#[test]
+fn units_whose_names_starmap_writes_alike_keep_separate_keychain_accounts() {
+    assert_eq!(keychain_app("web-api").as_str(), "web-api");
+    assert_ne!(keychain_app("web_api"), keychain_app("web-api"));
+    assert_ne!(keychain_app("Web"), keychain_app("web"));
+    assert!(keychain_app("web_api").as_str().starts_with("web-api-"));
+    assert!(keychain_app("2fa").as_str().starts_with("app-2fa-"));
 }

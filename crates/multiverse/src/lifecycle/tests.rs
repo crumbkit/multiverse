@@ -582,6 +582,120 @@ fn deleting_an_archive_whose_state_is_not_archived_changes_nothing() {
     assert!(!setup.pins_of(&archive).is_empty());
 }
 
+thread_local! {
+    /// The ids that the test's archive forget was given, each with whether
+    /// the archive's record still existed when it ran.
+    static ARCHIVE_FORGOTTEN: RefCell<Vec<(phase::WorkspaceId, bool)>> = const { RefCell::new(Vec::new()) };
+    /// The archives that the test's archive forget reads the record from.
+    static FORGET_ARCHIVES: RefCell<Option<Archives>> = const { RefCell::new(None) };
+}
+
+/// Notes the id it is given and whether the archive's record still exists.
+fn note_archive_forget(id: &phase::WorkspaceId) -> Result<usize, Error> {
+    let exists = FORGET_ARCHIVES.with(|archives| {
+        archives
+            .borrow()
+            .as_ref()
+            .is_some_and(|archives| archives.read(&name()).unwrap().is_some())
+    });
+    ARCHIVE_FORGOTTEN.with(|seen| seen.borrow_mut().push((id.clone(), exists)));
+    Ok(1)
+}
+
+impl Setup {
+    /// Makes the test's archive forget read this setup's archives.
+    fn watch_archive_forget(&self) {
+        FORGET_ARCHIVES.with(|archives| {
+            *archives.borrow_mut() = Some(Archives::new(
+                self.base.join("archives"),
+                self.base.join("data/archives"),
+            ));
+        });
+        ARCHIVE_FORGOTTEN.with(|seen| seen.borrow_mut().clear());
+    }
+}
+
+#[test]
+fn deleting_an_archive_deletes_the_workspaces_secrets_by_its_stable_id_before_its_record() {
+    let setup = fresh();
+    let workspace = setup.create();
+    let id = workspace
+        .id
+        .clone()
+        .expect("a new workspace has a stable id");
+    let archive = setup.archive();
+    setup.watch_archive_forget();
+
+    let outcome = setup
+        .lifecycle()
+        .with_forget(note_archive_forget)
+        .delete_archive(&archive, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
+    assert_eq!(
+        ARCHIVE_FORGOTTEN.with(|seen| seen.borrow().clone()),
+        [(id, true)]
+    );
+    assert_eq!(setup.archive_record(), None);
+}
+
+#[test]
+fn deleting_the_archive_that_a_finished_restore_left_keeps_the_restored_workspaces_secrets() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+    // A restore that stops after it writes the workspace's record leaves
+    // the archive's record, which `mxv restore` then deletes as stale.
+    let planned = setup
+        .workspaces
+        .plan_restore(&setup.archives, &name(), RestoreOptions::default())
+        .unwrap();
+    let RestorePlanned::Ready(plan) = planned else {
+        panic!("{planned:?}");
+    };
+    stop_at("record");
+    let stopped = setup
+        .workspaces
+        .restore(&setup.archives, *plan, &setup.runs);
+    assert!(stopped.is_err(), "{stopped:?}");
+    HOOK.with(|hook| *hook.borrow_mut() = None);
+    assert!(setup.workspaces.store.read(&name()).unwrap().is_some());
+    let stale = setup.archive_record().expect("the stale archive stays");
+    assert_eq!(stale.id, archive.id);
+    setup.watch_archive_forget();
+    let lock = setup.runs.lock(&name()).unwrap();
+
+    let outcome = setup
+        .lifecycle()
+        .with_forget(note_archive_forget)
+        .delete_archive_held(&lock, &stale, &VolumesAsked::default())
+        .unwrap();
+
+    assert!(matches!(outcome, ArchiveDeleted::Done(_)), "{outcome:?}");
+    assert_eq!(ARCHIVE_FORGOTTEN.with(|seen| seen.borrow().clone()), []);
+    drop(lock);
+}
+
+#[test]
+fn a_keychain_that_refuses_keeps_the_archive_so_its_deletion_can_run_again() {
+    let setup = fresh();
+    setup.create();
+    let archive = setup.archive();
+
+    let outcome = setup
+        .lifecycle()
+        .with_forget(refuse_forget)
+        .delete_archive(&archive, &VolumesAsked::default());
+
+    assert!(
+        matches!(outcome, Err(Error::KeychainRefused { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(setup.archive_record().as_ref(), Some(&archive));
+    assert!(!setup.pins_of(&archive).is_empty());
+}
+
 #[test]
 fn a_held_deletion_runs_under_the_lock_of_its_caller_without_taking_it_again() {
     let setup = fresh();

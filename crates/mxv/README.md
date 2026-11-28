@@ -907,8 +907,25 @@ that process:
   otherwise. mxv never starts the agent. `op` receives mxv's own
   environment, so `OP_ACCOUNT`, `OP_SERVICE_ACCOUNT_TOKEN` and a session
   that `op signin` printed reach it; no process receives them.
-- A secret without a bind is read from the login Keychain, where `starmap
-  run` saves a value that a person typed.
+- A secret without a bind is read from the login Keychain, where a person
+  saves it once for each workspace. The item is a generic password whose
+  service is `starmap.mxv-<workspace id>` and whose account is
+  `<unit>/<NAME>`. When the Keychain lacks it, `up` fails the unit with
+  `mxv::secret::unavailable`, whose fields `keychain_service` and
+  `keychain_account` name the item and whose recovery names the command
+  that saves it:
+
+  ```sh
+  security add-generic-password -U -s starmap.mxv-<workspace id> -a <unit>/<NAME> -w
+  ```
+
+  `security` asks for the value because `-w` comes last, so the value never
+  appears on a command line. The Keychain asks once whether mxv may read an
+  item that `security` saved; allow it. A unit whose name is not already
+  lower case letters, digits and hyphens, such as `web_api`, has an account
+  of its name in those characters with a short hash of the name after it,
+  so two units whose names differ only in such characters keep separate
+  values; the recovery names the exact account.
 - A generated variable is created in the login Keychain on first use and
   read from there afterwards.
 
@@ -918,7 +935,10 @@ two workspaces of one repository hold separate values. `mxv remove` deletes
 the items before it deletes the record, and a Keychain that refuses fails
 the removal with `mxv::keychain::refused` and keeps the workspace, so the
 removal can run again. `mxv archive` keeps the items, so `mxv restore`
-finds them. The Keychain exists only on macOS; elsewhere a secret without a
+finds them, and `mxv remove --archived` deletes them before it deletes the
+archive, in the same way. A repeat `mxv up` reads no secret of a unit that
+already runs from the current plan, because phase leaves that unit as it
+is. The Keychain exists only on macOS; elsewhere a secret without a
 bind and a generated variable are unavailable.
 
 mxv reads a 1Password reference for a unit only after a person granted it.

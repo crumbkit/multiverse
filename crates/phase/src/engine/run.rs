@@ -200,6 +200,57 @@ impl Engine<'_> {
         op.restart(&chosen)
     }
 
+    /// Returns the host apps of `plan` that `up` would leave alone: every
+    /// process of the app is a long-running one that phase's record names
+    /// as running and as its own, and the entry records the hash of the
+    /// process's current part of the plan. `up` resolves no environment for
+    /// such an app, so a caller can skip reading its values. A oneshot, a
+    /// process left stopping, and one whose group phase cannot vouch for
+    /// leave their app out. It takes the lifecycle lock while it reads the
+    /// record and writes nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors of taking the lock, of reading the record and of
+    /// reading the process table.
+    pub(crate) fn left_alone(&self, plan: &Plan) -> Result<BTreeSet<AppName>, PhaseError> {
+        let store = RunStore::new(self.settings.state_dir);
+        let journal = Journal::open(&store, plan.id(), self.settings.lock_wait)?;
+        let cancel = Cancel::new();
+        let at = now();
+        let op = Op {
+            engine: self,
+            workspace: plan.id().clone(),
+            plan_hash: PlanHash::new(plan.digest()),
+            journal,
+            env: &Unresolved,
+            deadlines: UpDeadlines::new(at, at),
+            cancel: &cancel,
+            started: Vec::new(),
+            ports: app_ports(plan),
+            workspace_paths: plan.workspace_paths().clone(),
+        };
+        let mut left = BTreeSet::new();
+        for app in plan.apps() {
+            if app.runner != RunnerKind::Host || app.processes.is_empty() {
+                continue;
+            }
+            let mut alone = true;
+            for process in &app.processes {
+                alone = !matches!(process.kind, ProcessKind::Oneshot { .. })
+                    && matches!(op.recorded(app, process)?, Recorded::Ours)
+                    && op.drift(app, process).is_none();
+                if !alone {
+                    break;
+                }
+            }
+            if alone {
+                left.insert(app.name.clone());
+            }
+        }
+        Ok(left)
+    }
+
     /// Stops the selected apps of `workspace` in reverse dependency order,
     /// as the `stop` module says.
     ///
@@ -2009,5 +2060,24 @@ pub(crate) fn watch(until: Instant, ended: &mut dyn FnMut() -> bool, cancel: &Ca
             return Outcome::Ready;
         }
         pause(POLL_INTERVAL.min(left));
+    }
+}
+
+/// The environment of [`Engine::left_alone`], which starts nothing and so
+/// resolves nothing.
+struct Unresolved;
+
+impl EnvironmentSource for Unresolved {
+    fn resolve(
+        &self,
+        _app: &AppName,
+        process: &ProcessName,
+        _deadline: Instant,
+    ) -> Result<Box<dyn AppliedEnvironment>, crate::env::EnvironmentError> {
+        Err(crate::env::EnvironmentError::new(
+            process.to_string(),
+            "phase".to_owned(),
+            "phase resolves no environment when it only reads which apps up leaves alone".into(),
+        ))
     }
 }

@@ -866,3 +866,51 @@ fn a_restart_records_the_part_of_the_plan_so_the_next_up_leaves_the_process_alon
     assert_eq!(pid(&world, "api/server"), restarted);
     assert_eq!(world.host.launches().len(), 2);
 }
+
+#[test]
+fn left_alone_names_a_running_host_app_whose_part_of_the_plan_is_unchanged() {
+    let world = World::outside_temp();
+    world
+        .up(
+            &plan(vec![host_app("api", None, &[])]),
+            &Selection::All,
+            &Env::default(),
+        )
+        .unwrap();
+    let both = plan(vec![host_app("api", None, &[]), host_app("web", None, &[])]);
+
+    let left = world.engine().left_alone(&both).unwrap();
+
+    assert_eq!(left, [name("api")].into());
+    assert!(world.host.stops().is_empty());
+    assert_eq!(world.host.launches(), vec!["api/server"]);
+}
+
+#[test]
+fn left_alone_leaves_out_a_running_host_app_whose_part_of_the_plan_changed() {
+    let world = World::outside_temp();
+    world
+        .up(
+            &plan(vec![host_app("api", None, &[])]),
+            &Selection::All,
+            &Env::default(),
+        )
+        .unwrap();
+    let changed = plan(vec![with_permissions(host_app("api", None, &[]))]);
+
+    let left = world.engine().left_alone(&changed).unwrap();
+
+    assert!(left.is_empty(), "{left:?}");
+}
+
+#[test]
+fn left_alone_leaves_out_a_host_app_whose_process_has_gone() {
+    let world = World::outside_temp();
+    let plan = plan(vec![host_app("api", None, &[])]);
+    world.up(&plan, &Selection::All, &Env::default()).unwrap();
+    world.host.state.borrow_mut().alive.clear();
+
+    let left = world.engine().left_alone(&plan).unwrap();
+
+    assert!(left.is_empty(), "{left:?}");
+}

@@ -755,7 +755,10 @@ impl Runs {
     /// `order` that `withheld` does not name, each unit under its own
     /// deadline of [`SECRET_WAIT`], and returns their values. A unit whose
     /// required secret cannot be read is added to `withheld`, and each
-    /// variable that fell back adds a warning to `notes` under its unit.
+    /// variable that fell back adds a warning to `notes` under its unit. A
+    /// unit that depends on a withheld unit will not start, so its secrets
+    /// are not read. The caller leaves out of `order` the units that phase
+    /// leaves running, whose values phase does not read.
     pub(super) fn read_secrets(
         &self,
         workspace: &Workspace,
@@ -780,6 +783,11 @@ impl Runs {
         let resolvers: Vec<&dyn starmap_resolve::Resolver> =
             stores.iter().map(AsRef::as_ref).collect();
         for unit in &units {
+            // The units are in start order, so `withheld` already names
+            // each unit that this one depends on and that lacks a secret.
+            if blocked(manifest, order, withheld).contains_key(unit.unit()) {
+                continue;
+            }
             let Some(app) = app(unit.unit()) else {
                 continue;
             };

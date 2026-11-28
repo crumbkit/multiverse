@@ -5,11 +5,13 @@
 //! bind names a reference, such as a 1Password reference, is read only for
 //! a unit that a person granted that reference to, and a person grants it
 //! once for the repository, the unit and the reference, in phase's secret
-//! grant file. A secret without a bind is read from the Keychain, where
-//! `starmap run` saves a typed secret, and a generated variable is created
-//! in the Keychain on first use. Neither needs a grant, because mxv reads
-//! no reference for them. The Keychain keeps both under the service
-//! `starmap.mxv-<workspace id>`, so two workspaces of one repository hold
+//! grant file. A secret without a bind is read from the login Keychain,
+//! where a person saves it with `security add-generic-password` under the
+//! service and account that its [`SecretFailure::keychain`] names, and a
+//! generated variable is created in the Keychain on first use. Neither
+//! needs a grant, because mxv reads no reference for them. The Keychain
+//! keeps both under the service `starmap.mxv-<workspace id>` and the
+//! account `<unit>/<NAME>`, so two workspaces of one repository hold
 //! separate values, and `mxv remove` deletes them with [`forget_keychain`].
 //!
 //! [`UnitSecrets::resolve`] reads a unit's values through starmap-resolve
@@ -17,9 +19,11 @@
 //! The values stay in memory, in [`SecretValues`], until phase starts the
 //! unit through [`WithSecrets`], the environment source that adds them to
 //! the manifest's own. A value that cannot be read leaves only its unit
-//! out: a variable that declares a default takes the default, one that is
-//! optional stays unset, each with a warning, and any other fails the unit
-//! with a [`SecretFailure`].
+//! out: a variable that is optional stays unset, with a warning, and any
+//! other fails the unit with a [`SecretFailure`]. starmap 0.4.3 refuses a
+//! default on a secret or generated variable, so no variable that mxv
+//! reads here takes a default, and the branch of [`Fallback`] that would
+//! give one is not reached.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -91,8 +95,9 @@ pub enum SecretSource {
     },
     /// A random value that the Keychain keeps, created on first use.
     Generated,
-    /// A secret without a bind, which the Keychain keeps once `starmap
-    /// run` saved what a person typed.
+    /// A secret without a bind, which the login Keychain keeps once a
+    /// person saved it under the service and account that
+    /// [`SecretFailure::keychain`] names.
     Saved,
 }
 
@@ -152,6 +157,34 @@ pub struct SecretFailure {
     /// variable, by its name or by a check command that names the
     /// reference, or `None` when no table matches.
     pub sign_in: Option<String>,
+    /// The Keychain item that holds the value of a secret without a bind,
+    /// where a person saves it, or `None` for any other variable.
+    pub keychain: Option<KeychainItem>,
+}
+
+/// The login Keychain item of a secret without a bind: a generic password
+/// whose service and account these are.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct KeychainItem {
+    /// The service, `starmap.mxv-<workspace id>`.
+    pub service: String,
+    /// The account, `<app>/<NAME>`, where the app is
+    /// [`keychain_app`]'s name of the unit.
+    pub account: String,
+}
+
+impl KeychainItem {
+    /// Returns the command that saves the item's value. `security` asks
+    /// for the value when `-w` comes last, so it never reaches a command
+    /// line.
+    #[must_use]
+    pub fn save_command(&self) -> String {
+        format!(
+            "security add-generic-password -U -s {} -a {} -w",
+            self.service, self.account
+        )
+    }
 }
 
 /// One secret that a person is asked to let mxv read: the unit that reads
@@ -179,7 +212,9 @@ enum Fallback {
     Required,
     /// The variable may stay unset.
     Optional,
-    /// The variable takes this default, as its spec writes it.
+    /// The variable takes this default, as its spec writes it. starmap
+    /// 0.4.3 refuses a default on a secret or generated variable, so no
+    /// variable that mxv reads takes this branch.
     Default(Secret),
 }
 
@@ -405,6 +440,7 @@ impl UnitSecrets {
             file: self.file.clone(),
             problem,
             sign_in: sign_in(manifest, declared),
+            keychain: None,
         }
     }
 
@@ -432,9 +468,12 @@ impl UnitSecrets {
             .collect();
         let caller = Bindings::new();
         let workspace = keychain_workspace(id);
-        let app = starmap_resolve::AppName::of_dir(Path::new(&self.unit));
-        let places =
-            Places::new(self.source.clone()).workspace(workspace, app, self.source.clone());
+        let app = keychain_app(&self.unit);
+        let places = Places::new(self.source.clone()).workspace(
+            workspace.clone(),
+            app.clone(),
+            self.source.clone(),
+        );
         let mut context = Context::new(places, &caller, deadline);
         for guard in &guards {
             context = context.resolver(guard);
@@ -470,7 +509,14 @@ impl UnitSecrets {
             };
             match &declared.fallback {
                 Fallback::Required => {
-                    return Resolved::Failed(self.failure(declared, problem, manifest));
+                    let mut failure = self.failure(declared, problem, manifest);
+                    if declared.source == SecretSource::Saved {
+                        failure.keychain = Some(KeychainItem {
+                            service: format!("starmap.{}", workspace.as_str()),
+                            account: format!("{}/{}", app.as_str(), declared.name.as_str()),
+                        });
+                    }
+                    return Resolved::Failed(failure);
                 }
                 Fallback::Default(default) => {
                     values.push((declared.name.as_str().to_owned(), default.duplicate()));
@@ -535,9 +581,7 @@ fn describe(problem: &ResolveProblem, declared: &Declared) -> String {
             "the stores did not answer within {} seconds",
             SECRET_WAIT.as_secs()
         ),
-        ResolveProblem::Unbound => {
-            "the Keychain holds no value saved for it; `starmap run` saves one".to_owned()
-        }
+        ResolveProblem::Unbound => "the login Keychain holds no value saved for it".to_owned(),
         ResolveProblem::NoResolver => "no store reads it".to_owned(),
         // A problem of providers or places, or one that a later
         // starmap-resolve adds, has no words of mxv's own.
@@ -633,6 +677,25 @@ pub(crate) fn keychain_workspace(id: &WorkspaceId) -> starmap_resolve::Workspace
     starmap_resolve::WorkspaceName::from(&app)
 }
 
+/// Returns the app of the unit `unit` in its Keychain accounts. A unit
+/// name that is already an app name is kept. Any other, such as `web_api`,
+/// which starmap would write as `web-api`, gets a suffix of the first 8 hex
+/// digits of the SHA-256 of the name, so units `web_api` and `web-api` of
+/// one workspace keep separate values.
+pub(crate) fn keychain_app(unit: &str) -> starmap_resolve::AppName {
+    let app = starmap_resolve::AppName::of_dir(Path::new(unit));
+    if app.as_str() == unit {
+        return app;
+    }
+    let digest = Sha256::digest(unit.as_bytes());
+    let suffix: String = digest
+        .iter()
+        .take(4)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    starmap_resolve::AppName::of_dir(Path::new(&format!("{}-{suffix}", app.as_str())))
+}
+
 /// Returns the Keychain service of the workspace whose stable id is `id`.
 #[must_use]
 pub fn keychain_service(id: &WorkspaceId) -> String {
@@ -640,8 +703,9 @@ pub fn keychain_service(id: &WorkspaceId) -> String {
 }
 
 /// Deletes the Keychain items of the workspace whose stable id is `id`,
-/// which `mxv remove` calls before it deletes the workspace's record, and
-/// returns how many it deleted. A platform without a Keychain holds none.
+/// which `mxv remove` calls before it deletes the workspace's record and
+/// `mxv remove --archived` calls before it deletes the archive's record,
+/// and returns how many it deleted. A platform without a Keychain holds none.
 ///
 /// # Errors
 ///
