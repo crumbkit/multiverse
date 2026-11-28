@@ -44,6 +44,7 @@ use starmap_resolve::{
 use super::{Inputs, ManifestEnvironment, Unrunnable, UnrunnableKind, placed, provided};
 use crate::error::Error;
 use crate::manifest::{Manifest, Process};
+use crate::needs::{SecretKind, SecretVariable};
 use crate::phase_plan::CallerEnvironment;
 use crate::runs::ProcessNote;
 
@@ -332,6 +333,67 @@ pub(crate) fn of_unit(
         source,
         declared,
     }))
+}
+
+/// What the needs plan records of a unit's secrets: each secret or
+/// generated variable that the unit receives, by name and reference, and
+/// each that its starmap file declares, with its kind.
+#[derive(Debug, Default)]
+pub(crate) struct PlannedSecrets {
+    /// The variables that the unit receives, which [`of_unit`] returns, in
+    /// name order.
+    pub(crate) received: Vec<SecretVariable>,
+    /// Every secret and generated variable of the starmap file, including
+    /// those that the manifest sets in their place.
+    pub(crate) declared: BTreeMap<String, SecretKind>,
+}
+
+/// Returns the secrets of the starmap file of `process`, named `name`, as
+/// the needs plan records them, or none when the plan reads no starmap
+/// file or the process has none.
+///
+/// # Errors
+///
+/// Returns the errors of [`of_unit`].
+pub(crate) fn planned(
+    inputs: &Inputs<'_>,
+    name: &str,
+    process: &Process,
+) -> Result<PlannedSecrets, Unrunnable> {
+    let Some((spec, _)) = provided::spec_of(inputs, name, process)? else {
+        return Ok(PlannedSecrets::default());
+    };
+    let declared = spec
+        .variables()
+        .filter_map(|(variable, declared)| {
+            let kind = match declared.source() {
+                Source::Secret { .. } => SecretKind::Secret,
+                Source::Generated { .. } => SecretKind::Generated,
+                // starmap marks the source non-exhaustive; a source that a
+                // later starmap adds is no secret of mxv's until it learns
+                // it.
+                Source::Setting { .. } | Source::Inherited | Source::Provided(_) | _ => {
+                    return None;
+                }
+            };
+            Some((variable.as_str().to_owned(), kind))
+        })
+        .collect();
+    let mut received: Vec<SecretVariable> = of_unit(inputs, name, process)?
+        .map(|secrets| {
+            secrets
+                .declared
+                .iter()
+                .map(|declared| SecretVariable {
+                    variable: declared.name.as_str().to_owned(),
+                    store: declared.source.store().to_owned(),
+                    reference: declared.source.reference().map(str::to_owned),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    received.sort_by(|left, right| left.variable.cmp(&right.variable));
+    Ok(PlannedSecrets { received, declared })
 }
 
 /// Returns the names of the secret and generated variables of `process`,

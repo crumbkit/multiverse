@@ -34,6 +34,7 @@ use super::{
     Inputs, ProvidedBind, ProxyUrls, RefusedBind, RefusedBinds, Unrunnable, UnrunnableKind, placed,
 };
 use crate::manifest::{Manifest, Process, ReadyCheck, StarmapFound, Unit};
+use crate::needs::{Known, Met, ProvidedVariable};
 use crate::runs::ProcessNote;
 
 #[cfg(test)]
@@ -129,11 +130,7 @@ impl Place {
     /// Returns the errors of [`placed`].
     fn of(inputs: &Inputs<'_>, name: &str, process: &Process) -> Result<Self, Unrunnable> {
         let (source, _) = placed(inputs, name, process)?;
-        let roots = inputs.roots.split_last().map_or(&[][..], |(_, rest)| rest);
-        let folder = |path: &Path| {
-            path.file_name()
-                .map(|folder| folder.to_string_lossy().into_owned())
-        };
+        let roots = checkout_roots(inputs);
         let checkouts: Vec<String> = roots.iter().filter_map(|root| folder(root)).collect();
         let own = roots
             .iter()
@@ -172,6 +169,44 @@ impl Place {
                 .unwrap_or(merged),
             Some(_) | None => merged,
         }
+    }
+}
+
+/// Returns the roots of `inputs` that are checkouts: every root but the
+/// last, which is the workspace's own directory, as [`super::roots`] lists
+/// them.
+fn checkout_roots<'r>(inputs: &'r Inputs<'_>) -> &'r [PathBuf] {
+    inputs.roots.split_last().map_or(&[][..], |(_, rest)| rest)
+}
+
+/// Returns the folder of the directory `path`, its last name.
+fn folder(path: &Path) -> Option<String> {
+    path.file_name()
+        .map(|folder| folder.to_string_lossy().into_owned())
+}
+
+/// Returns what the workspace of `inputs` has: the folders of its
+/// checkouts, and each unit of its manifest with the ports it uses, which
+/// each met variable of the needs plan must name.
+pub(super) fn known(inputs: &Inputs<'_>) -> Known {
+    let manifest = inputs.manifest;
+    Known {
+        checkouts: checkout_roots(inputs)
+            .iter()
+            .filter_map(|root| folder(root))
+            .collect(),
+        ports: manifest
+            .processes
+            .keys()
+            .chain(manifest.containers.keys())
+            .filter_map(|name| {
+                let ports = unit_ports(manifest.unit(name)?)
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
+                Some((name.clone(), ports))
+            })
+            .collect(),
     }
 }
 
@@ -725,7 +760,7 @@ fn check_spec(
 }
 
 /// The provided variables of a process: the value of each by variable
-/// name, and those that the plan leaves unset.
+/// name, those that the plan leaves unset, and how the plan met each.
 #[derive(Debug, Default)]
 pub(super) struct Provided {
     /// The value of each variable that resolved, by variable name.
@@ -733,6 +768,9 @@ pub(super) struct Provided {
     /// The variables that the plan leaves unset, because each is optional
     /// and its bind names a checkout that the workspace does not have.
     pub(super) skipped: Vec<Skipped>,
+    /// Each provided variable of the starmap file, in name order, with the
+    /// unit and port that met it or [`Met::Unset`], for the needs plan.
+    pub(super) met: Vec<ProvidedVariable>,
 }
 
 /// Returns the value of each provided variable of the starmap file of
@@ -784,11 +822,7 @@ pub(super) fn values(
         let Some(reference) = wanted.get(&failure.name) else {
             continue;
         };
-        let required = spec.variables().any(|(variable, declared)| {
-            variable == &failure.name
-                && matches!(declared.unset().in_mode(Mode::Local), Unset::Required)
-        });
-        if !required {
+        if !is_required(&spec, &failure.name) {
             continue;
         }
         let reason = if let ResolveProblem::Provider(error) = &failure.problem {
@@ -809,7 +843,7 @@ pub(super) fn values(
     if let Some(failure) = refusal(wrong).or(unassigned_first) {
         return Err(failure);
     }
-    let values = resolution
+    let values: BTreeMap<String, String> = resolution
         .bindings
         .iter()
         .filter(|(variable, _)| wanted.contains_key(variable))
@@ -824,5 +858,37 @@ pub(super) fn values(
             Some((variable.as_str().to_owned(), value))
         })
         .collect();
-    Ok(Provided { values, skipped })
+    let met = wanted
+        .iter()
+        .map(|(variable, reference)| {
+            let met = match neighbours.target(reference) {
+                Ok(found) if values.contains_key(variable.as_str()) => Met::Port {
+                    checkout: found
+                        .app
+                        .split_once('/')
+                        .map(|(checkout, _)| checkout.to_owned()),
+                    unit: found.unit,
+                    port: found.port,
+                },
+                Ok(_) | Err(_) => Met::Unset,
+            };
+            ProvidedVariable {
+                variable: variable.as_str().to_owned(),
+                required: is_required(&spec, variable),
+                met,
+            }
+        })
+        .collect();
+    Ok(Provided {
+        values,
+        skipped,
+        met,
+    })
+}
+
+/// Reports whether `spec` requires the variable `name` in local mode.
+fn is_required(spec: &Spec, name: &Name) -> bool {
+    spec.variables().any(|(variable, declared)| {
+        variable == name && matches!(declared.unset().in_mode(Mode::Local), Unset::Required)
+    })
 }

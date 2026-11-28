@@ -7,6 +7,26 @@ workspace may need to act on.
 
 ### Added
 
+- The multiverse library reads the `[needs.*]` and `[provides.*]` tables
+  of `mxv.toml` with one parser, in the public module `multiverse::needs`.
+  A need takes exactly one of `repo`, an origin such as
+  `github.com/acme/dispatcher`, and `contract`, and `from`. A provide is a
+  socket with `kind = "socket"`, `unit` and `path`. A refused table gives a
+  warning with its file, line and code in `up`, `restart`, `status` and
+  `show`, and never fails a start: `mxv::needs::moved` for a need with
+  `as` or `optional`, `mxv::needs::service_keys` for a need that names no
+  provider, such as `[needs.db] kind = "postgres"`, `mxv::needs::renamed`
+  for `[wants]` and `[offers]`, `mxv::needs::invalid` for another refused
+  need and `mxv::provides::invalid` for a refused provide.
+- `mxv up`, `mxv restart` and `mxv run` check the start's dependency plan
+  before any build, and fail with `mxv::plan::check` when a check fails:
+  a manifest `env` value for a variable that the unit's starmap file
+  declares a secret, a required provided variable left unset, a variable
+  met by a checkout, unit or port that the workspace lacks, a secret that
+  reaches a unit whose starmap file does not declare it, or a start order
+  with a missing unit or a cycle. The failure lists each check, unit and
+  variable, and quotes no value.
+
 - `mxv new` and `mxv add` take an origin for `--repo` as well as a path: a
   git URL, such as `https://github.com/acme/dispatcher` or
   `git@github.com:acme/dispatcher.git`, or the short form
@@ -61,6 +81,16 @@ workspace may need to act on.
   which names the host apps that `up` would leave running.
 
 ### Changed
+
+- A `[needs.*]` table names only its provider. `as` and `optional` moved to
+  the starmap entry whose bind names the need, and a need that holds either
+  now gets the warning `mxv::needs::moved`. multiverse's own `mxv.toml`
+  drops both from `[needs.deadband]`. mxv no longer treats `[needs.*]` as
+  phase's table, and a table named close to `needs` or `provides`, such as
+  `[need.db]`, gets the near-miss warning.
+- A manifest `env` value for a variable that the process's starmap file
+  declares `source = "secret"` used to replace the secret. It now fails the
+  start with `mxv::plan::check`, so a secret never sits in the manifest.
 
 - `mxv up` and `mxv restart` print a batch: the `mxv/up/v1` and
   `mxv/restart/v1` documents gain a `failures` list beside `data`, which

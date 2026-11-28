@@ -116,6 +116,7 @@ use crate::braces::{self, Piece};
 use crate::disposable::{BadGlob, PathGlob};
 use crate::host::ManifestNames;
 use crate::name::{WorkspaceName, is_unit_name};
+use crate::needs::{Declared, Holder};
 use crate::redacted::Redacted;
 use crate::service::{Backend, PROVISION_APP, RESERVED_PREFIX, Service};
 use crate::store;
@@ -189,8 +190,17 @@ pub struct Manifest {
     pub secrets: BTreeMap<String, Secret>,
     /// One sentence for each top-level table that mxv ignores although
     /// its name is close to one of mxv's own, such as `[proceses.web]`,
-    /// or is phase's `[process.*]`, with the file and line in front.
+    /// or is phase's `[process.*]`, and for each `[needs.*]` or
+    /// `[provides.*]` table that [`crate::needs::parse`] refuses, with the
+    /// file and line in front.
     pub warnings: Vec<String>,
+    /// The `[needs.*]` and `[provides.*]` tables, by the file that
+    /// declares them. A manifest read from one file holds them under
+    /// [`Holder::Workspace`], and a workspace's merged manifest holds each
+    /// checkout's under [`Holder::Checkout`] with the checkout's folder. A
+    /// file that declares none adds no entry. The tables name units by
+    /// their names in their own file.
+    pub needs: BTreeMap<Holder, Declared>,
 }
 
 /// The name of a task of a manifest, which follows the rule of a unit's
@@ -817,6 +827,8 @@ const OWN_KEYS: &[&str] = &[
     "tasks",
     "secrets",
     "actions",
+    "needs",
+    "provides",
 ];
 
 /// The manifest as TOML holds it, with the spans that errors cite. It
@@ -1030,8 +1042,14 @@ impl Errors<'_> {
 /// never warns about them, except `process`, which phase uses for what
 /// mxv calls `processes`. phase's top-level `permissions` is not among
 /// them: mxv refuses it, because mxv sandboxes each process by its own
-/// `[processes.<name>.permissions]`.
-const PHASE_TABLES: &[&str] = &["app", "release", "build", "process", "needs"];
+/// `[processes.<name>.permissions]`. `[needs.*]` is mxv's own, which
+/// [`crate::needs`] reads.
+const PHASE_TABLES: &[&str] = &["app", "release", "build", "process"];
+
+/// The spellings that `[needs.<name>]` and `[provides.<name>]` replaced,
+/// which [`crate::needs::parse`] refuses with a warning of its own, so the
+/// check of top-level tables gives them none.
+const RENAMED_TABLES: &[&str] = &["wants", "offers"];
 
 /// Checks that no port, process or container of `raw` starts with the
 /// prefix that the host keeps for its own names, or with
@@ -1144,6 +1162,7 @@ fn check_top_level(errors: &Errors<'_>, text: &str) -> Result<Vec<String>, Manif
                 "{place}: mxv ignores the table `[process.*]`, which is phase's, and runs only the processes of `[processes.*]`"
             ));
         } else if !PHASE_TABLES.contains(&name)
+            && !RENAMED_TABLES.contains(&name)
             && let Some(meant) = near_miss(name)
         {
             warnings.push(format!(
@@ -1208,6 +1227,36 @@ pub(crate) fn reserved_message(name: &str, prefix: &str) -> String {
     format!(
         "`{name}` starts with `{prefix}`, which mxv keeps for the apps and ports of the services' backends"
     )
+}
+
+/// Returns the `[needs.*]` and `[provides.*]` tables of the manifest
+/// `text`, read from `path`, under [`Holder::Workspace`], and adds a
+/// warning to `warnings` for each table that [`crate::needs::parse`]
+/// refuses, with the file, line and code in front. A provide may name a
+/// unit of `units`, the units of the file and of the manifests it joins.
+fn needs_of(
+    text: &str,
+    path: &Path,
+    units: &BTreeSet<&str>,
+    warnings: &mut Vec<String>,
+) -> BTreeMap<Holder, Declared> {
+    let parsed = crate::needs::parse(text, &|unit| units.contains(unit));
+    for refusal in &parsed.refusals {
+        let place = refusal.line.map_or_else(
+            || path.display().to_string(),
+            |line| format!("{}:{line}", path.display()),
+        );
+        warnings.push(format!(
+            "{place}: {}: {}",
+            refusal.code.as_str(),
+            refusal.message
+        ));
+    }
+    if parsed.declared.is_empty() {
+        BTreeMap::new()
+    } else {
+        BTreeMap::from([(Holder::Workspace, parsed.declared)])
+    }
 }
 
 /// Checks that no unit of `manifest` depends on itself through a cycle.
@@ -1633,7 +1682,7 @@ impl Manifest {
         names: &ManifestNames,
     ) -> Result<Self, ManifestError> {
         let errors = Errors { path, text, names };
-        let warnings = check_top_level(&errors, text)?;
+        let mut warnings = check_top_level(&errors, text)?;
         let raw: RawManifest = toml::from_str(text).map_err(|error| errors.of_toml(&error))?;
         check_version_and_reserved(&errors, &raw)?;
         let ports = check_ports(&errors, &raw.ports)?;
@@ -1772,11 +1821,23 @@ impl Manifest {
             services,
             tasks,
             secrets,
+            needs: needs_of(text, path, &names, &mut warnings),
             warnings,
         };
         check_cycle(&errors, &raw, &manifest)?;
         check_runnable(&errors, &raw, &manifest, joined)?;
         Ok(manifest)
+    }
+
+    /// Returns the manifest with the needs and provides of its own file,
+    /// which a manifest read from one file holds under
+    /// [`Holder::Workspace`], held by `holder` in their place.
+    #[must_use]
+    pub(crate) fn held_by(mut self, holder: Holder) -> Self {
+        if let Some(declared) = self.needs.remove(&Holder::Workspace) {
+            self.needs.insert(holder, declared);
+        }
+        self
     }
 
     /// Returns the process or container `name`, or `None`.
@@ -1877,6 +1938,7 @@ impl Manifest {
             tasks: self.tasks.clone(),
             secrets: self.secrets.clone(),
             warnings: self.warnings.clone(),
+            needs: self.needs.clone(),
         }
     }
 

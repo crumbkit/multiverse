@@ -496,9 +496,9 @@ with `mxv::manifest::invalid`.
 
 Another tool may keep its own tables in the same file. mxv checks that the
 whole file is valid TOML, reads only its own top-level keys (`version`,
-`ports`, `disposable`, `clone_on_new`, `processes`, `containers` and
-`service`), and leaves every other top-level table alone, such as
-`[app]`, `[needs.db]`, `[release]` or `[[steps]]`. An unknown
+`ports`, `disposable`, `clone_on_new`, `processes`, `containers`,
+`service`, `needs` and `provides`), and leaves every other top-level table
+alone, such as `[app]`, `[release]` or `[[steps]]`. An unknown
 top-level key that is not a table, such as `port = ["api"]`, fails with
 `mxv::manifest::unknown_key`. A table named like one of mxv's own, such as
 `[process.api]`, belongs to another tool and is left alone, so a
@@ -506,6 +506,48 @@ misspelling of `[processes.api]` declares no process. Inside mxv's own
 tables, such as
 `[processes.api]`, an unknown key still fails with
 `mxv::manifest::unknown_key`.
+
+### Needs and provides
+
+A `[needs.<name>]` table names a repository that one of the app's
+dependencies comes from, and a `[provides.<name>]` table names a socket
+that one of its units serves to other repositories. The multiverse library
+holds the schema and the one parser of both tables, in `multiverse::needs`.
+
+```toml
+[needs.dispatcher-http]
+repo = "github.com/acme/dispatcher"    # an origin, as --repo takes one
+from = "http"                          # a port, route, unit or socket of the provider
+
+[needs.auth-api]
+contract = "acme.auth.v1"              # a contract in place of repo
+from = "api"
+
+[provides.daemon-socket]
+kind = "socket"                        # the only kind so far
+unit = "daemon"                        # a process or container of this file
+path = "run/daemon.sock"               # inside the checkout
+```
+
+A need takes exactly one of `repo` and `contract`, and `from`. It names
+only its provider. The variable that receives the need, and whether the
+process can start without it, belong to the entry of the process's
+`starmap.toml` that binds it, so a need with `as` or `optional` gets the
+warning `mxv::needs::moved`. A need with neither `repo` nor `contract`,
+such as `[needs.db] kind = "postgres"`, gets the warning
+`mxv::needs::service_keys`: a process lists a shared service that it uses
+in its `needs` key, as [Local AWS services](#local-aws-services) shows.
+The old spellings `[wants]` and `[offers]` get the warning
+`mxv::needs::renamed`. Any other refused need gets
+`mxv::needs::invalid`, and a provide that is not a socket of a unit of the
+file at a path inside the checkout gets `mxv::provides::invalid`.
+
+Each warning names the file and the line of the table, and the rest of the
+file still applies. `up` and `restart` print it on standard error,
+`status` puts it in the summary's `warnings`, and `show` puts it in the
+row's `warnings`. No start reads a need yet, so a refused table never
+stops a start. A workspace keeps each file's tables apart: the workspace
+manifest's under the workspace, and each checkout's under its folder.
 
 ### Tasks
 
@@ -980,6 +1022,29 @@ so phase delivers it as it delivers other secrets. A changed value alone
 does not restart a running process; `mxv restart` starts it with the value
 that it reads then. Builds, tasks, `mxv run` and `mxv exec` receive no
 secret variable.
+
+#### The checks of a start
+
+Before any build, `up`, `restart` and `run` build the start's dependency
+plan, which lists for each unit the provided variables it receives and the
+unit and port that met each one or that it stays unset, the secret
+variables it receives by name and reference, and the units it starts
+after. The plan holds no value. mxv runs five checks on it:
+
+| Check | What it requires |
+| --- | --- |
+| `no-secret-value` | The manifest's `env` writes no value for a variable that the unit's starmap file declares `source = "secret"`. |
+| `required-met` | Every provided variable that the starmap file requires is met. |
+| `known-providers` | Every met variable names a checkout, unit and port that the workspace has. |
+| `secret-reach` | A secret reaches only the units whose starmap file declares it. |
+| `start-order` | Every unit that a unit starts after is in the plan, and the start order has no cycle. |
+
+A start whose plan fails a check builds and starts nothing, and fails with
+`mxv::plan::check`. Its fields name the first failure's `unit`, `check`
+and `variable`, and `failures` holds one object per failure, each with
+`check`, `unit`, `variable` and `reason`. When it lists several, the text
+output prints one `cause:` line for each. No field and no message quotes a
+value.
 
 #### Containers
 
@@ -1586,7 +1651,10 @@ tool that owns it. A table whose name is close to one of mxv's own, such as
 would declare nothing, so mxv warns about it: `up` and `restart` print the
 warning on standard error, `status` puts it in the summary's `warnings`,
 and `show` and `new` put it in the row's `warnings`. phase's own tables,
-`[app]`, `[release]`, `[build]` and `[needs.*]`, get no warning. mxv reads
+`[app]`, `[release]` and `[build]`, get no warning. mxv reads
+`[needs.*]` and `[provides.*]` as its own, as
+[Needs and provides](#needs-and-provides) describes, and a table close to
+one of their names, such as `[need.db]`, gets the same warning. mxv reads
 `[service.*]` as its own services. phase's `[process.*]` gets a warning that mxv runs only
 `[processes.*]`. A top-level `[permissions]` table would sandbox nothing,
 because mxv sandboxes each process on its own, so it fails with

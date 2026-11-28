@@ -12,9 +12,10 @@ use phase::{
 
 use crate::manifest::{Manifest, ManifestProblem};
 use crate::name::WorkspaceName;
+use crate::needs::{Check, Met, ProvidedVariable, SecretKind, SecretVariable};
 use crate::phase_plan::{
-    Built, CallerEnvironment, Inputs, MAIN, PASSED_THROUGH, ProxyUrls, TASK_APP, TaskEntry, build,
-    build_with_task, roots,
+    Built, CallerEnvironment, Inputs, MAIN, PASSED_THROUGH, ProxyUrls, TASK_APP, TaskEntry,
+    UnrunnableKind, build, build_with_task, roots,
 };
 use crate::record::{Checkout, Workspace};
 use crate::testing::{unmade_clone, write};
@@ -1199,4 +1200,204 @@ fn a_task_receives_the_domain_and_each_route_but_no_host_or_url_of_its_own() {
     );
     assert_eq!(task["MXV_HOST_API"], "api.triage.mxv.localhost");
     assert!(!task.contains_key("MXV_HOST") && !task.contains_key("MXV_URL"));
+}
+
+/// A merged manifest of the checkouts `catalogue` and `shelf`. The
+/// catalogue's api listens on `catalogue-http` and starts after its
+/// store, and the shelf's web process reads `shelf/starmap.toml`.
+const NEEDS_MERGED: &str = r#"
+ports = ["catalogue-http", "catalogue-db", "shelf-http"]
+
+[containers.catalogue-store]
+image = "postgres:17.2"
+ports = { 5432 = "catalogue-db" }
+
+[processes.catalogue-api]
+argv = ["catalogue"]
+cwd = "catalogue"
+ports = { PORT = "catalogue-http" }
+listen = "catalogue-http"
+depends_on = ["catalogue-store"]
+
+[processes.shelf-web]
+argv = ["shelf"]
+ports = { PORT = "shelf-http" }
+listen = "shelf-http"
+env = { RUST_LOG = "info" }
+"#;
+
+/// A value of the manifest that a check's failure must never quote.
+const LITERAL: &str = "hunter2-literal";
+
+/// The shelf's starmap file: the catalogue's URL, which it requires, a
+/// ledger's URL, which may stay unset, a token from 1Password and a
+/// generated session key.
+const SHELF_SPEC: &str = r#"
+[variables.CATALOGUE_URL]
+purpose = "The catalogue's URL."
+type = "string"
+unset = "required"
+show = "shown"
+source = "provided"
+bind = { provided = "multiverse/url", app = "catalogue/api" }
+
+[variables.LEDGER_URL]
+purpose = "The ledger's URL."
+type = "string"
+unset = "optional"
+show = "shown"
+source = "provided"
+bind = { provided = "multiverse/url", app = "ledger/api" }
+
+[variables.API_TOKEN]
+purpose = "The token the shelf sends."
+type = "string"
+unset = "required"
+show = "withheld"
+source = "secret"
+bind = { one-password = "op://acme-staging/shelf/token" }
+
+[variables.SESSION_KEY]
+purpose = "The key the shelf signs sessions with."
+type = "string"
+unset = "required"
+show = "withheld"
+source = "generated"
+"#;
+
+/// Builds the plan of `text`, a merged manifest of the checkouts
+/// `catalogue` and `shelf` in a workspace directory whose
+/// `shelf/starmap.toml` holds [`SHELF_SPEC`].
+fn needs_plan_of(text: &str) -> Result<Built, crate::phase_plan::Unrunnable> {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("catalogue")).unwrap();
+    std::fs::create_dir_all(dir.path().join("shelf")).unwrap();
+    write(dir.path().join("shelf/starmap.toml"), SHELF_SPEC);
+    let manifest = manifest(text);
+    let ports = BTreeMap::from([
+        ("catalogue-http".to_owned(), 41_000),
+        ("catalogue-db".to_owned(), 41_001),
+        ("shelf-http".to_owned(), 41_002),
+    ]);
+    let workspace = WorkspaceName::try_from("triage".to_owned()).unwrap();
+    let id = WorkspaceId::try_from("ws-1".to_owned()).unwrap();
+    build(&Inputs {
+        manifest: &manifest,
+        workspace: &workspace,
+        id: &id,
+        checkout: &dir.path().join("shelf"),
+        roots: vec![
+            dir.path().join("catalogue"),
+            dir.path().join("shelf"),
+            dir.path().to_path_buf(),
+        ],
+        ports: &ports,
+        workspace_dir: None,
+        grace: Duration::from_secs(5),
+        caller: &CallerEnvironment::default(),
+        own_command: None,
+        urls: ProxyUrls::default(),
+        read_starmaps: true,
+    })
+}
+
+#[test]
+fn the_needs_plan_lists_each_provided_variable_and_how_it_was_met() {
+    let built = needs_plan_of(NEEDS_MERGED).unwrap();
+    let web = &built.needs.units["shelf-web"];
+    assert_eq!(
+        web.provided,
+        [
+            ProvidedVariable {
+                variable: "CATALOGUE_URL".to_owned(),
+                required: true,
+                met: Met::Port {
+                    checkout: Some("catalogue".to_owned()),
+                    unit: "catalogue-api".to_owned(),
+                    port: "catalogue-http".to_owned(),
+                },
+            },
+            ProvidedVariable {
+                variable: "LEDGER_URL".to_owned(),
+                required: false,
+                met: Met::Unset,
+            },
+        ]
+    );
+}
+
+#[test]
+fn the_needs_plan_lists_each_secret_by_name_and_reference_and_holds_no_value() {
+    let built = needs_plan_of(NEEDS_MERGED).unwrap();
+    let web = &built.needs.units["shelf-web"];
+    assert_eq!(
+        web.secrets,
+        [
+            SecretVariable {
+                variable: "API_TOKEN".to_owned(),
+                store: "1password".to_owned(),
+                reference: Some("op://acme-staging/shelf/token".to_owned()),
+            },
+            SecretVariable {
+                variable: "SESSION_KEY".to_owned(),
+                store: "keychain".to_owned(),
+                reference: None,
+            },
+        ]
+    );
+    assert_eq!(
+        web.declared_secrets,
+        BTreeMap::from([
+            ("API_TOKEN".to_owned(), SecretKind::Secret),
+            ("SESSION_KEY".to_owned(), SecretKind::Generated),
+        ])
+    );
+    assert_eq!(web.literals, BTreeSet::from(["RUST_LOG".to_owned()]));
+}
+
+#[test]
+fn the_needs_plan_lists_the_units_each_unit_starts_after_and_what_the_workspace_has() {
+    let built = needs_plan_of(NEEDS_MERGED).unwrap();
+    assert_eq!(
+        built.needs.units["catalogue-api"].after,
+        ["catalogue-store"]
+    );
+    assert!(built.needs.units.contains_key("catalogue-store"));
+    assert_eq!(
+        built.needs.known.checkouts,
+        BTreeSet::from(["catalogue".to_owned(), "shelf".to_owned()])
+    );
+    assert!(built.needs.known.ports["catalogue-api"].contains("catalogue-http"));
+}
+
+#[test]
+fn a_manifest_value_for_a_secret_of_the_starmap_file_fails_the_plan_check_without_the_value() {
+    let text = NEEDS_MERGED.replace(
+        "env = { RUST_LOG = \"info\" }",
+        &format!("env = {{ API_TOKEN = \"{LITERAL}\" }}"),
+    );
+    let Err(failure) = needs_plan_of(&text) else {
+        panic!("the plan passed its checks");
+    };
+    let UnrunnableKind::Check(failures) = &failure.kind else {
+        panic!("not a check failure: {failure:?}");
+    };
+    let listed: Vec<(Check, &str, Option<&str>)> = failures
+        .iter()
+        .map(|failure| {
+            (
+                failure.check,
+                failure.unit.as_str(),
+                failure.variable.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        listed,
+        [(Check::SecretValue, "shelf-web", Some("API_TOKEN"))]
+    );
+    assert_eq!(failure.unit.as_deref(), Some("shelf-web"));
+    assert!(failure.message.contains("API_TOKEN"), "{}", failure.message);
+    assert!(!failure.message.contains(LITERAL), "{}", failure.message);
+    assert!(!format!("{failure:?}").contains(LITERAL), "{failure:?}");
 }

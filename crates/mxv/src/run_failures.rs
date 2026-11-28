@@ -55,6 +55,10 @@ pub const MANIFEST_STARMAP_FILE: Code = Code::from_spelling("mxv::manifest::star
 pub const MANIFEST_PROVIDED_UNKNOWN: Code = Code::from_spelling("mxv::manifest::provided_unknown");
 /// The code of a process's starmap file that does not parse.
 pub const MANIFEST_STARMAP_INVALID: Code = Code::from_spelling("mxv::manifest::starmap_invalid");
+/// The code of a start whose dependency plan fails one of its checks, such
+/// as a manifest `env` value for a variable that the unit's starmap file
+/// declares a secret.
+pub const PLAN_CHECK: Code = Code::from_spelling("mxv::plan::check");
 /// The code of a process name that the workspace does not know.
 pub const PROCESS_NOT_FOUND: Code = Code::from_spelling("mxv::process::not_found");
 /// The code of a process that exited before it was ready.
@@ -111,6 +115,7 @@ pub(crate) const CODES: &[Code<'static>] = &[
     MANIFEST_STARMAP_FILE,
     MANIFEST_PROVIDED_UNKNOWN,
     MANIFEST_STARMAP_INVALID,
+    PLAN_CHECK,
     PROCESS_NOT_FOUND,
     PROCESS_EXITED,
     PROCESS_NOT_READY,
@@ -792,6 +797,7 @@ fn unrunnable_code(kind: &UnrunnableKind) -> Code<'static> {
         UnrunnableKind::ProvidedUnknown(_) => MANIFEST_PROVIDED_UNKNOWN,
         UnrunnableKind::StarmapInvalid { .. } => MANIFEST_STARMAP_INVALID,
         UnrunnableKind::ProvidedUnassigned(_) => MANIFEST_UNRUNNABLE,
+        UnrunnableKind::Check(_) => PLAN_CHECK,
         // The library marks the kind non-exhaustive, so a kind that a
         // later version adds reads as unrunnable until mxv gives it a code
         // of its own.
@@ -840,6 +846,17 @@ fn unrunnable_fields<'a>(
             Field::new("file", shown(file)),
             Field::new("message", message),
         ]
+    } else if let UnrunnableKind::Check(failures) = kind {
+        let first = failures.first();
+        vec![
+            Field::new("unit", unit),
+            Field::new("check", first.check.name()),
+            Field::new("variable", first.variable.as_deref()),
+            Field::new(
+                "failures",
+                FieldValue::List(failures.iter().map(check_failure).collect()),
+            ),
+        ]
     } else {
         vec![
             Field::new("workspace", workspace),
@@ -861,15 +878,31 @@ fn refused_bind(bind: &RefusedBind) -> FieldValue<'_> {
     ])
 }
 
+/// Returns the object of the `failures` field that describes `failure`.
+fn check_failure(failure: &multiverse::needs::CheckFailure) -> FieldValue<'_> {
+    FieldValue::object([
+        ("check", FieldValue::from(failure.check.name())),
+        ("unit", FieldValue::from(&failure.unit)),
+        ("variable", FieldValue::from(failure.variable.as_deref())),
+        ("reason", FieldValue::from(&failure.reason)),
+    ])
+}
+
 /// Returns the causes of a plan that phase cannot run, by its `kind`: the
-/// sentence of each bind that names no port when there are several, and
-/// none otherwise, because the message already says the one.
+/// sentence of each bind that names no port, or of each failed check, when
+/// there are several, and none otherwise, because the message already
+/// says the one.
 fn unrunnable_causes(kind: &UnrunnableKind) -> Vec<String> {
     match kind {
         UnrunnableKind::ProvidedUnknown(binds) if binds.len() > 1 => {
             binds.iter().map(|bind| bind.message.clone()).collect()
         }
-        UnrunnableKind::ProvidedUnknown(_)
+        UnrunnableKind::Check(failures) if failures.len() > 1 => failures
+            .iter()
+            .map(multiverse::needs::CheckFailure::sentence)
+            .collect(),
+        UnrunnableKind::Check(_)
+        | UnrunnableKind::ProvidedUnknown(_)
         | UnrunnableKind::ProvidedUnassigned(_)
         | UnrunnableKind::StarmapInvalid { .. }
         | UnrunnableKind::Plan => Vec::new(),
@@ -929,6 +962,9 @@ fn unrunnable_recovery(kind: &UnrunnableKind, workspace: &str) -> Recovery {
             "fix what the message names in {}; `starmap check` in its directory reports each problem",
             shown(file)
         )),
+        UnrunnableKind::Check(_) => Recovery::hint(
+            "fix what each failed check names in the manifest or the unit's starmap file; a secret that the starmap file declares takes no value in the manifest's env",
+        ),
         UnrunnableKind::Plan => Recovery::hint("fix what the message names in the manifest"),
         _ => Recovery::hint("fix what the message names in the manifest"),
     }
@@ -1458,6 +1494,7 @@ impl RunFailure {
                     UnrunnableKind::ProvidedUnknown(_)
                         | UnrunnableKind::ProvidedUnassigned(_)
                         | UnrunnableKind::StarmapInvalid { .. }
+                        | UnrunnableKind::Check(_)
                 ) =>
             {
                 formatter.write_str(message)

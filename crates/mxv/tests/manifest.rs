@@ -1,6 +1,6 @@
 //! The check that `mxv.toml` at the repository root is a manifest that mxv
 //! accepts, and that it declares the tasks and the need that the file's
-//! comments describe.
+//! comments describe, by its provider alone.
 
 #![expect(
     clippy::disallowed_methods,
@@ -10,6 +10,7 @@
 use std::path::Path;
 
 use multiverse::Manifest;
+use multiverse::needs::{Holder, Provider};
 
 /// The text of the repository's `mxv.toml`.
 fn declaration() -> std::io::Result<String> {
@@ -39,13 +40,25 @@ fn mxv_toml_declares_the_fmt_clippy_and_test_tasks_and_no_unit() {
 }
 
 #[test]
-fn mxv_toml_needs_the_deadband_socket_as_an_optional_variable() {
-    let table: toml::Table = toml::from_str(&declaration().unwrap()).unwrap();
-    let needs = table["needs"].as_table().unwrap();
-    assert_eq!(needs.keys().collect::<Vec<_>>(), ["deadband"]);
-    let need = needs["deadband"].as_table().unwrap();
-    assert_eq!(need["repo"].as_str(), Some("github.com/crumbkit/deadband"));
-    assert_eq!(need["from"].as_str(), Some("deadband-socket"));
-    assert_eq!(need["as"].as_str(), Some("DEADBAND_SOCKET"));
-    assert_eq!(need["optional"].as_bool(), Some(true));
+fn mxv_toml_needs_the_deadband_socket_by_its_provider_alone() {
+    let manifest = Manifest::parse(&declaration().unwrap(), Path::new("mxv.toml")).unwrap();
+    let declared = &manifest.needs[&Holder::Workspace];
+    let needs: Vec<(&str, &str, &str)> = declared
+        .needs
+        .iter()
+        .map(|need| {
+            let Provider::Repo(origin) = &need.provider else {
+                panic!("the need names no repository: {need:?}");
+            };
+            (need.name.as_str(), origin.as_str(), need.from.as_str())
+        })
+        .collect();
+    assert_eq!(
+        needs,
+        [(
+            "deadband",
+            "github.com/crumbkit/deadband",
+            "deadband-socket"
+        )]
+    );
 }

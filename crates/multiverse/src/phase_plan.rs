@@ -53,6 +53,7 @@ use phase::{
 
 use crate::manifest::{Container, Manifest, Process, ReadyCheck, Unit};
 use crate::name::WorkspaceName;
+use crate::needs::{self, CheckFailures};
 use crate::record::Workspace;
 use crate::redacted::Redacted;
 use crate::runs::ProcessNote;
@@ -367,6 +368,11 @@ pub enum UnrunnableKind {
         /// The file.
         file: PathBuf,
     },
+    /// The dependency plan of the start fails one or more of the checks of
+    /// [`crate::needs::check`], such as a manifest `env` value for a
+    /// variable that the unit's starmap file declares a secret. The failure
+    /// lists each check, unit and variable, and quotes no value.
+    Check(Box<CheckFailures>),
 }
 
 /// The plan of a workspace's app and the values of each app's variables.
@@ -378,6 +384,16 @@ pub(crate) struct Built {
     /// What the plan found about each unit, by unit name, such as the
     /// provided variables it left unset.
     pub(crate) notes: BTreeMap<String, Vec<ProcessNote>>,
+    /// The dependency plan of the units, which passed every check of
+    /// [`crate::needs::check`], boxed so that the plan stays small.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the checks read the plan while it is built, and only the tests read it afterwards"
+        )
+    )]
+    pub(crate) needs: Box<needs::Plan>,
 }
 
 /// What [`build`] builds the plan from.
@@ -655,6 +671,10 @@ fn assemble(
     let mut apps = Vec::new();
     let mut values = BTreeMap::new();
     let mut notes: BTreeMap<String, Vec<ProcessNote>> = BTreeMap::new();
+    let mut dependencies = needs::Plan {
+        known: provided::known(inputs),
+        ..needs::Plan::default()
+    };
     for (plan, vars) in service_apps(inputs)? {
         values.insert(plan.name.clone(), vars);
         apps.push(plan);
@@ -667,14 +687,31 @@ fn assemble(
                 if !host.notes.is_empty() {
                     notes.insert(name.clone(), host.notes);
                 }
+                dependencies.units.insert(name.clone(), host.needs);
                 (host.plan, host.vars)
             }
-            Some(Unit::Container(container)) => container_app(inputs, &name, &app, container)?,
+            Some(Unit::Container(container)) => {
+                dependencies.units.insert(
+                    name.clone(),
+                    needs::UnitPlan {
+                        after: container.depends_on.clone(),
+                        ..needs::UnitPlan::default()
+                    },
+                );
+                container_app(inputs, &name, &app, container)?
+            }
             None => continue,
         };
         apps.push(plan);
         values.insert(app, vars);
     }
+    // The checks run before phase or any build sees the plan, so a plan
+    // that fails one builds and starts nothing.
+    needs::check(&dependencies).map_err(|failures| Unrunnable {
+        unit: Some(failures.first().unit.clone()),
+        message: failures.to_string(),
+        kind: UnrunnableKind::Check(Box::new(failures)),
+    })?;
     if let Some((plan, vars)) = extra {
         values.insert(plan.name.clone(), vars);
         apps.push(plan);
@@ -703,6 +740,7 @@ fn assemble(
         plan,
         environment: ManifestEnvironment { values },
         notes,
+        needs: Box::new(dependencies),
     })
 }
 
@@ -886,6 +924,8 @@ struct HostApp {
     vars: Vec<(String, Redacted)>,
     /// One note for each provided variable that the plan leaves unset.
     notes: Vec<ProcessNote>,
+    /// What the dependency plan records of the process.
+    needs: needs::UnitPlan,
 }
 
 /// Returns the plan of the host process `process`, named `name`, the
@@ -931,6 +971,7 @@ fn host_app(
     let provided::Provided {
         values: provided,
         skipped,
+        met,
     } = provided::values(inputs, name, process)?;
     if let Some(variable) = provided
         .keys()
@@ -1038,10 +1079,18 @@ fn host_app(
             .extend(service_connects(inputs.manifest, process));
         granted.secrets.extend(secret_names);
     }
+    let secrets = secrets::planned(inputs, name, process)?;
     Ok(HostApp {
         plan,
         vars: vars.into_iter().collect(),
         notes: skipped.iter().map(provided::Skipped::note).collect(),
+        needs: needs::UnitPlan {
+            provided: met,
+            secrets: secrets.received,
+            declared_secrets: secrets.declared,
+            literals: process.env.keys().cloned().collect(),
+            after: process.depends_on.clone(),
+        },
     })
 }
 

@@ -37,6 +37,7 @@ mod marker;
 mod merged;
 mod mirror;
 mod name;
+pub mod needs;
 mod phase_plan;
 mod ports;
 mod preflight;

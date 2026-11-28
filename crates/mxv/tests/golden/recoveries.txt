@@ -223,6 +223,7 @@ codes that no start provokes:
   mxv::manifest::starmap_file: Only a live checkout with an mxv.toml provokes it, and the fixture's workspace names a checkout under /home/agent, which a test cannot create; tests/processes.rs provokes it.
   mxv::manifest::provided_unknown: Only `mxv up` of a live checkout whose process's starmap file binds a unit or port that the manifest lacks provokes it; tests/provided.rs provokes it.
   mxv::manifest::starmap_invalid: Only `mxv up` of a live checkout whose process's starmap file does not parse provokes it; tests/provided.rs provokes it.
+  mxv::plan::check: Only `mxv up` of a live checkout whose dependency plan fails a check, such as a manifest env value for a secret of its starmap file, provokes it; tests/needs.rs provokes it.
   mxv::manifest::name_clash: Only two checkouts whose mxv.toml files declare names that clash once prefixed provoke it, and the fixture's workspace has one checkout; tests/workspaces.rs provokes it.
   mxv::manifest::needed: Only `mxv add` to a live workspace of one clone with a workspace manifest provokes it, and the fixture's workspace holds a git worktree; tests/multirepo.rs provokes it.
   mxv::checkout::incomplete: Only `mxv add` to a live workspace of clones whose record names an unfinished checkout provokes it, and the fixture's workspace holds a git worktree; tests/multirepo.rs provokes it.

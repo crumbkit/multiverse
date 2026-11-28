@@ -8,15 +8,14 @@
 #
 # mxv asks the deadband daemon for a place before a build or a task, and it
 # starts the build or task at once when no daemon answers. The need below
-# names that daemon's socket as an optional dependency, which the tasks of
-# this file consume, and it is the table that jumpgate reads. mxv itself
-# ignores a `[needs.*]` table.
+# names the repository that provides that daemon's socket, which the tasks
+# of this file consume. A need names only its provider: the variable that
+# receives it, and whether a process can start without it, belong to the
+# starmap entry whose bind names the need.
 
 [needs.deadband]
 repo = "github.com/crumbkit/deadband"
 from = "deadband-socket"
-as = "DEADBAND_SOCKET"
-optional = true
 
 [tasks.fmt]
 argv = ["cargo", "fmt", "--check"]

@@ -6,6 +6,7 @@ use crate::manifest::{
     DEFAULT_READY_TIMEOUT, EnvValue, Joined, Manifest, ManifestError, ManifestProblem, Permissions,
     Published, ReadyCheck, StarmapFound, TaskName, Unit,
 };
+use crate::needs::Holder;
 
 fn parse(text: &str) -> Result<Manifest, ManifestError> {
     Manifest::parse(text, Path::new("/repo/mxv.toml"))
@@ -137,11 +138,95 @@ fn a_misspelt_name_of_one_of_mxvs_tables_parses_with_a_warning_that_names_it() {
 
 #[test]
 fn the_tables_of_phase_and_of_other_tools_parse_without_a_warning() {
+    let manifest =
+        parse("[app]\nname = \"x\"\n[release]\na = 1\n[build]\na = 1\n[deploy]\na = 1\n").unwrap();
+    assert_eq!(manifest.warnings, Vec::<String>::new());
+}
+
+#[test]
+fn a_manifest_reads_its_needs_and_provides_under_the_workspace() {
     let manifest = parse(
-        "[app]\nname = \"x\"\n[release]\na = 1\n[build]\na = 1\n[needs.db]\na = 1\n[deploy]\na = 1\n",
+        "[processes.daemon]\nargv = [\"true\"]\n\n[needs.dispatcher-http]\nrepo = \"github.com/acme/dispatcher\"\nfrom = \"http\"\n\n[provides.socket]\nkind = \"socket\"\nunit = \"daemon\"\npath = \"run/daemon.sock\"\n",
     )
     .unwrap();
     assert_eq!(manifest.warnings, Vec::<String>::new());
+    let declared = &manifest.needs[&Holder::Workspace];
+    let needs: Vec<(&str, &str)> = declared
+        .needs
+        .iter()
+        .map(|need| (need.name.as_str(), need.from.as_str()))
+        .collect();
+    assert_eq!(needs, [("dispatcher-http", "http")]);
+    assert_eq!(declared.provides[0].unit, "daemon");
+}
+
+#[test]
+fn a_manifest_without_needs_or_provides_holds_none() {
+    let manifest = parse(APP).unwrap();
+    assert!(manifest.needs.is_empty(), "{:?}", manifest.needs);
+}
+
+#[test]
+fn a_refused_need_parses_with_a_warning_that_names_its_file_line_and_code() {
+    let manifest = parse(
+        "ports = []\n\n[needs.agent-http]\nrepo = \"github.com/acme/agent\"\nfrom = \"http\"\nas = \"AGENT_URL\"\n",
+    )
+    .unwrap();
+    let [warning] = manifest.warnings.as_slice() else {
+        panic!("{:?}", manifest.warnings);
+    };
+    assert!(
+        warning.starts_with("/repo/mxv.toml:3: mxv::needs::moved: "),
+        "{warning}"
+    );
+    assert!(manifest.needs.is_empty(), "{:?}", manifest.needs);
+}
+
+#[test]
+fn a_need_for_a_shared_service_parses_with_the_service_keys_warning() {
+    let manifest = parse("[needs.db]\nkind = \"postgres\"\n").unwrap();
+    let [warning] = manifest.warnings.as_slice() else {
+        panic!("{:?}", manifest.warnings);
+    };
+    assert!(
+        warning.starts_with("/repo/mxv.toml:1: mxv::needs::service_keys: "),
+        "{warning}"
+    );
+}
+
+#[test]
+fn a_provide_may_name_a_unit_of_a_manifest_that_the_file_joins() {
+    let joined = Joined {
+        units: vec!["shelf-web".to_owned()],
+        ..Joined::default()
+    };
+    let manifest = Manifest::parse_joining(
+        "[provides.socket]\nkind = \"socket\"\nunit = \"shelf-web\"\npath = \"web.sock\"\n",
+        Path::new("/repo/mxv.toml"),
+        &joined,
+    )
+    .unwrap();
+    assert_eq!(manifest.warnings, Vec::<String>::new());
+}
+
+#[test]
+fn a_misspelt_needs_table_parses_with_a_warning_that_names_mxvs_table() {
+    let manifest = parse("[need.db]\nrepo = \"x\"\n").unwrap();
+    assert_eq!(
+        manifest.warnings,
+        [
+            "/repo/mxv.toml:1: mxv ignores the table `[need]`, whose name is close to mxv's `needs`, and reads nothing from it"
+        ]
+    );
+}
+
+#[test]
+fn a_renamed_manifest_keeps_its_needs() {
+    let manifest =
+        parse("[needs.dispatcher-http]\nrepo = \"github.com/acme/dispatcher\"\nfrom = \"http\"\n")
+            .unwrap();
+    let renamed = manifest.renamed(&|name| format!("shelf-{name}"));
+    assert_eq!(renamed.needs, manifest.needs);
 }
 
 #[test]

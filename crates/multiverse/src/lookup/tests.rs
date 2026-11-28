@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::lookup::ManifestSource;
 use crate::manifest::ManifestProblem;
+use crate::needs::Holder;
 use crate::record::{Checkout, Workspace};
 use crate::testing::{unmade_clone, write};
 
@@ -710,5 +711,79 @@ fn a_workspace_manifests_starmap_file_whose_link_stays_inside_its_checkout_is_ac
     assert_eq!(
         manifest.processes["proxy"].starmap,
         Some(dir.path().join("triage/web/link/starmap.toml"))
+    );
+}
+
+/// Returns the need of `holder` in `manifest`, by name and `from`.
+fn needs_held(manifest: &crate::manifest::Manifest, holder: &Holder) -> Vec<(String, String)> {
+    manifest
+        .needs
+        .get(holder)
+        .map(|declared| {
+            declared
+                .needs
+                .iter()
+                .map(|need| (need.name.clone(), need.from.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A need of the dispatcher's `http`.
+const NEEDS_DISPATCHER: &str =
+    "[needs.dispatcher-http]\nrepo = \"github.com/acme/dispatcher\"\nfrom = \"http\"\n";
+
+#[test]
+fn the_merged_manifest_keeps_each_files_needs_under_its_checkout_or_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = several(dir.path(), &["harness", "agent"]);
+    write(workspace.path.join("harness/mxv.toml"), NEEDS_DISPATCHER);
+    write(
+        workspace.path.join("agent/mxv.toml"),
+        "[needs.auth-api]\nrepo = \"github.com/acme/auth\"\nfrom = \"api\"\n",
+    );
+    write(
+        workspace.manifest_file(),
+        "[needs.billing-api]\nrepo = \"github.com/acme/billing\"\nfrom = \"api\"\n",
+    );
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        needs_held(&manifest, &Holder::Checkout("harness".to_owned())),
+        [("dispatcher-http".to_owned(), "http".to_owned())]
+    );
+    assert_eq!(
+        needs_held(&manifest, &Holder::Checkout("agent".to_owned())),
+        [("auth-api".to_owned(), "api".to_owned())]
+    );
+    assert_eq!(
+        needs_held(&manifest, &Holder::Workspace),
+        [("billing-api".to_owned(), "api".to_owned())]
+    );
+    assert_eq!(manifest.needs.len(), 3);
+}
+
+#[test]
+fn a_workspace_of_one_checkout_holds_the_checkouts_needs_under_its_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    write(workspace.path.join("app/mxv.toml"), NEEDS_DISPATCHER);
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        needs_held(&manifest, &Holder::Checkout("app".to_owned())),
+        [("dispatcher-http".to_owned(), "http".to_owned())]
+    );
+    assert_eq!(manifest.needs.len(), 1);
+}
+
+#[test]
+fn a_workspace_of_one_checkout_holds_the_workspace_manifests_needs_under_the_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let workspace = workspace(dir.path());
+    write(workspace.path.join("app/mxv.toml"), "ports = []\n");
+    write(workspace.manifest_file(), NEEDS_DISPATCHER);
+    let manifest = workspace.manifest().unwrap().unwrap();
+    assert_eq!(
+        needs_held(&manifest, &Holder::Workspace),
+        [("dispatcher-http".to_owned(), "http".to_owned())]
     );
 }

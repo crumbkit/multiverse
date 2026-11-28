@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 
 use crate::manifest::{Joined, Manifest, ManifestError, ManifestProblem, Secret, Task, TaskName};
 use crate::name::MOST_NAME_BYTES;
+use crate::needs::Holder;
 use crate::record::{Checkout, Workspace};
 use crate::service::Service;
 
@@ -398,6 +399,17 @@ fn absorb(into: &mut Manifest, from: Manifest, root: &Path) {
         into.services.entry(name).or_insert(service);
     }
     into.warnings.extend(from.warnings);
+    // Each file's needs are held by their own file, so no two collide.
+    into.needs.extend(from.needs);
+}
+
+/// Returns the holder of the needs of `checkout`'s own `mxv.toml`: the
+/// checkout's folder in the workspace.
+fn holder_of(checkout: &Checkout) -> Holder {
+    Holder::Checkout(checkout.path.file_name().map_or_else(
+        || checkout.name.clone(),
+        |folder| folder.to_string_lossy().into_owned(),
+    ))
 }
 
 impl Workspace {
@@ -531,7 +543,15 @@ impl Workspace {
             return Ok(None);
         };
         let root = checkout.map_or(self.path.as_path(), |checkout| checkout.path.as_path());
-        Manifest::read_file_as(path, root, &Joined::default(), &self.names)
+        let manifest = Manifest::read_file_as(path, root, &Joined::default(), &self.names)?;
+        // The checkout's own file holds its needs under the checkout's
+        // folder, and the workspace manifest's stay under the workspace.
+        Ok(match (manifest, checkout) {
+            (Some(manifest), Some(checkout)) if inputs.workspace.as_deref() != Some(path) => {
+                Some(manifest.held_by(holder_of(checkout)))
+            }
+            (manifest, _) => manifest,
+        })
     }
 
     /// Returns the places that hold the workspace's tasks, one for each
@@ -763,7 +783,7 @@ impl Workspace {
         for (path, checkout, renamed) in checkouts {
             declared.add(&renamed, &path)?;
             let into = merged.get_or_insert_with(|| emptied(&renamed));
-            absorb(into, renamed, &checkout.path);
+            absorb(into, renamed.held_by(holder_of(checkout)), &checkout.path);
         }
         if let Some(merged) = &merged {
             crate::manifest::check_labels(&merged.routes).map_err(|message| ManifestError {
@@ -788,6 +808,7 @@ fn emptied(manifest: &Manifest) -> Manifest {
     empty.tasks.clear();
     empty.secrets.clear();
     empty.warnings.clear();
+    empty.needs.clear();
     empty.disposable.clear();
     empty.clone_on_new.clear();
     empty

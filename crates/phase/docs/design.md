@@ -107,8 +107,8 @@ schema of its own tables.
 
 phase reads each of its tables from one place:
 
-- `[app]`, `[release]`, `[build]`, `[process.*]`, `[permissions]` and
-  `[needs.*]` describe one app, and come from that app's repository. For an
+- `[app]`, `[release]`, `[build]`, `[process.*]` and `[permissions]`
+  describe one app, and come from that app's repository. For an
   app you are editing, phase reads the `mxv.toml` in its checkout. For an
   app run from a release, phase reads the `mxv.toml` of the repository at
   the release's tag.
@@ -155,6 +155,9 @@ port = "http"                             # a named port from multiverse's ledge
 ready = { http = "/healthz" }             # any 2xx status passes
 restart = { policy = "on-failure", max = 5, backoff = "1s..30s" }
 stop = { signal = "TERM", grace = "10s" }
+# The workspace's shared services the process uses, each with the app's
+# settings for it.
+needs = [{ service = "postgres", database = "api" }]  # its own database and role
 
 # What the process may do inside the sandbox.
 [permissions]
@@ -162,11 +165,12 @@ write = ["$STATE"]                        # the app's own state directory
 listen = ["http"]
 connect = ["api.stripe.com"]              # other apps by name, or external hosts
 secrets = ["STRIPE_KEY"]
-
-# What the app needs from the workspace's shared services.
-[needs.postgres]
-database = "api"                          # the app's own database and role
 ```
+
+The `[needs.*]` tables of `mxv.toml` belong to the multiverse library,
+which reads them as `multiverse::needs` describes: each names the
+repository or contract that provides one of the app's dependencies, and
+never a shared service.
 
 The environment variables an app reads are declared by starmap, not here.
 `secrets` in `[permissions]` lists which of those variables are secrets, so
@@ -190,10 +194,11 @@ port = "pg"                               # a named port from multiverse's ledge
 ready = { tcp = "pg" }
 ```
 
-An app's `[needs.<service>]` table says what it needs from the service. A
-need makes the app depend on the service, and lets the app's sandbox
-connect to the service's port. An app that declares no need cannot reach
-the service.
+A process names each shared service that it uses in its `needs` key, and
+the entry for a service holds the app's settings for it, such as the name
+of its database. The entry makes the app depend on the service, and lets
+the app's sandbox connect to the service's port. An app whose processes
+name no service cannot reach the service.
 
 ### One database and role per app
 
