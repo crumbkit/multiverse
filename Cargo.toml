@@ -153,7 +153,7 @@ tempfile = { version = "3.27.0", default-features = false }
 # the order in which nono's Seatbelt profile emits phase's own network rules.
 # Its default feature reads the system keyring, which phase never uses, so
 # the workspace entry turns off its default features.
-nono = { version = "=0.81.0", default-features = false }
+nono = { version = "=0.82.0", default-features = false }
 
 # rustls-native-certs loads the system's trusted roots as the AWS SDK's
 # native-roots TLS does. Only a macOS sandbox test of phase uses it, to
@@ -168,7 +168,7 @@ rustls-native-certs = { version = "0.8.5", default-features = false }
 # uses, so the workspace entry turns them off and keeps `native-sqlite`,
 # which builds SQLite into the binary, and `http-server`, which serves the
 # DynamoDB JSON API.
-dynoxide-rs = { version = "=4.0.0", default-features = false, features = ["native-sqlite", "http-server"] }
+dynoxide-rs = { version = "=4.1.0", default-features = false, features = ["native-sqlite", "http-server"] }
 
 # tokio runs mxv-services' listeners. Dynoxide's server is an axum server,
 # which needs tokio. `rt` gives the single-threaded runtime, `net` the TCP
